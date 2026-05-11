@@ -116,6 +116,7 @@ import telegramLogo from '@/assets/img/im/telegram.svg';
 import dingtalkLogo from '@/assets/img/im/dingtalk.svg';
 import mattermostLogo from '@/assets/img/im/mattermost.svg';
 import wechatLogo from '@/assets/img/im/wechat.svg';
+import wechatkfLogo from '@/assets/img/im/wechatkf.svg';
 
 const PLATFORM_LOGO: Record<string, string> = {
   wecom: wecomLogo,
@@ -125,6 +126,7 @@ const PLATFORM_LOGO: Record<string, string> = {
   dingtalk: dingtalkLogo,
   mattermost: mattermostLogo,
   wechat: wechatLogo,
+  wechatkf: wechatkfLogo,
 };
 
 const props = defineProps<{

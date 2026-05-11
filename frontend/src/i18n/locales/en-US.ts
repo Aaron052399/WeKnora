@@ -3878,6 +3878,8 @@ export default {
       mattermost: 'Mattermost',
       wecom: 'WeCom',
       wechat: 'WeChat',
+      wechatkf: 'WeChat CS',
+      wechatkfConsole: 'WeCom Admin Console',
       addChannel: 'Add Channel',
       editChannel: 'Edit Channel',
       deleteConfirm: 'Are you sure you want to delete this channel? This action cannot be undone.',

@@ -28,6 +28,7 @@ const (
 	ChannelDingtalk         = "dingtalk"          // DingTalk
 	ChannelSlack            = "slack"             // Slack
 	ChannelIM               = "im"                // Generic IM channel
+	ChannelWechatKF         = "wechatkf"          // WeChat Customer Service (微信客服)
 	ChannelNotion           = "notion"            // Notion
 	ChannelYuque            = "yuque"             // Yuque (语雀)
 )

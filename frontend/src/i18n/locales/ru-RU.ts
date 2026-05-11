@@ -3554,6 +3554,8 @@ export default {
       dingtalk: 'DingTalk',
       mattermost: 'Mattermost',
       wechat: 'WeChat',
+      wechatkf: 'WeChat КС',
+      wechatkfConsole: 'Консоль управления WeCom',
       addChannel: 'Добавить канал',
       editChannel: 'Редактировать канал',
       deleteConfirm: 'Вы уверены, что хотите удалить этот канал? Это действие не может быть отменено.',

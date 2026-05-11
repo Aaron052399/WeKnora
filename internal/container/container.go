@@ -67,6 +67,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/im/slack"
 	"github.com/Tencent/WeKnora/internal/im/telegram"
 	"github.com/Tencent/WeKnora/internal/im/wechat"
+	"github.com/Tencent/WeKnora/internal/im/wechatkf"
 	"github.com/Tencent/WeKnora/internal/im/wecom"
 	"github.com/Tencent/WeKnora/internal/infrastructure/docparser"
 	infra_web_search "github.com/Tencent/WeKnora/internal/infrastructure/web_search"
@@ -1265,6 +1266,7 @@ func registerIMAdapterFactories(imService *imPkg.Service) {
 	imService.RegisterAdapterFactory("dingtalk", dingtalk.NewFactory())
 	imService.RegisterAdapterFactory("mattermost", mattermost.NewFactory())
 	imService.RegisterAdapterFactory("wechat", wechat.NewFactory())
+	imService.RegisterAdapterFactory("wechatkf", wechatkf.NewFactory())
 
 	// Load and start all enabled channels from database
 	if err := imService.LoadAndStartChannels(); err != nil {

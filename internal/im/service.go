@@ -2698,6 +2698,8 @@ func imPlatformToChannel(platform string) string {
 		return types.ChannelWechat
 	case "wecom", "wxwork":
 		return types.ChannelWecom
+	case "wechatkf":
+		return types.ChannelWechatKF
 	case "feishu", "lark":
 		return types.ChannelFeishu
 	case "dingtalk":

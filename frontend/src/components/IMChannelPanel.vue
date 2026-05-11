@@ -118,6 +118,9 @@
             <t-option value="wechat" :label="$t('agentEditor.im.wechat')">
               <span class="platform-badge wechat" style="margin-right: 8px;">{{ $t('agentEditor.im.wechat') }}</span>
             </t-option>
+            <t-option value="wechatkf" :label="$t('agentEditor.im.wechatkf')">
+              <span class="platform-badge wechatkf" style="margin-right: 8px;">{{ $t('agentEditor.im.wechatkf') }}</span>
+            </t-option>
           </t-select>
         </div>
 
@@ -128,7 +131,7 @@
         </div>
 
         <!-- Mode (hidden for WeChat) -->
-        <div v-if="formData.platform !== 'wechat'" class="form-item">
+        <div v-if="formData.platform !== 'wechat' && formData.platform !== 'wechatkf'" class="form-item">
           <label class="form-label">{{ $t('agentEditor.im.mode') }}</label>
           <t-radio-group v-model="formData.mode">
             <t-radio-button value="websocket" :disabled="formData.platform === 'mattermost'">WebSocket</t-radio-button>
@@ -139,7 +142,7 @@
         </div>
 
         <!-- Output mode (hidden for WeChat) -->
-        <div v-if="formData.platform !== 'wechat'" class="form-item">
+        <div v-if="formData.platform !== 'wechat' && formData.platform !== 'wechatkf'" class="form-item">
           <label class="form-label">{{ $t('agentEditor.im.outputMode') }}</label>
           <t-radio-group v-model="formData.output_mode">
             <t-radio-button value="stream">{{ $t('agentEditor.im.outputStream') }}</t-radio-button>
@@ -414,6 +417,41 @@
             </div>
           </div>
         </template>
+        <!-- WeChat KF credentials -->
+        <template v-if="formData.platform === 'wechatkf'">
+          <div class="platform-link-hint">
+            <a href="https://work.weixin.qq.com/wework_admin/frame" target="_blank" rel="noopener noreferrer" class="doc-link">
+              {{ $t('agentEditor.im.wechatkfConsole') }}
+              <t-icon name="link" class="link-icon" />
+            </a>
+            <span class="hint-text">{{ $t('agentEditor.im.consoleTip') }}</span>
+          </div>
+          <div class="form-item">
+            <label class="form-label">Corp ID</label>
+            <t-input v-model="formData.credentials.corp_id" placeholder="Corp ID" />
+          </div>
+          <div class="form-item">
+            <label class="form-label">KF Secret</label>
+            <t-input v-model="formData.credentials.kf_secret" type="password" placeholder="Customer Service Secret" />
+          </div>
+          <div class="form-item">
+            <label class="form-label">Open KF ID</label>
+            <t-input v-model="formData.credentials.open_kfid" placeholder="open_kfid" />
+          </div>
+          <div class="form-item">
+            <label class="form-label">Token</label>
+            <t-input v-model="formData.credentials.token" placeholder="Callback Token" />
+          </div>
+          <div class="form-item">
+            <label class="form-label">EncodingAESKey</label>
+            <t-input v-model="formData.credentials.encoding_aes_key" placeholder="EncodingAESKey" />
+          </div>
+          <div class="form-item">
+            <label class="form-label">API Base URL</label>
+            <t-input v-model="formData.credentials.api_base_url" placeholder="https://qyapi.weixin.qq.com" />
+            <p class="form-hint">{{ $t('agentEditor.im.wecomAPIBaseURLHint') }}</p>
+          </div>
+        </template>
       </div>
     </t-drawer>
   </div>
@@ -506,6 +544,9 @@ function onPlatformChange(val: string | number | boolean) {
   // WeChat uses fixed mode/output
   if (val === 'wechat') {
     formData.value.mode = 'longpoll';
+    formData.value.output_mode = 'full';
+  } else if (val === 'wechatkf') {
+    formData.value.mode = 'webhook';
     formData.value.output_mode = 'full';
   } else {
     formData.value.mode = 'websocket';
@@ -877,6 +918,11 @@ onUnmounted(() => {
   }
 
   &.wechat {
+    background: rgba(7, 193, 96, 0.08);
+    color: #07c160;
+  }
+
+  &.wechatkf {
     background: rgba(7, 193, 96, 0.08);
     color: #07c160;
   }

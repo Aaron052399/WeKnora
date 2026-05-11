@@ -3803,6 +3803,8 @@ export default {
       dingtalk: "钉钉",
       mattermost: "Mattermost",
       wechat: "微信",
+      wechatkf: "微信客服",
+      wechatkfConsole: "企业微信管理后台",
       addChannel: "添加渠道",
       editChannel: "编辑渠道",
       deleteConfirm: "确定删除该渠道？删除后无法恢复。",

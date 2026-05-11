@@ -18,6 +18,7 @@ const (
 	PlatformDingtalk   Platform = "dingtalk"
 	PlatformMattermost Platform = "mattermost"
 	PlatformWeChat     Platform = "wechat"
+	PlatformWechatKF   Platform = "wechatkf"
 )
 
 // SessionMode determines how IM sessions are resolved.

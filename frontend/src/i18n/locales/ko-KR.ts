@@ -3874,6 +3874,8 @@ export default {
       dingtalk: "DingTalk",
       mattermost: "Mattermost",
       wechat: "WeChat",
+      wechatkf: "위챗 고객서비스",
+      wechatkfConsole: "기업 WeChat 관리 콘솔",
       addChannel: "채널 추가",
       editChannel: "채널 편집",
       deleteConfirm: "이 채널을 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.",

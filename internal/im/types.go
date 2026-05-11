@@ -40,7 +40,7 @@ func (ch *IMChannel) BeforeCreate(tx *gorm.DB) error {
 		ch.ID = uuid.New().String()
 	}
 	if ch.Mode == "" {
-		if ch.Platform == "mattermost" {
+		if ch.Platform == "mattermost" || ch.Platform == "wechatkf" {
 			ch.Mode = "webhook"
 		} else {
 			ch.Mode = "websocket"
@@ -139,6 +139,12 @@ func (ch *IMChannel) computeBotIdentity() string {
 	case "wechat":
 		if botID := str("ilink_bot_id"); botID != "" {
 			return "wechat:" + botID
+		}
+	case "wechatkf":
+		if openKFID := str("open_kfid"); openKFID != "" {
+			if corpID := str("corp_id"); corpID != "" {
+				return "wechatkf:" + corpID + ":" + openKFID
+			}
 		}
 	}
 	return ""
