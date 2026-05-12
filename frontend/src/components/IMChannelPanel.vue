@@ -431,12 +431,12 @@
             <t-input v-model="formData.credentials.corp_id" placeholder="Corp ID" />
           </div>
           <div class="form-item">
-            <label class="form-label">KF Secret</label>
+            <label class="form-label">CS Secret</label>
             <t-input v-model="formData.credentials.kf_secret" type="password" placeholder="Customer Service Secret" />
           </div>
           <div class="form-item">
-            <label class="form-label">Open KF ID</label>
-            <t-input v-model="formData.credentials.open_kfid" placeholder="open_kfid" />
+            <label class="form-label">CS Account ID</label>
+            <t-input v-model="formData.credentials.open_kfid" placeholder="Customer service account ID" />
           </div>
           <div class="form-item">
             <label class="form-label">Token</label>
