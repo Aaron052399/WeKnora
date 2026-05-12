@@ -30,6 +30,7 @@ import (
 	"sync"
 	"time"
 
+	agenttools "github.com/Tencent/WeKnora/internal/agent/tools"
 	"github.com/Tencent/WeKnora/internal/im"
 	"github.com/Tencent/WeKnora/internal/logger"
 	secutils "github.com/Tencent/WeKnora/internal/utils"
@@ -359,6 +360,8 @@ func (a *Adapter) SendReply(ctx context.Context, incoming *im.IncomingMessage, r
 	if incoming.UserID == "" {
 		return fmt.Errorf("touser (external_userid) is empty, cannot send reply (open_kfid=%s)", openKfId)
 	}
+
+	reply.Content = agenttools.StripThinkBlocks(reply.Content)
 
 	logger.Infof(ctx, "[WeChatKF] Sending reply: touser=%s open_kfid=%s content_len=%d",
 		incoming.UserID, openKfId, len(reply.Content))
