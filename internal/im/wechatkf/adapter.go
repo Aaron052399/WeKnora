@@ -44,7 +44,6 @@ const defaultAPIBaseURL = "https://qyapi.weixin.qq.com"
 type Adapter struct {
 	corpID           string
 	appSecret        string // 自建应用的 secret，用于获取 access_token
-	openKFID         string
 	token            string
 	encodingAESKey   string
 	aesKey           []byte
@@ -63,7 +62,7 @@ var (
 )
 
 // NewAdapter creates a new WeChat KF adapter.
-func NewAdapter(corpID, appSecret, openKFID, token, encodingAESKey, apiBaseURL string) (*Adapter, error) {
+func NewAdapter(corpID, appSecret, token, encodingAESKey, apiBaseURL string) (*Adapter, error) {
 	aesKey, err := base64.StdEncoding.DecodeString(encodingAESKey + "=")
 	if err != nil {
 		return nil, fmt.Errorf("decode encoding_aes_key: %w", err)
@@ -81,7 +80,6 @@ func NewAdapter(corpID, appSecret, openKFID, token, encodingAESKey, apiBaseURL s
 	return &Adapter{
 		corpID:           corpID,
 		appSecret:        appSecret,
-		openKFID:         openKFID,
 		token:            token,
 		encodingAESKey:   encodingAESKey,
 		aesKey:           aesKey,
@@ -262,6 +260,9 @@ func (a *Adapter) handleKfMsgOrEvent(ctx context.Context, event wechatKFMessage)
 
 	logger.Debugf(ctx, "[WeChatKF] sync_msg returned %d messages", len(result.MsgList))
 
+	// openKfId 从回调事件中获取，用于发送回复
+	openKfId := event.OpenKfId
+
 	// 遍历消息列表，找到最新的客户文本消息
 	for i := len(result.MsgList) - 1; i >= 0; i-- {
 		msg := result.MsgList[i]
@@ -281,6 +282,7 @@ func (a *Adapter) handleKfMsgOrEvent(ctx context.Context, event wechatKFMessage)
 				UserID:      msg.ExternalUserid,
 				Content:     strings.TrimSpace(msg.Content.Content),
 				MessageID:   msg.MsgID,
+				Extra:       map[string]string{"open_kfid": openKfId},
 			}, nil
 
 		case "image":
@@ -294,6 +296,7 @@ func (a *Adapter) handleKfMsgOrEvent(ctx context.Context, event wechatKFMessage)
 				MessageID:   msg.MsgID,
 				FileKey:     msg.Image.MediaID,
 				FileName:    msg.MsgID + ".png",
+				Extra:       map[string]string{"open_kfid": openKfId},
 			}, nil
 
 		case "file":
@@ -306,6 +309,7 @@ func (a *Adapter) handleKfMsgOrEvent(ctx context.Context, event wechatKFMessage)
 				UserID:      msg.ExternalUserid,
 				MessageID:   msg.MsgID,
 				FileKey:     msg.File.MediaID,
+				Extra:       map[string]string{"open_kfid": openKfId},
 			}, nil
 		}
 	}
@@ -321,9 +325,15 @@ func (a *Adapter) SendReply(ctx context.Context, incoming *im.IncomingMessage, r
 		return fmt.Errorf("get access token: %w", err)
 	}
 
+	// 从回调事件中获取 open_kfid，而不是使用配置中的值
+	openKfId := incoming.Extra["open_kfid"]
+	if openKfId == "" {
+		return fmt.Errorf("open_kfid not found in message, cannot send reply")
+	}
+
 	payload := map[string]interface{}{
 		"touser":    incoming.UserID,
-		"open_kfid": a.openKFID,
+		"open_kfid": openKfId,
 		"msgtype":   "text",
 		"text": map[string]string{
 			"content": reply.Content,
@@ -386,7 +396,7 @@ func (a *Adapter) DownloadFile(ctx context.Context, msg *im.IncomingMessage) (io
 	return downloadFromURL(ctx, apiURL, fileName, a.extraAllowedHost)
 }
 
-// getAccessToken retrieves the WeChat KF access token with caching.
+// getAccessToken retrieves the WeChat access token with caching.
 func (a *Adapter) getAccessToken(ctx context.Context) (string, error) {
 	a.tokenMu.Lock()
 	defer a.tokenMu.Unlock()
@@ -395,21 +405,11 @@ func (a *Adapter) getAccessToken(ctx context.Context) (string, error) {
 		return a.tokenCache, nil
 	}
 
-	payload := map[string]string{
-		"corpid": a.corpID,
-		"secret": a.appSecret,
-	}
-	payloadBytes, err := json.Marshal(payload)
-	if err != nil {
-		return "", fmt.Errorf("marshal token request: %w", err)
-	}
-
-	tokenURL := fmt.Sprintf("%s/cgi-bin/kf/token", a.apiBaseURL)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, bytes.NewReader(payloadBytes))
+	tokenURL := fmt.Sprintf("%s/cgi-bin/gettoken?corpid=%s&corpsecret=%s", a.apiBaseURL, a.corpID, a.appSecret)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, tokenURL, nil)
 	if err != nil {
 		return "", fmt.Errorf("create request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := httpClient.Do(req)
 	if err != nil {

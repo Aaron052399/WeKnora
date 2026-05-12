@@ -435,10 +435,6 @@
             <t-input v-model="formData.credentials.app_secret" type="password" placeholder="自建应用的 Secret" />
           </div>
           <div class="form-item">
-            <label class="form-label">Open KF ID</label>
-            <t-input v-model="formData.credentials.open_kfid" placeholder="客服账号 ID" />
-          </div>
-          <div class="form-item">
             <label class="form-label">Token</label>
             <t-input v-model="formData.credentials.token" placeholder="Callback Token" />
           </div>

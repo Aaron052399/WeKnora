@@ -19,7 +19,6 @@ func NewFactory() im.AdapterFactory {
 		adapter, err := NewAdapter(
 			im.GetString(creds, "corp_id"),
 			im.GetString(creds, "app_secret"),
-			im.GetString(creds, "open_kfid"),
 			im.GetString(creds, "token"),
 			im.GetString(creds, "encoding_aes_key"),
 			im.GetString(creds, "api_base_url"),
