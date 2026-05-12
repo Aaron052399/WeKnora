@@ -163,8 +163,15 @@ func (a *Adapter) ParseCallback(c *gin.Context) (*im.IncomingMessage, error) {
 		return nil, fmt.Errorf("unmarshal decrypted message: %w", err)
 	}
 
-	logger.Debugf(c.Request.Context(), "[WeChatKF] Parsed message: msgid=%s msgtype=%s from=%s content=%q",
-		msg.MsgID, msg.MsgType, msg.FromUserName, msg.Content)
+	logger.Infof(c.Request.Context(), "[WeChatKF] Parsed callback: msgid=%s msgtype=%s event=%s from=%s open_kfid=%s content=%q",
+		msg.MsgID, msg.MsgType, msg.Event, msg.FromUserName, msg.OpenKfId, msg.Content)
+
+	// open_kfid 从回调事件或 ToUserName 中获取，用于发送回复
+	openKfId := msg.OpenKfId
+	if openKfId == "" {
+		// 非 event 类型的回调中，ToUserName 就是 open_kfid
+		openKfId = msg.ToUserName
+	}
 
 	switch msg.MsgType {
 	case "text":
@@ -174,6 +181,7 @@ func (a *Adapter) ParseCallback(c *gin.Context) (*im.IncomingMessage, error) {
 			UserID:      msg.FromUserName,
 			Content:     strings.TrimSpace(msg.Content),
 			MessageID:   msg.MsgID,
+			Extra:       map[string]string{"open_kfid": openKfId},
 		}, nil
 
 	case "image":
@@ -191,6 +199,7 @@ func (a *Adapter) ParseCallback(c *gin.Context) (*im.IncomingMessage, error) {
 			MessageID:   msg.MsgID,
 			FileKey:     fileKey,
 			FileName:    msg.MsgID + ".png",
+			Extra:       map[string]string{"open_kfid": openKfId},
 		}, nil
 
 	case "file":
@@ -203,6 +212,7 @@ func (a *Adapter) ParseCallback(c *gin.Context) (*im.IncomingMessage, error) {
 			UserID:      msg.FromUserName,
 			MessageID:   msg.MsgID,
 			FileKey:     msg.MediaId,
+			Extra:       map[string]string{"open_kfid": openKfId},
 		}, nil
 
 	case "event":
@@ -220,6 +230,10 @@ func (a *Adapter) ParseCallback(c *gin.Context) (*im.IncomingMessage, error) {
 
 // handleKfMsgOrEvent 处理 kf_msg_or_event 事件，调用 sync_msg API 获取消息内容
 func (a *Adapter) handleKfMsgOrEvent(ctx context.Context, event wechatKFMessage) (*im.IncomingMessage, error) {
+	if event.Token == "" {
+		return nil, fmt.Errorf("callback event missing Token field")
+	}
+
 	accessToken, err := a.getAccessToken(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("get access token: %w", err)
@@ -258,7 +272,8 @@ func (a *Adapter) handleKfMsgOrEvent(ctx context.Context, event wechatKFMessage)
 		return nil, fmt.Errorf("sync_msg error: code=%d msg=%s", result.ErrCode, result.ErrMsg)
 	}
 
-	logger.Debugf(ctx, "[WeChatKF] sync_msg returned %d messages", len(result.MsgList))
+	logger.Infof(ctx, "[WeChatKF] sync_msg returned %d messages, has_more=%d, open_kfid=%s",
+		len(result.MsgList), result.HasMore, event.OpenKfId)
 
 	// openKfId 从回调事件中获取，用于发送回复
 	openKfId := event.OpenKfId
@@ -268,6 +283,14 @@ func (a *Adapter) handleKfMsgOrEvent(ctx context.Context, event wechatKFMessage)
 		msg := result.MsgList[i]
 		// origin=3 表示客户发送的消息
 		if msg.Origin != 3 {
+			continue
+		}
+
+		logger.Infof(ctx, "[WeChatKF] Found customer message: msgid=%s msgtype=%s userid=%s content_len=%d",
+			msg.MsgID, msg.MsgType, msg.ExternalUserid, len(msg.Content.Content))
+
+		if msg.ExternalUserid == "" {
+			logger.Warnf(ctx, "[WeChatKF] Customer message has empty external_userid, skipping: msgid=%s", msg.MsgID)
 			continue
 		}
 
@@ -326,10 +349,19 @@ func (a *Adapter) SendReply(ctx context.Context, incoming *im.IncomingMessage, r
 	}
 
 	// 从回调事件中获取 open_kfid，而不是使用配置中的值
-	openKfId := incoming.Extra["open_kfid"]
-	if openKfId == "" {
-		return fmt.Errorf("open_kfid not found in message, cannot send reply")
+	openKfId := ""
+	if incoming.Extra != nil {
+		openKfId = incoming.Extra["open_kfid"]
 	}
+	if openKfId == "" {
+		return fmt.Errorf("open_kfid not found in message Extra, cannot send reply (userid=%s)", incoming.UserID)
+	}
+	if incoming.UserID == "" {
+		return fmt.Errorf("touser (external_userid) is empty, cannot send reply (open_kfid=%s)", openKfId)
+	}
+
+	logger.Infof(ctx, "[WeChatKF] Sending reply: touser=%s open_kfid=%s content_len=%d",
+		incoming.UserID, openKfId, len(reply.Content))
 
 	payload := map[string]interface{}{
 		"touser":    incoming.UserID,
@@ -366,8 +398,12 @@ func (a *Adapter) SendReply(ctx context.Context, incoming *im.IncomingMessage, r
 		return fmt.Errorf("decode response: %w", err)
 	}
 	if result.ErrCode != 0 {
+		logger.Errorf(ctx, "[WeChatKF] send_msg failed: errcode=%d errmsg=%s touser=%s open_kfid=%s",
+			result.ErrCode, result.ErrMsg, incoming.UserID, openKfId)
 		return fmt.Errorf("wechatkf api error: code=%d msg=%s", result.ErrCode, result.ErrMsg)
 	}
+
+	logger.Infof(ctx, "[WeChatKF] Reply sent successfully: touser=%s open_kfid=%s", incoming.UserID, openKfId)
 	return nil
 }
 
