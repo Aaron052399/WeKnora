@@ -431,12 +431,12 @@
             <t-input v-model="formData.credentials.corp_id" placeholder="Corp ID" />
           </div>
           <div class="form-item">
-            <label class="form-label">CS Secret</label>
-            <t-input v-model="formData.credentials.kf_secret" type="password" placeholder="Customer Service Secret" />
+            <label class="form-label">App Secret</label>
+            <t-input v-model="formData.credentials.app_secret" type="password" placeholder="自建应用的 Secret" />
           </div>
           <div class="form-item">
-            <label class="form-label">CS Account ID</label>
-            <t-input v-model="formData.credentials.open_kfid" placeholder="Customer service account ID" />
+            <label class="form-label">Open KF ID</label>
+            <t-input v-model="formData.credentials.open_kfid" placeholder="客服账号 ID" />
           </div>
           <div class="form-item">
             <label class="form-label">Token</label>

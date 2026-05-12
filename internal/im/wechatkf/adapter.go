@@ -43,7 +43,7 @@ const defaultAPIBaseURL = "https://qyapi.weixin.qq.com"
 // Adapter implements im.Adapter for WeChat Customer Service in webhook mode.
 type Adapter struct {
 	corpID           string
-	kfSecret         string
+	appSecret        string // 自建应用的 secret，用于获取 access_token
 	openKFID         string
 	token            string
 	encodingAESKey   string
@@ -63,7 +63,7 @@ var (
 )
 
 // NewAdapter creates a new WeChat KF adapter.
-func NewAdapter(corpID, kfSecret, openKFID, token, encodingAESKey, apiBaseURL string) (*Adapter, error) {
+func NewAdapter(corpID, appSecret, openKFID, token, encodingAESKey, apiBaseURL string) (*Adapter, error) {
 	aesKey, err := base64.StdEncoding.DecodeString(encodingAESKey + "=")
 	if err != nil {
 		return nil, fmt.Errorf("decode encoding_aes_key: %w", err)
@@ -80,7 +80,7 @@ func NewAdapter(corpID, kfSecret, openKFID, token, encodingAESKey, apiBaseURL st
 
 	return &Adapter{
 		corpID:           corpID,
-		kfSecret:         kfSecret,
+		appSecret:        appSecret,
 		openKFID:         openKFID,
 		token:            token,
 		encodingAESKey:   encodingAESKey,
@@ -207,10 +207,111 @@ func (a *Adapter) ParseCallback(c *gin.Context) (*im.IncomingMessage, error) {
 			FileKey:     msg.MediaId,
 		}, nil
 
+	case "event":
+		if msg.Event == "kf_msg_or_event" {
+			return a.handleKfMsgOrEvent(c.Request.Context(), msg)
+		}
+		logger.Infof(c.Request.Context(), "[WeChatKF] Ignoring unsupported event: %s", msg.Event)
+		return nil, nil
+
 	default:
 		logger.Infof(c.Request.Context(), "[WeChatKF] Ignoring unsupported message type: %s", msg.MsgType)
 		return nil, nil
 	}
+}
+
+// handleKfMsgOrEvent 处理 kf_msg_or_event 事件，调用 sync_msg API 获取消息内容
+func (a *Adapter) handleKfMsgOrEvent(ctx context.Context, event wechatKFMessage) (*im.IncomingMessage, error) {
+	accessToken, err := a.getAccessToken(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("get access token: %w", err)
+	}
+
+	// 构造 sync_msg 请求
+	payload := map[string]interface{}{
+		"token":     event.Token,
+		"open_kfid": event.OpenKfId,
+		"limit":     1000,
+	}
+
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("marshal sync_msg payload: %w", err)
+	}
+
+	syncURL := fmt.Sprintf("%s/cgi-bin/kf/sync_msg?access_token=%s", a.apiBaseURL, accessToken)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, syncURL, bytes.NewReader(payloadBytes))
+	if err != nil {
+		return nil, fmt.Errorf("create sync_msg request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("call sync_msg: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var result syncMsgResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode sync_msg response: %w", err)
+	}
+	if result.ErrCode != 0 {
+		return nil, fmt.Errorf("sync_msg error: code=%d msg=%s", result.ErrCode, result.ErrMsg)
+	}
+
+	logger.Debugf(ctx, "[WeChatKF] sync_msg returned %d messages", len(result.MsgList))
+
+	// 遍历消息列表，找到最新的客户文本消息
+	for i := len(result.MsgList) - 1; i >= 0; i-- {
+		msg := result.MsgList[i]
+		// origin=3 表示客户发送的消息
+		if msg.Origin != 3 {
+			continue
+		}
+
+		switch msg.MsgType {
+		case "text":
+			if msg.Content.Content == "" {
+				continue
+			}
+			return &im.IncomingMessage{
+				Platform:    im.PlatformWechatKF,
+				MessageType: im.MessageTypeText,
+				UserID:      msg.ExternalUserid,
+				Content:     strings.TrimSpace(msg.Content.Content),
+				MessageID:   msg.MsgID,
+			}, nil
+
+		case "image":
+			if msg.Image.MediaID == "" {
+				continue
+			}
+			return &im.IncomingMessage{
+				Platform:    im.PlatformWechatKF,
+				MessageType: im.MessageTypeImage,
+				UserID:      msg.ExternalUserid,
+				MessageID:   msg.MsgID,
+				FileKey:     msg.Image.MediaID,
+				FileName:    msg.MsgID + ".png",
+			}, nil
+
+		case "file":
+			if msg.File.MediaID == "" {
+				continue
+			}
+			return &im.IncomingMessage{
+				Platform:    im.PlatformWechatKF,
+				MessageType: im.MessageTypeFile,
+				UserID:      msg.ExternalUserid,
+				MessageID:   msg.MsgID,
+				FileKey:     msg.File.MediaID,
+			}, nil
+		}
+	}
+
+	logger.Infof(ctx, "[WeChatKF] No new customer messages found in sync_msg response")
+	return nil, nil
 }
 
 // SendReply sends a reply via the WeChat KF send_msg API.
@@ -296,7 +397,7 @@ func (a *Adapter) getAccessToken(ctx context.Context) (string, error) {
 
 	payload := map[string]string{
 		"corpid": a.corpID,
-		"secret": a.kfSecret,
+		"secret": a.appSecret,
 	}
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
@@ -353,6 +454,7 @@ func (a *Adapter) verifySignature(signature, timestamp, nonce, encrypt string) b
 }
 
 // decrypt decrypts an AES-encrypted message (same algorithm as WeCom).
+// WeCom uses AES-256-CBC with PKCS#7 padding (block size 32).
 func (a *Adapter) decrypt(encrypted string) ([]byte, error) {
 	ciphertext, err := base64.StdEncoding.DecodeString(encrypted)
 	if err != nil {
@@ -372,13 +474,15 @@ func (a *Adapter) decrypt(encrypted string) ([]byte, error) {
 	mode := cipher.NewCBCDecrypter(block, iv)
 	mode.CryptBlocks(ciphertext, ciphertext)
 
+	// WeCom uses PKCS#7 padding with block size 32 (not standard AES block size 16)
+	const wecomPKCS7BlockSize = 32
 	padLen := int(ciphertext[len(ciphertext)-1])
-	if padLen > aes.BlockSize || padLen == 0 || padLen > len(ciphertext) {
-		return nil, fmt.Errorf("invalid padding")
+	if padLen > wecomPKCS7BlockSize || padLen == 0 || padLen > len(ciphertext) {
+		return nil, fmt.Errorf("invalid padding: padLen=%d", padLen)
 	}
 	for i := 0; i < padLen; i++ {
 		if ciphertext[len(ciphertext)-1-i] != byte(padLen) {
-			return nil, fmt.Errorf("invalid padding")
+			return nil, fmt.Errorf("invalid padding byte at position %d", len(ciphertext)-1-i)
 		}
 	}
 	plaintext := ciphertext[:len(ciphertext)-padLen]
@@ -419,6 +523,34 @@ type wechatKFMessage struct {
 	PicUrl       string   `xml:"PicUrl"`
 	MediaId      string   `xml:"MediaId"`
 	MsgID        string   `xml:"MsgId"`
+	Event        string   `xml:"Event"`       // 事件类型，如 kf_msg_or_event
+	Token        string   `xml:"Token"`       // 回调事件中的 token，用于 sync_msg
+	OpenKfId     string   `xml:"OpenKfId"`    // 客服账号 ID
+}
+
+// syncMsgResponse 是 sync_msg API 的响应结构
+type syncMsgResponse struct {
+	ErrCode    int    `json:"errcode"`
+	ErrMsg     string `json:"errmsg"`
+	NextCursor string `json:"next_cursor"`
+	HasMore    int    `json:"has_more"`
+	MsgList    []struct {
+		MsgID          string `json:"msgid"`
+		OpenKfID       string `json:"open_kfid"`
+		ExternalUserid string `json:"external_userid"`
+		SendTime       int64  `json:"send_time"`
+		Origin         int    `json:"origin"` // 3=客户，4=系统事件，5=接待人员
+		MsgType        string `json:"msgtype"`
+		Content        struct {
+			Content string `json:"content"`
+		} `json:"text,omitempty"`
+		Image struct {
+			MediaID string `json:"media_id"`
+		} `json:"image,omitempty"`
+		File struct {
+			MediaID string `json:"media_id"`
+		} `json:"file,omitempty"`
+	} `json:"msg_list"`
 }
 
 // ──────────────────────────────────────────────────────────────────────
