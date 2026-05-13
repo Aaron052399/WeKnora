@@ -81,7 +81,7 @@ func (l *langfuseChat) ChatStream(ctx context.Context, messages []Message, opts 
 		return nil, nil
 	}
 
-	wrapped := make(chan types.StreamResponse)
+	wrapped := make(chan types.StreamResponse, 64)
 	go func() {
 		defer close(wrapped)
 		var contentBuf []byte
@@ -107,7 +107,11 @@ func (l *langfuseChat) ChatStream(ctx context.Context, messages []Message, opts 
 			if resp.FinishReason != "" {
 				finishReason = resp.FinishReason
 			}
-			wrapped <- resp
+			select {
+			case wrapped <- resp:
+			default:
+				// channel 满了，跳过但不影响 Finish
+			}
 		}
 
 		output := map[string]interface{}{

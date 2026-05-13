@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -342,6 +343,40 @@ func (a *Adapter) handleKfMsgOrEvent(ctx context.Context, event wechatKFMessage)
 	return nil, nil
 }
 
+// stripMarkdown 将 Markdown 格式文本转换为纯文本（微信客服不支持 Markdown）
+func stripMarkdown(text string) string {
+	if text == "" {
+		return text
+	}
+	// 移除代码块 ```code```
+	text = regexp.MustCompile("(?s)```.*?```").ReplaceAllString(text, "$1")
+	// 移除标题标记 ### ##
+	text = regexp.MustCompile(`#{1,6}\s+`).ReplaceAllString(text, "")
+	// 移除加粗 **text** 或 __text__
+	text = regexp.MustCompile(`\*\*(.+?)\*\*`).ReplaceAllString(text, "$1")
+	text = regexp.MustCompile(`__(.+?)__`).ReplaceAllString(text, "$1")
+	// 移除斜体 *text* 或 _text_
+	text = regexp.MustCompile(`\*(.+?)\*`).ReplaceAllString(text, "$1")
+	text = regexp.MustCompile(`_(.+?)_`).ReplaceAllString(text, "$1")
+	// 移除删除线 ~~text~~
+	text = regexp.MustCompile(`~~(.+?)~~`).ReplaceAllString(text, "$1")
+	// 移除行内代码 `code`
+	text = regexp.MustCompile("`(.+?)`").ReplaceAllString(text, "$1")
+	// 移除链接 [text](url) → text
+	text = regexp.MustCompile(`\[(.+?)\]\(.+?\)`).ReplaceAllString(text, "$1")
+	// 移除图片 ![alt](url)
+	text = regexp.MustCompile(`!\[.*?\]\(.+?\)`).ReplaceAllString(text, "")
+	// 移除引用 >
+	text = regexp.MustCompile(`(?m)^>\s+`).ReplaceAllString(text, "")
+	// 移除分割线 --- 或 ***
+	text = regexp.MustCompile(`(?m)^[-*_]{3,}$`).ReplaceAllString(text, "")
+	// 移除列表标记 - 或 * 开头
+	text = regexp.MustCompile(`(?m)^[\s]*[-*]\s+`).ReplaceAllString(text, "")
+	// 移除有序列表标记 1. 2. 等
+	text = regexp.MustCompile(`(?m)^[\s]*\d+\.\s+`).ReplaceAllString(text, "")
+	return strings.TrimSpace(text)
+}
+
 // SendReply sends a reply via the WeChat KF send_msg API.
 func (a *Adapter) SendReply(ctx context.Context, incoming *im.IncomingMessage, reply *im.ReplyMessage) error {
 	accessToken, err := a.getAccessToken(ctx)
@@ -362,6 +397,8 @@ func (a *Adapter) SendReply(ctx context.Context, incoming *im.IncomingMessage, r
 	}
 
 	reply.Content = agenttools.StripThinkBlocks(reply.Content)
+	// 微信客服不支持 Markdown 格式，转换为纯文本
+	reply.Content = stripMarkdown(reply.Content)
 
 	logger.Infof(ctx, "[WeChatKF] Sending reply: touser=%s open_kfid=%s content_len=%d",
 		incoming.UserID, openKfId, len(reply.Content))

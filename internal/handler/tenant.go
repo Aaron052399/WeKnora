@@ -1005,10 +1005,14 @@ func (h *TenantHandler) GetTenantConversationConfig(c *gin.Context) {
 		return
 	}
 
-	// If tenant has no conversation config, return defaults from config.yaml
+	// 优先使用租户自定义配置，没有则用默认值
 	var response *types.ConversationConfig
-	logger.Info(ctx, "Tenant has no conversation config, returning defaults")
-	response = h.buildDefaultConversationConfig()
+	if tenant.ConversationConfig != nil && tenant.ConversationConfig.Prompt != "" {
+		response = tenant.ConversationConfig
+	} else {
+		logger.Info(ctx, "Tenant has no conversation config, returning defaults")
+		response = h.buildDefaultConversationConfig()
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"data":    response,
