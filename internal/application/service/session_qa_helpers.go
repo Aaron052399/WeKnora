@@ -164,6 +164,11 @@ func (s *sessionService) applyAgentOverridesToChatManage(
 	if customAgent.Config.RewritePromptUser != "" {
 		cm.RewritePromptUser = customAgent.Config.RewritePromptUser
 	}
+	if customAgent.Config.QueryUnderstandModelID != "" {
+		cm.QueryUnderstandModelID = customAgent.Config.QueryUnderstandModelID
+		logger.Infof(ctx, "Using custom agent's query_understand_model_id: %s",
+			customAgent.Config.QueryUnderstandModelID)
+	}
 
 	// Override fallback settings
 	if customAgent.Config.FallbackStrategy != "" {
@@ -198,6 +203,12 @@ func (s *sessionService) applyAgentOverridesToChatManage(
 	if cm.FAQPriorityEnabled {
 		logger.Infof(ctx, "FAQ priority enabled: threshold=%.2f, boost=%.2f",
 			cm.FAQDirectAnswerThreshold, cm.FAQScoreBoost)
+	}
+
+	// Data-analysis pipeline stage (opt-in, default off).
+	cm.DataAnalysisEnabled = customAgent.Config.DataAnalysisEnabled
+	if cm.DataAnalysisEnabled {
+		logger.Infof(ctx, "Data analysis pipeline stage enabled by custom agent")
 	}
 }
 

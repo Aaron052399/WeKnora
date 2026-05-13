@@ -72,20 +72,7 @@ var envelopeCases = []envelopeCase{
 		args: []string{"version", "--json"},
 	},
 
-	// 2-3. whoami — single SDK call to /api/v1/auth/me.
-	{
-		name:   "whoami.success",
-		args:   []string{"whoami", "--json"},
-		server: whoamiOK,
-	},
-	{
-		name:    "whoami.error_auth_unauthenticated",
-		args:    []string{"whoami", "--json"},
-		server:  always401,
-		wantErr: true,
-	},
-
-	// 4. doctor.success_offline — only credential_storage runs; the three
+	// 2. doctor.success_offline — only credential_storage runs; the three
 	//    network checks are skipped. Stable details + summary.
 	{
 		name:   "doctor.success_offline",
@@ -93,17 +80,19 @@ var envelopeCases = []envelopeCase{
 		server: doctorReachable, // ensures buildServices succeeds even if probed
 	},
 
-	// 5. doctor.error_network — base_url returns 500 → ping fail → cascade
+	// 3. doctor.error_network — base_url returns 500 → ping fail → cascade
 	//    skip on auth_credential + server_version. credential_storage still
-	//    runs (independent). Doctor's RunE always returns nil; envelope.ok=true
-	//    with summary.failed >= 1.
+	//    runs (independent). v0.2 contract: any check=fail flips envelope.ok
+	//    to false and exits 1 (RunE returns SilentError so the data envelope
+	//    written by emit() is preserved as the only stdout content).
 	{
-		name:   "doctor.error_network",
-		args:   []string{"doctor", "--json"},
-		server: alwaysServerError,
+		name:    "doctor.error_network",
+		args:    []string{"doctor", "--json"},
+		server:  alwaysServerError,
+		wantErr: true,
 	},
 
-	// 6-9. kb list / get — SDK paths /api/v1/knowledge-bases[/<id>]
+	// 4-7. kb list / get — SDK paths /api/v1/knowledge-bases[/<id>]
 	{
 		name:   "kb_list.success",
 		args:   []string{"kb", "list", "--json"},
@@ -121,18 +110,18 @@ var envelopeCases = []envelopeCase{
 		wantErr: true,
 	},
 	{
-		name:   "kb_get.success",
-		args:   []string{"kb", "get", "kb1", "--json"},
+		name:   "kb_view.success",
+		args:   []string{"kb", "view", "kb1", "--json"},
 		server: kbGetOne,
 	},
 	{
-		name:    "kb_get.error_resource_not_found",
-		args:    []string{"kb", "get", "missing", "--json"},
+		name:    "kb_view.error_resource_not_found",
+		args:    []string{"kb", "view", "missing", "--json"},
 		server:  always404,
 		wantErr: true,
 	},
 
-	// 10-11. context use — pure local I/O against config.yaml.
+	// 8. context use — pure local I/O against config.yaml.
 	{
 		name: "context_use.success",
 		args: []string{"context", "use", "production"},
@@ -151,7 +140,7 @@ var envelopeCases = []envelopeCase{
 	},
 	// (context_use.error_local_context_not_found dropped — see file header.)
 
-	// 11-12. auth status — SDK /api/v1/auth/me, plus config inspection.
+	// 9-10. auth status — SDK /api/v1/auth/me, plus config inspection.
 	{
 		name:   "auth_status.success",
 		args:   []string{"auth", "status", "--json"},
@@ -164,24 +153,27 @@ var envelopeCases = []envelopeCase{
 		wantErr: true,
 	},
 
-	// 14-16. search — top-level command, positional query, --kb required.
+	// 11-13. search — top-level command, positional query, --kb required.
+	// --kb accepts either kb_<id> (passed through) or a name (resolved via
+	// list); UUID-format detection happens client-side, mirroring gcloud
+	// --project's id-or-name auto-detection.
 	{
 		name:   "search.success",
-		args:   []string{"search", "query", "--kb=kb1", "--top-k=3", "--json"},
+		args:   []string{"search", "query", "--kb=11111111-1111-4111-8111-111111111111", "--top-k=3", "--json"},
 		server: searchTwoResults,
 	},
 	{
 		name:    "search.error_resource_not_found",
-		args:    []string{"search", "query", "--kb=missing", "--json"},
+		args:    []string{"search", "query", "--kb=eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", "--json"},
 		server:  always404,
 		wantErr: true,
 	},
 	{
-		// Mutex flag violation. Validation runs before f.Client(), so the
-		// server mock is never consumed; we still pass --kb to satisfy the
-		// MarkFlagRequired check that fires earlier in cobra's parse phase.
+		// --no-vector + --no-keyword is the input.invalid case; the KB UUID
+		// is just there to satisfy MarkFlagRequired so validation runs deep
+		// enough to hit the mutex-channel check.
 		name:    "search.error_input_invalid",
-		args:    []string{"search", "query", "--kb=kb1", "--no-vector", "--no-keyword", "--json"},
+		args:    []string{"search", "query", "--kb=11111111-1111-4111-8111-111111111111", "--no-vector", "--no-keyword", "--json"},
 		wantErr: true,
 	},
 }
@@ -191,7 +183,6 @@ var envelopeCases = []envelopeCase{
 // is contractually forbidden — see helpers_test.go SetForTest comment).
 func TestEnvelopeGolden(t *testing.T) {
 	for _, tc := range envelopeCases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			var ts *httptest.Server
 			var mockClient *sdk.Client
@@ -340,7 +331,7 @@ func kbGetOne(w http.ResponseWriter, r *http.Request) {
 }
 
 func searchTwoResults(w http.ResponseWriter, r *http.Request) {
-	if !strings.Contains(r.URL.Path, "/knowledge-bases/kb1/hybrid-search") {
+	if !strings.Contains(r.URL.Path, "/knowledge-bases/11111111-1111-4111-8111-111111111111/hybrid-search") {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}

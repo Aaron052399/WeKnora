@@ -29,8 +29,14 @@ const (
 	CodeResourceLocked        ErrorCode = "resource.locked"
 
 	// input.* — flag and argument validation
-	CodeInputInvalidArgument ErrorCode = "input.invalid_argument"
-	CodeInputMissingFlag     ErrorCode = "input.missing_flag"
+	CodeInputInvalidArgument     ErrorCode = "input.invalid_argument"
+	CodeInputMissingFlag         ErrorCode = "input.missing_flag"
+	// CodeInputConfirmationRequired marks a high-risk write that has no
+	// interactive UI (non-TTY or --json) and was invoked without -y/--yes.
+	// Mapped to exit code 10 (lark-cli skill protocol — see cli/AGENTS.md).
+	// Agents must surface the envelope to the user and only retry with -y
+	// after explicit human approval; never auto-retry.
+	CodeInputConfirmationRequired ErrorCode = "input.confirmation_required"
 
 	// server.* / network.*
 	CodeServerError               ErrorCode = "server.error"
@@ -38,6 +44,10 @@ const (
 	CodeServerRateLimited         ErrorCode = "server.rate_limited"
 	CodeServerIncompatibleVersion ErrorCode = "server.incompatible_version"
 	CodeNetworkError              ErrorCode = "network.error"
+	// CodeSessionCreateFailed marks a chat invocation where the auto-created
+	// session POST failed. Surfaced as a typed code distinct from generic
+	// server.error so agents can retry with their own --session-id.
+	CodeSessionCreateFailed ErrorCode = "server.session_create_failed"
 
 	// local.* — config / file / keychain on the user's machine
 	CodeLocalConfigCorrupt   ErrorCode = "local.config_corrupt"
@@ -45,6 +55,24 @@ const (
 	CodeLocalFileIO          ErrorCode = "local.file_io"
 	CodeLocalUnimplemented   ErrorCode = "local.unimplemented"
 	CodeLocalContextNotFound ErrorCode = "local.context_not_found"
+	// v0.2 KB-resolution chain (spec §1.3) and project-link (spec §2.4) codes.
+	CodeKBIDRequired       ErrorCode = "local.kb_id_required"
+	CodeKBNotFound         ErrorCode = "local.kb_not_found"
+	CodeProjectLinkCorrupt ErrorCode = "local.project_link_corrupt"
+	// CodeUserAborted marks a user-cancelled destructive operation (declined a
+	// confirm prompt). Distinct from SilentError so envelopes still carry a
+	// stable code; distinct from input.* because the user supplied valid args
+	// and simply chose not to proceed.
+	CodeUserAborted ErrorCode = "local.user_aborted"
+	// CodeUploadFileNotFound marks a `weknora doc upload` invocation pointing at
+	// a path that does not exist. Distinct from CodeLocalFileIO (permission /
+	// disk-fault) so the hint can name the actual culprit.
+	CodeUploadFileNotFound ErrorCode = "local.upload_file_not_found"
+	// CodeSSEStreamAborted marks a streaming RAG response that began producing
+	// data and then dropped before the SDK observed a Done event. Distinct
+	// from network.error (pre-stream transport failure) so users see the
+	// stream specifically aborted, not a connection that never opened.
+	CodeSSEStreamAborted ErrorCode = "local.sse_stream_aborted"
 
 	// mcp.*
 	CodeMCPReadonlyMode   ErrorCode = "mcp.readonly_mode"
@@ -61,6 +89,19 @@ type Error struct {
 	Cause      error
 	Retryable  bool
 	HTTPStatus int
+	// Risk classifies the operation that produced this error. Set by callers
+	// invoking destructive write paths so envelope.risk surfaces to agents.
+	// Stored as the format.Risk JSON shape via OperationRisk to avoid an
+	// import cycle with internal/format.
+	OperationRisk *OperationRisk
+}
+
+// OperationRisk mirrors format.Risk in the cmdutil layer (avoiding a circular
+// import). cmdutil → format is OK; the inverse is not, so cmdutil owns its
+// own type and ToErrorBody / PrintErrorEnvelope translate.
+type OperationRisk struct {
+	Level  string // "read" | "write" | "high-risk-write"
+	Action string
 }
 
 func (e *Error) Error() string {
@@ -141,6 +182,30 @@ func matchPrefix(err error, prefix string) bool {
 	return strings.HasPrefix(string(e.Code), prefix)
 }
 
+// ClassifyHTTPStatus maps an HTTP status code to the canonical ErrorCode.
+// Single source of truth so envelope codes stay aligned whether the failure
+// was detected by the SDK (string-formatted error) or by the CLI directly
+// (e.g. raw passthrough reading resp.StatusCode).
+func ClassifyHTTPStatus(status int) ErrorCode {
+	switch {
+	case status == 401:
+		return CodeAuthUnauthenticated
+	case status == 403:
+		return CodeAuthForbidden
+	case status == 404:
+		return CodeResourceNotFound
+	case status == 409:
+		return CodeResourceAlreadyExists
+	case status == 429:
+		return CodeServerRateLimited
+	case status >= 500:
+		return CodeServerError
+	case status >= 400:
+		return CodeInputInvalidArgument
+	}
+	return CodeServerError
+}
+
 // ClassifyHTTPError maps an SDK HTTP error to the canonical ErrorCode by
 // parsing the "HTTP error <status>: ..." message format the SDK currently
 // emits (client.parseResponse). Until the SDK exposes a typed APIError this
@@ -167,23 +232,7 @@ func ClassifyHTTPError(err error) ErrorCode {
 	if perr != nil {
 		return CodeServerError
 	}
-	switch {
-	case status == 401:
-		return CodeAuthUnauthenticated
-	case status == 403:
-		return CodeAuthForbidden
-	case status == 404:
-		return CodeResourceNotFound
-	case status == 409:
-		return CodeResourceAlreadyExists
-	case status == 429:
-		return CodeServerRateLimited
-	case status >= 500:
-		return CodeServerError
-	case status >= 400:
-		return CodeInputInvalidArgument
-	}
-	return CodeServerError
+	return ClassifyHTTPStatus(status)
 }
 
 // AllCodes returns the registered error code set.
@@ -198,13 +247,17 @@ func AllCodes() []ErrorCode {
 		// resource
 		CodeResourceNotFound, CodeResourceAlreadyExists, CodeResourceLocked,
 		// input
-		CodeInputInvalidArgument, CodeInputMissingFlag,
+		CodeInputInvalidArgument, CodeInputMissingFlag, CodeInputConfirmationRequired,
 		// server / network
 		CodeServerError, CodeServerTimeout, CodeServerRateLimited,
 		CodeServerIncompatibleVersion, CodeNetworkError,
 		// local
 		CodeLocalConfigCorrupt, CodeLocalKeychainDenied, CodeLocalFileIO,
 		CodeLocalUnimplemented, CodeLocalContextNotFound,
+		CodeKBIDRequired, CodeKBNotFound,
+		CodeProjectLinkCorrupt,
+		CodeUserAborted, CodeUploadFileNotFound,
+		CodeSSEStreamAborted, CodeSessionCreateFailed,
 		// mcp
 		CodeMCPReadonlyMode, CodeMCPToolNotAllowed, CodeMCPSchemaUnknown,
 	}

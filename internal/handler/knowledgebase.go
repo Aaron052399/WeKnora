@@ -357,21 +357,24 @@ func (h *KnowledgeBaseHandler) ListKnowledgeBases(c *gin.Context) {
 
 		// `all` mode: authoritative server-side capability filter so a client
 		// that bypassed the frontend (old tab, curl, rogue plugin) can't @ a
-		// KB whose capabilities don't match any allowed tool of this agent.
+		// KB whose capabilities don't match this agent. The filter combines
+		// tool-derived requirements (smart-reasoning) with the implicit
+		// RAG-only requirement of quick-answer mode (which has no
+		// `allowed_tools` but still needs vector/keyword chunks to work).
 		// Non-`all` modes already constrain the scope explicitly.
-		if mode == "all" && len(agent.Config.AllowedTools) > 0 {
-			filter := tools.DeriveKBFilterFromTools(agent.Config.AllowedTools)
+		if mode == "all" {
+			filter := tools.DeriveKBFilterForAgent(agent.Config.AgentMode, agent.Config.AllowedTools)
 			if !filter.IsEmpty() {
 				before := len(kbs)
 				kept := make([]*types.KnowledgeBase, 0, before)
 				for _, kb := range kbs {
-					if tools.KBSatisfiesToolRequirements(kb.Capabilities(), agent.Config.AllowedTools) {
+					if tools.KBSatisfiesAgentRequirements(kb.Capabilities(), agent.Config.AgentMode, agent.Config.AllowedTools) {
 						kept = append(kept, kb)
 					}
 				}
 				if removed := before - len(kept); removed > 0 {
 					logger.Infof(ctx,
-						"ListKnowledgeBases(agent=%s, mode=all): tool-capability filter removed %d of %d KBs",
+						"ListKnowledgeBases(agent=%s, mode=all): capability filter removed %d of %d KBs",
 						agentID, removed, before)
 				}
 				kbs = kept
@@ -814,6 +817,19 @@ func validateExtractConfig(config *types.ExtractConfig) error {
 
 // ListMoveTargets returns knowledge bases eligible as move targets for the given source KB.
 // Filters: same Type, same EmbeddingModelID, different ID, not temporary.
+//
+// ListMoveTargets godoc
+// @Summary      获取可移动目标知识库列表
+// @Description  返回与源知识库 Type 一致、EmbeddingModelID 一致、非临时且不是自身的目标知识库列表
+// @Tags         知识库
+// @Produce      json
+// @Param        id   path      string                  true  "源知识库 ID"
+// @Success      200  {object}  map[string]interface{}  "可移动目标列表"
+// @Failure      400  {object}  errors.AppError         "请求参数错误"
+// @Failure      404  {object}  errors.AppError         "知识库不存在"
+// @Security     Bearer
+// @Security     ApiKeyAuth
+// @Router       /knowledge-bases/{id}/move-targets [get]
 func (h *KnowledgeBaseHandler) ListMoveTargets(c *gin.Context) {
 	ctx := c.Request.Context()
 

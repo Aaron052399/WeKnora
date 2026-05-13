@@ -3,22 +3,28 @@ package cmdutil
 import (
 	"errors"
 	"fmt"
+	"os"
 	"sync"
+
+	"github.com/spf13/cobra"
 
 	"github.com/Tencent/WeKnora/cli/internal/config"
 	"github.com/Tencent/WeKnora/cli/internal/iostreams"
+	"github.com/Tencent/WeKnora/cli/internal/projectlink"
 	"github.com/Tencent/WeKnora/cli/internal/prompt"
 	"github.com/Tencent/WeKnora/cli/internal/secrets"
 	sdk "github.com/Tencent/WeKnora/client"
 )
 
 // Factory is the dependency container injected at command construction. Each
-// closure is lazy: --help / completion / `weknora schema` must NOT trigger
+// closure is lazy: --help / completion / `weknora version` must NOT trigger
 // HTTP, keyring access, or filesystem I/O beyond the bare minimum.
 //
 // Four closures (ADR-4):
 //   - Config:   parses ~/.config/weknora/config.yaml (no network)
-//   - Client:   constructs the SDK client (network: server compat probe + cached)
+//   - Client:   constructs the SDK client; only Secrets is sync.Once-cached,
+//               so callers should hold the returned *sdk.Client across
+//               multiple SDK calls within one invocation
 //   - Prompter: returns interactive prompter; agent mode returns AgentPrompter
 //   - Secrets:  builds the OS keyring / file fallback credential store the
 //     first time it is requested (probing the keyring at startup
@@ -140,6 +146,43 @@ func buildClient(f *Factory) (*sdk.Client, error) {
 	// flag (`--tenant=N` is the planned v0.1 entry point) before sending it.
 	// `tenant_id` stays in config for `auth status` display only.
 	return sdk.NewClient(ctx.Host, opts...), nil
+}
+
+// ResolveKB returns the active KB id for the running command, applying the
+// 4-level fallback chain (highest to lowest):
+//  1. --kb flag (kb_<...> id passed through; anything else resolved via
+//     ListKnowledgeBases as a name → id lookup; mirrors gcloud --project's
+//     id-or-name auto-detection)
+//  2. WEKNORA_KB_ID env (always an explicit id)
+//  3. .weknora/project.yaml (walk-up from cwd)
+//  4. error: kb required
+func (f *Factory) ResolveKB(cmd *cobra.Command) (string, error) {
+	if v, _ := cmd.Flags().GetString("kb"); v != "" {
+		if IsKBID(v) {
+			return v, nil
+		}
+		c, err := f.Client()
+		if err != nil {
+			return "", err
+		}
+		return ResolveKBNameToID(cmd.Context(), c, v)
+	}
+	if v := os.Getenv("WEKNORA_KB_ID"); v != "" {
+		return v, nil
+	}
+	cwd, err := os.Getwd()
+	if err == nil {
+		if path, found, derr := projectlink.Discover(cwd); derr == nil && found {
+			p, lerr := projectlink.Load(path)
+			if lerr != nil {
+				return "", Wrapf(CodeProjectLinkCorrupt, lerr, "read project link")
+			}
+			if p.KBID != "" {
+				return p.KBID, nil
+			}
+		}
+	}
+	return "", NewError(CodeKBIDRequired, "kb is required")
 }
 
 // loadSecret returns the stored value for (context, key); ErrNotFound becomes

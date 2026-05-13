@@ -18,7 +18,8 @@ import (
 // Options is the runtime configuration of one search invocation.
 type Options struct {
 	Query            string
-	KBID             string
+	KB               string // raw --kb flag value (UUID or name)
+	KBID             string // resolved id, populated by RunE before HybridSearch
 	TopK             int
 	VectorThreshold  float64
 	KeywordThreshold float64
@@ -33,7 +34,12 @@ type Service interface {
 	HybridSearch(ctx context.Context, kbID string, params *sdk.SearchParams) ([]*sdk.SearchResult, error)
 }
 
-// NewCmdSearch builds `weknora search "<query>" --kb <id>`.
+// NewCmdSearch builds `weknora search "<query>" --kb <id-or-name>`.
+//
+// The single `--kb` flag accepts either a KB UUID (passed through) or a
+// name (resolved via ListKnowledgeBases). Mirrors gcloud `--project`'s
+// id-or-name auto-detection — the only mainstream pattern that collapses
+// the two forms onto one flag.
 func NewCmdSearch(f *cmdutil.Factory) *cobra.Command {
 	opts := &Options{}
 	cmd := &cobra.Command{
@@ -42,9 +48,9 @@ func NewCmdSearch(f *cmdutil.Factory) *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
 			opts.Query = strings.TrimSpace(args[0])
-			// Validate user input BEFORE touching the SDK client. Flag misuse
-			// should fail fast with the clearer error rather than blocking on
-			// auth / config when the invocation itself is wrong.
+			// Validate input shape before touching the SDK so flag/arg misuse
+			// surfaces fast (no auth / no client construction). KB resolution
+			// happens *after* — name → id needs a live client.
 			if err := opts.validate(); err != nil {
 				return err
 			}
@@ -52,17 +58,26 @@ func NewCmdSearch(f *cmdutil.Factory) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if cmdutil.IsKBID(opts.KB) {
+				opts.KBID = opts.KB
+			} else {
+				resolved, rerr := cmdutil.ResolveKBNameToID(c.Context(), cli, opts.KB)
+				if rerr != nil {
+					return rerr
+				}
+				opts.KBID = resolved
+			}
 			return runSearch(c.Context(), opts, cli)
 		},
 	}
-	cmd.Flags().StringVar(&opts.KBID, "kb", "", "Knowledge base ID to search (required)")
+	cmd.Flags().StringVar(&opts.KB, "kb", "", "Knowledge base UUID or name")
 	cmd.Flags().IntVar(&opts.TopK, "top-k", 8, "Maximum results to return")
 	cmd.Flags().Float64Var(&opts.VectorThreshold, "vector-threshold", 0, "Vector retrieval similarity floor (per-channel, pre-fusion); 0 = no filter")
 	cmd.Flags().Float64Var(&opts.KeywordThreshold, "keyword-threshold", 0, "Keyword retrieval score floor (per-channel, pre-fusion); 0 = no filter")
 	cmd.Flags().BoolVar(&opts.NoVector, "no-vector", false, "Disable the vector channel")
 	cmd.Flags().BoolVar(&opts.NoKeyword, "no-keyword", false, "Disable the keyword channel")
 	cmd.Flags().BoolVar(&opts.JSONOut, "json", false, "Output JSON envelope")
-	cmdutil.MustRequireFlag(cmd, "kb")
+	_ = cmd.MarkFlagRequired("kb")
 	return cmd
 }
 
@@ -118,10 +133,9 @@ func runSearch(ctx context.Context, opts *Options, svc Service) error {
 	return renderHumanResults(results, opts.KBID)
 }
 
-// renderHumanResults prints a compact pretty list to stdout.
-//
-// Lipgloss tables arrive in PR-3; the inline indent helper here is a minimal
-// stopgap so search is usable in a terminal without color today.
+// renderHumanResults prints a compact pretty list to stdout. The inline
+// indent helper is a minimal stopgap so search output is usable in a plain
+// terminal; a richer tabular renderer can replace this later.
 func renderHumanResults(results []*sdk.SearchResult, kbID string) error {
 	if len(results) == 0 {
 		fmt.Fprintln(iostreams.IO.Out, "(no results)")

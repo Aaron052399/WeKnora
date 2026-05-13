@@ -8,13 +8,11 @@ import (
 	"os"
 
 	"github.com/Tencent/WeKnora/internal/agent/tools"
-	llmcontext "github.com/Tencent/WeKnora/internal/application/service/llmcontext"
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/models/rerank"
 	"github.com/Tencent/WeKnora/internal/types"
-	"github.com/Tencent/WeKnora/internal/types/interfaces"
 )
 
 // AgentQA performs agent-based question answering with conversation history and streaming support
@@ -102,10 +100,21 @@ func (s *sessionService) AgentQA(
 	}
 
 	if hasKnowledgeSearchTool {
+		// Resolve rerank model: agent-level first, then fall back to tenant default
+		// (ConversationConfig.RerankModelID). This lets users leave rerank empty when
+		// their KB scope currently has no RAG-type KB, while still working correctly
+		// if a RAG-type KB is added later.
 		rerankModelID := req.CustomAgent.Config.RerankModelID
+		if rerankModelID == "" && tenantInfo != nil && tenantInfo.ConversationConfig != nil {
+			rerankModelID = tenantInfo.ConversationConfig.RerankModelID
+			if rerankModelID != "" {
+				logger.Infof(ctx, "Custom agent %s has no rerank model; falling back to tenant default rerank model %s",
+					req.CustomAgent.ID, rerankModelID)
+			}
+		}
 		if rerankModelID == "" {
-			logger.Warnf(ctx, "No rerank model configured for custom agent %s, but knowledge_search tool is enabled", req.CustomAgent.ID)
-			return errors.New("rerank model (rerank_model_id) is not configured in custom agent settings")
+			logger.Warnf(ctx, "No rerank model configured for custom agent %s (and no tenant default), but knowledge_search tool is enabled", req.CustomAgent.ID)
+			return errors.New("rerank model is not configured: please set rerank_model_id on the agent or configure a tenant default rerank model")
 		}
 
 		rerankModel, err = s.modelService.GetRerankModel(ctx, rerankModelID)
@@ -117,38 +126,29 @@ func (s *sessionService) AgentQA(
 		logger.Infof(ctx, "knowledge_search tool not enabled, skipping rerank model initialization")
 	}
 
-	// Get or create contextManager for this session
-	contextManager := s.getContextManagerForSession()
-
-	// Set system prompt for the current agent in context manager
-	// This ensures the context uses the correct system prompt when switching agents
-	systemPrompt := agentConfig.ResolveSystemPrompt(agentConfig.WebSearchEnabled)
-	if systemPrompt != "" {
-		if err := contextManager.SetSystemPrompt(ctx, sessionID, systemPrompt); err != nil {
-			logger.Warnf(ctx, "Failed to set system prompt in context manager: %v", err)
-		} else {
-			logger.Infof(ctx, "System prompt updated in context manager for agent")
+	// Load multi-turn history directly from DB (the single source of truth).
+	// AgentSteps on each historical assistant message are expanded into proper
+	// assistant_with_tool_calls + tool messages so the model can see what was
+	// tried last turn — except final_answer, which is replayed as the trailing
+	// canonical assistant message.
+	var llmContext []chat.Message
+	if agentConfig.MultiTurnEnabled {
+		historyTurns := agentConfig.HistoryTurns
+		if historyTurns <= 0 {
+			historyTurns = 5
 		}
-	}
-
-	// Get LLM context from context manager
-	llmContext, err := s.getContextForSession(ctx, contextManager, sessionID)
-	if err != nil {
-		logger.Warnf(ctx, "Failed to get LLM context: %v, continuing without history", err)
-		llmContext = []chat.Message{}
-	}
-	logger.Infof(ctx, "Loaded %d messages from LLM context manager", len(llmContext))
-
-	// Apply multi-turn configuration for Agent mode
-	// Note: In Agent mode, context is managed by contextManager with compression strategies,
-	// so we don't apply HistoryTurns limit here. HistoryTurns is used in normal (KnowledgeQA) mode.
-	if !agentConfig.MultiTurnEnabled {
-		// Multi-turn disabled, clear history
-		logger.Infof(ctx, "Multi-turn disabled for this agent, clearing history context")
+		llmContext, err = LoadAgentHistory(ctx, s.messageRepo, sessionID, historyTurns)
+		if err != nil {
+			logger.Warnf(ctx, "Failed to load agent history from DB: %v, continuing without history", err)
+			llmContext = []chat.Message{}
+		}
+		logger.Infof(ctx, "Loaded %d history messages from DB (turns=%d)", len(llmContext), historyTurns)
+	} else {
+		logger.Infof(ctx, "Multi-turn disabled for this agent, running without history")
 		llmContext = []chat.Message{}
 	}
 
-	// Create agent engine with EventBus and ContextManager
+	// Create agent engine with EventBus
 	logger.Info(ctx, "Creating agent engine")
 	engine, err := s.agentService.CreateAgentEngine(
 		ctx,
@@ -156,7 +156,6 @@ func (s *sessionService) AgentQA(
 		summaryModel,
 		rerankModel,
 		eventBus,
-		contextManager,
 		sessionID,
 	)
 	if err != nil {
@@ -356,30 +355,4 @@ func (s *sessionService) configureSkillsFromAgent(
 		logger.Warnf(ctx, "Unknown SkillsSelectionMode=%s: skills disabled", customAgent.Config.SkillsSelectionMode)
 	}
 
-}
-
-// getContextManagerForSession creates a context manager for the session.
-func (s *sessionService) getContextManagerForSession() interfaces.ContextManager {
-	return llmcontext.NewContextManagerFromConfig(s.sessionStorage, s.messageRepo)
-}
-
-// getContextForSession retrieves LLM context for a session
-func (s *sessionService) getContextForSession(
-	ctx context.Context,
-	contextManager interfaces.ContextManager,
-	sessionID string,
-) ([]chat.Message, error) {
-	history, err := contextManager.GetContext(ctx, sessionID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get context: %w", err)
-	}
-
-	// Log context statistics
-	stats, _ := contextManager.GetContextStats(ctx, sessionID)
-	if stats != nil {
-		logger.Infof(ctx, "LLM context stats for session %s: messages=%d, tokens=~%d, compressed=%v",
-			sessionID, stats.MessageCount, stats.TokenCount, stats.IsCompressed)
-	}
-
-	return history, nil
 }

@@ -1,4 +1,6 @@
-// Package kb holds `weknora kb` command tree (list / get; create / delete in v0.2).
+// Package kb holds the `weknora kb` command tree: list / view / create / delete.
+// `view` is the primary read verb (gh repo view convention); `get` survives as
+// a cobra alias on the view subcommand for v0.0/v0.1 callers.
 package kb
 
 import (
@@ -16,6 +18,8 @@ func NewCmd(f *cmdutil.Factory) *cobra.Command {
 		Run:   func(c *cobra.Command, _ []string) { _ = c.Help() },
 	}
 	cmd.AddCommand(NewCmdList(f))
-	cmd.AddCommand(NewCmdGet(f))
+	cmd.AddCommand(NewCmdView(f))
+	cmd.AddCommand(NewCmdCreate(f))
+	cmd.AddCommand(NewCmdDelete(f))
 	return cmd
 }

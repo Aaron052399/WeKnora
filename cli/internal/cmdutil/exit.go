@@ -8,16 +8,19 @@ import (
 	"github.com/Tencent/WeKnora/cli/internal/format"
 )
 
-// ExitCode maps an error to the documented CLI exit code (spec §2.4).
-// Mirrors gh / Stripe convention:
-//   - 0 success
-//   - 1 generic / unknown
-//   - 2 flag / argument problem
-//   - 3 auth.*
-//   - 4 resource.not_found
-//   - 5 input.*
-//   - 6 server.rate_limited
-//   - 7 server.* (other) / network.*
+// ExitCode maps an error to the documented CLI exit code (spec §2.4 + ADR-3).
+// Mirrors gh / Stripe / lark-cli convention:
+//   - 0  success
+//   - 1  generic / unknown typed error
+//   - 2  flag / argument problem
+//   - 3  auth.*
+//   - 4  resource.not_found
+//   - 5  input.* (other than confirmation_required)
+//   - 6  server.rate_limited
+//   - 7  server.* (other) / network.*
+//   - 10 input.confirmation_required — high-risk write needs explicit -y
+//        (lark-cli skill protocol; see cli/AGENTS.md)
+//   - 130 SIGINT (handled by Go runtime, not this function)
 func ExitCode(err error) int {
 	if err == nil {
 		return 0
@@ -28,6 +31,9 @@ func ExitCode(err error) int {
 	}
 	if errors.Is(err, SilentError) {
 		return 1
+	}
+	if matchCode(err, CodeInputConfirmationRequired) {
+		return 10
 	}
 	if IsAuthError(err) {
 		return 3
@@ -72,12 +78,28 @@ func PrintError(w io.Writer, err error) {
 }
 
 // PrintErrorEnvelope writes err as a JSON envelope on w. Used in agent mode /
-// --json / --format=json output so failures stay machine-parseable.
+// --json / --format=json output so failures stay machine-parseable. When the
+// error carries an OperationRisk (destructive write paths), it's surfaced as
+// the envelope-level Risk field so agents can decide whether to surface the
+// failure differently to the user.
 func PrintErrorEnvelope(w io.Writer, err error) {
 	if err == nil || errors.Is(err, SilentError) {
 		return
 	}
-	_ = format.WriteEnvelope(w, format.Failure(ToErrorBody(err)))
+	env := format.Failure(ToErrorBody(err))
+	if r := operationRiskOf(err); r != nil {
+		env.Risk = &format.Risk{Level: format.RiskLevel(r.Level), Action: r.Action}
+	}
+	_ = format.WriteEnvelope(w, env)
+}
+
+// operationRiskOf extracts an OperationRisk from a typed *Error chain, or nil.
+func operationRiskOf(err error) *OperationRisk {
+	var typed *Error
+	if errors.As(err, &typed) {
+		return typed.OperationRisk
+	}
+	return nil
 }
 
 // ToErrorBody projects err into the canonical envelope ErrorBody. Exposed so
@@ -119,8 +141,8 @@ func ToErrorBody(err error) *format.ErrorBody {
 // defaultHint returns a canonical actionable hint for known error codes when
 // the call site didn't set one. Spec §1.4 zero-config matrix mandates
 // `auth.unauthenticated` envelopes carry "run weknora auth login" — this
-// fallback covers the broad surface (whoami / auth status / kb list / kb get
-// / search) without per-command hint plumbing.
+// fallback covers the broad surface (auth status / kb list / kb get / search)
+// without per-command hint plumbing.
 //
 // Empty string for codes without a stable canonical hint.
 func defaultHint(code ErrorCode) string {
@@ -132,7 +154,7 @@ func defaultHint(code ErrorCode) string {
 	case CodeAuthForbidden:
 		return "active context lacks permission for this resource"
 	case CodeAuthCrossTenantBlocked, CodeAuthTenantMismatch:
-		return "verify tenant context with `weknora whoami`"
+		return "verify tenant context with `weknora auth status`"
 	case CodeNetworkError:
 		return "check base URL reachability with `weknora doctor`"
 	case CodeServerIncompatibleVersion:
@@ -145,12 +167,28 @@ func defaultHint(code ErrorCode) string {
 		return "verify the resource ID; list available with `weknora kb list`"
 	case CodeInputInvalidArgument, CodeInputMissingFlag:
 		return "see `weknora <command> --help` for valid usage"
+	case CodeInputConfirmationRequired:
+		return "high-risk write — re-run with -y/--yes after the user explicitly approves"
 	case CodeLocalKeychainDenied:
 		return "verify keyring access; falls back to file storage"
 	case CodeLocalConfigCorrupt:
 		return "remove ~/.config/weknora/config.yaml and re-run `weknora auth login`"
 	case CodeLocalFileIO:
 		return "check file permissions under $XDG_CONFIG_HOME/weknora/"
+	case CodeKBIDRequired:
+		return "run `weknora link` to bind this directory to a knowledge base, or pass --kb"
+	case CodeKBNotFound:
+		return "list available with `weknora kb list`"
+	case CodeProjectLinkCorrupt:
+		return "remove .weknora/project.yaml and run `weknora link` again"
+	case CodeUserAborted:
+		return "no action taken; pass -y/--yes to skip the confirmation prompt"
+	case CodeUploadFileNotFound:
+		return "verify the path is correct and readable"
+	case CodeSSEStreamAborted:
+		return "the streaming answer was cut off mid-flight; retry, or pass --no-stream to buffer the full response"
+	case CodeSessionCreateFailed:
+		return "could not create a chat session; pass --session-id to reuse an existing session"
 	}
 	return ""
 }

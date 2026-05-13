@@ -1,7 +1,4 @@
 // Package cmd holds the cobra command tree. main.go calls Execute().
-//
-// v0.0 shipped: version / auth / search.
-// v0.1 adds:    whoami / doctor / kb (list + get) / context (use).
 package cmd
 
 import (
@@ -12,12 +9,15 @@ import (
 
 	"github.com/spf13/cobra"
 
+	apicmd "github.com/Tencent/WeKnora/cli/cmd/api"
 	"github.com/Tencent/WeKnora/cli/cmd/auth"
+	chatcmd "github.com/Tencent/WeKnora/cli/cmd/chat"
 	contextcmd "github.com/Tencent/WeKnora/cli/cmd/context"
+	"github.com/Tencent/WeKnora/cli/cmd/doc"
 	"github.com/Tencent/WeKnora/cli/cmd/doctor"
 	"github.com/Tencent/WeKnora/cli/cmd/kb"
+	linkcmd "github.com/Tencent/WeKnora/cli/cmd/link"
 	"github.com/Tencent/WeKnora/cli/cmd/search"
-	"github.com/Tencent/WeKnora/cli/cmd/whoami"
 	"github.com/Tencent/WeKnora/cli/internal/agent"
 	"github.com/Tencent/WeKnora/cli/internal/build"
 	"github.com/Tencent/WeKnora/cli/internal/cmdutil"
@@ -36,7 +36,7 @@ func Execute() int {
 		return 0
 	}
 	err = MapCobraError(err)
-	if agent.ShouldUseAgentMode(cmd) || WantsJSONOutput(cmd) {
+	if WantsJSONOutput(cmd) {
 		cmdutil.PrintErrorEnvelope(iostreams.IO.Out, err)
 	} else {
 		cmdutil.PrintError(iostreams.IO.Err, err)
@@ -126,7 +126,7 @@ var cobraFlagErrorPrefixes = []string{
 }
 
 // NewRootCmd builds the cobra tree. Splitting it from Execute() lets tests
-// drive the tree directly with their own factory. Exported (PR-7) so the
+// drive the tree directly with their own factory. Exported so the
 // acceptance/contract suite can construct the tree in-process.
 func NewRootCmd(f *cmdutil.Factory) *cobra.Command {
 	v, commit, date := build.Info()
@@ -137,7 +137,7 @@ func NewRootCmd(f *cmdutil.Factory) *cobra.Command {
 hybrid searches against a WeKnora server from your shell or an AI agent.`,
 		Example: `  weknora auth login --host=https://kb.example.com   # one-time setup
   weknora kb list                                    # list knowledge bases
-  weknora kb get <id>                                # show one
+  weknora kb view <id>                               # show one
   weknora search "your question" --kb=<id>           # hybrid retrieval
   weknora doctor --json                              # health check (agent-readable)`,
 		SilenceUsage:  true,
@@ -148,7 +148,6 @@ hybrid searches against a WeKnora server from your shell or an AI agent.`,
 		// subcommand still owns the richer `--json` envelope output.
 		Version: fmt.Sprintf("%s (commit %s, built %s)", v, commit, date),
 		PersistentPreRun: func(c *cobra.Command, args []string) {
-			agent.ApplyAgentSugar(c)
 			// Propagate the global --context flag into the Factory for this
 			// invocation only. Spec §1.2: single-shot override, no disk write.
 			if v, _ := c.Flags().GetString("context"); v != "" {
@@ -170,35 +169,34 @@ hybrid searches against a WeKnora server from your shell or an AI agent.`,
 	cmd.AddCommand(newVersionCmd(f))
 	cmd.AddCommand(auth.NewCmdAuth(f))
 	cmd.AddCommand(search.NewCmdSearch(f))
-	cmd.AddCommand(whoami.NewCmd(f))
 	cmd.AddCommand(doctor.NewCmd(f))
 	cmd.AddCommand(kb.NewCmd(f))
 	cmd.AddCommand(contextcmd.NewCmd(f))
+	cmd.AddCommand(linkcmd.NewCmd(f))
+	cmd.AddCommand(doc.NewCmd(f))
+	cmd.AddCommand(apicmd.NewCmd(f))
+	cmd.AddCommand(chatcmd.NewCmd(f))
 	return cmd
 }
 
 // addGlobalFlags registers persistent flags available on every subcommand.
 // Only flags whose behavior is actually wired are listed — a flag that
 // accepts values but does nothing is a worse contract than no flag.
-//
-// --context lands here in v0.1 (spec §1.2); --no-version-check waits for
-// v0.7's compat probe consumer.
 func addGlobalFlags(cmd *cobra.Command) {
 	pf := cmd.PersistentFlags()
-	pf.Bool("agent", false, "Agent mode: envelope JSON output + no interactive prompts + no progress UI")
-	pf.Bool("no-interactive", false, "Refuse interactive prompts; missing input becomes a hard error")
-	pf.Bool("no-progress", false, "Suppress progress bars and spinners")
 	pf.BoolP("yes", "y", false, "Skip confirmation prompts on destructive operations")
 	pf.String("context", "", "Override the active context for this invocation (no disk write)")
+	pf.Bool("dry-run", false, "Preview the operation without executing (write commands only; read commands ignore)")
 }
 
 // agentAwareHelpFunc wraps cobra's default help to append the AI agent guidance
-// (Annotations[agent.AIAgentHelpKey]) only when agent mode is active.
-// Stripe pkg/cmd/templates.go pattern.
+// (Annotations[agent.AIAgentHelpKey]) only when an AI coding agent env var is
+// detected (CLAUDECODE / CURSOR_AGENT). Help-only render — no behavior switch.
+// Stripe pkg/cmd/templates.go pattern, but reduced from mode-switch (v0.2 ADR-3).
 func agentAwareHelpFunc(orig func(*cobra.Command, []string)) func(*cobra.Command, []string) {
 	return func(c *cobra.Command, args []string) {
 		orig(c, args)
-		if !agent.ShouldUseAgentMode(c) {
+		if agent.DetectAIAgent() == "" {
 			return
 		}
 		extra := agent.FormatAgentGuidance(c)
