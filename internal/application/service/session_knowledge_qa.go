@@ -760,8 +760,7 @@ func (s *sessionService) handleFixedFallback(ctx context.Context, chatManage *ty
 	s.emitFallbackAnswer(ctx, chatManage, fallbackContent)
 }
 
-// handleModelFallback handles model-based fallback response
-// 直接返回兜底提示词，不调用模型
+// handleModelFallback handles model-based fallback response using streaming
 func (s *sessionService) handleModelFallback(ctx context.Context, chatManage *types.ChatManage) {
 	// Check if FallbackPrompt is available
 	if chatManage.FallbackPrompt == "" {
@@ -778,19 +777,49 @@ func (s *sessionService) handleModelFallback(ctx context.Context, chatManage *ty
 		return
 	}
 
-	// 直接返回兜底提示词，不调用模型
-	chatManage.ChatResponse = &types.ChatResponse{Content: promptContent}
-	s.emitFallbackAnswer(ctx, chatManage, promptContent)
+	// Check if EventBus is available for streaming
+	if chatManage.EventBus == nil {
+		logger.Warnf(ctx, "EventBus not available for streaming fallback, falling back to fixed response")
+		s.handleFixedFallback(ctx, chatManage)
+		return
+	}
+
+	// Get chat model
+	chatModel, err := s.modelService.GetChatModel(ctx, chatManage.ChatModelID)
+	if err != nil {
+		logger.Errorf(ctx, "Failed to get chat model for fallback: %v, falling back to fixed response", err)
+		s.handleFixedFallback(ctx, chatManage)
+		return
+	}
+
+	// Prepare chat options
+	thinking := false
+	opt := &chat.ChatOptions{
+		Temperature:         chatManage.SummaryConfig.Temperature,
+		MaxCompletionTokens: chatManage.SummaryConfig.MaxCompletionTokens,
+		Thinking:            &thinking,
+	}
+
+	// Start streaming response
+	responseChan, err := chatModel.ChatStream(ctx, buildFallbackMessages(chatManage, promptContent), opt)
+	if err != nil {
+		logger.Errorf(ctx, "Failed to start streaming fallback response: %v, falling back to fixed response", err)
+		s.handleFixedFallback(ctx, chatManage)
+		return
+	}
+
+	if responseChan == nil {
+		logger.Errorf(ctx, "Chat stream returned nil channel, falling back to fixed response")
+		s.handleFixedFallback(ctx, chatManage)
+		return
+	}
+
+	// Start goroutine to consume stream and emit events
+	go s.consumeFallbackStream(ctx, chatManage, responseChan)
 }
 
 func buildFallbackMessages(chatManage *types.ChatManage, promptContent string) []chat.Message {
-	messages := make([]chat.Message, 0, len(chatManage.History)*2+2)
-
-	// 加上 system prompt，让模型知道自己的身份
-	if chatManage.SummaryConfig.Prompt != "" {
-		messages = append(messages, chat.Message{Role: "system", Content: chatManage.SummaryConfig.Prompt})
-	}
-
+	messages := make([]chat.Message, 0, len(chatManage.History)*2+1)
 	messages = chatpipeline.AppendHistoryMessages(messages, chatManage.History)
 
 	userMsg := chat.Message{Role: "user", Content: promptContent}
