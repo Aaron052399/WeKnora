@@ -22,8 +22,6 @@ func NewFactory() im.AdapterFactory {
 			im.GetString(creds, "token"),
 			im.GetString(creds, "encoding_aes_key"),
 			im.GetString(creds, "api_base_url"),
-			im.GetString(creds, "transfer_userid"),
-			im.GetString(creds, "transfer_menu_key"),
 		)
 		if err != nil {
 			return nil, nil, err
