@@ -42,6 +42,65 @@ var httpClient = &http.Client{Timeout: 30 * time.Second}
 
 const defaultAPIBaseURL = "https://qyapi.weixin.qq.com"
 
+// ──────────────────────────────────────────────────────────────────────
+// 转人工意图识别
+// ──────────────────────────────────────────────────────────────────────
+
+// transferKeywords 转人工关键词列表
+var transferKeywords = []string{
+	"转人工", "人工客服", "转接人工", "人工服务",
+	"找人工", "真人客服", "真人", "要人工",
+	"不要机器人", "不想跟机器人", "换人工", "接人工",
+}
+
+// isTransferIntent 检查消息是否包含转人工意图
+func isTransferIntent(content string) bool {
+	for _, keyword := range transferKeywords {
+		if strings.Contains(content, keyword) {
+			return true
+		}
+	}
+	return false
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// 转人工状态管理
+// ──────────────────────────────────────────────────────────────────────
+
+const menuExpire = 5 * time.Minute // 菜单有效期
+
+type transferState struct {
+	status string    // menu_sent, transferring
+	sentAt time.Time // 菜单发送时间
+}
+
+var transferStates = sync.Map{} // key: "open_kfid:external_userid" -> *transferState
+
+func getTransferState(cacheKey string) *transferState {
+	val, ok := transferStates.Load(cacheKey)
+	if !ok {
+		return nil
+	}
+	state := val.(*transferState)
+	// 检查是否超时
+	if time.Since(state.sentAt) > menuExpire {
+		transferStates.Delete(cacheKey)
+		return nil
+	}
+	return state
+}
+
+func setTransferState(cacheKey, status string) {
+	transferStates.Store(cacheKey, &transferState{
+		status: status,
+		sentAt: time.Now(),
+	})
+}
+
+func clearTransferState(cacheKey string) {
+	transferStates.Delete(cacheKey)
+}
+
 // Adapter implements im.Adapter for WeChat Customer Service in webhook mode.
 type Adapter struct {
 	corpID           string
@@ -283,6 +342,15 @@ func (a *Adapter) handleKfMsgOrEvent(ctx context.Context, event wechatKFMessage)
 	// 遍历消息列表，找到最新的客户文本消息
 	for i := len(result.MsgList) - 1; i >= 0; i-- {
 		msg := result.MsgList[i]
+
+		// 处理菜单事件 (origin=4, msgtype=menu_event)
+		if msg.Origin == 4 && msg.MsgType == "menu_event" && msg.MenuEvent != nil {
+			logger.Infof(ctx, "[WeChatKF] Menu event received: menu_key=%s menu_id=%s userid=%s",
+				msg.MenuEvent.MenuKey, msg.MenuEvent.MenuID, msg.ExternalUserid)
+			// 菜单事件不进入 AI 处理流程
+			return nil, nil
+		}
+
 		// origin=3 表示客户发送的消息
 		if msg.Origin != 3 {
 			continue
@@ -298,14 +366,73 @@ func (a *Adapter) handleKfMsgOrEvent(ctx context.Context, event wechatKFMessage)
 
 		switch msg.MsgType {
 		case "text":
-			if msg.Content.Content == "" {
+			content := strings.TrimSpace(msg.Content.Content)
+			if content == "" {
 				continue
 			}
+
+			cacheKey := fmt.Sprintf("%s:%s", openKfId, msg.ExternalUserid)
+
+			// 检查是否为 click 响应（用户点击菜单按钮）
+			if content == "transfer_confirm" {
+				state := getTransferState(cacheKey)
+				if state != nil && state.status == "menu_sent" {
+					// 执行转接
+					setTransferState(cacheKey, "transferring")
+					target, err := a.SelectTransferTarget(ctx, openKfId)
+					if err != nil {
+						logger.Errorf(ctx, "[WeChatKF] No available agent: %v", err)
+						clearTransferState(cacheKey)
+						_ = a.SendTextReply(ctx, openKfId, msg.ExternalUserid, "抱歉，当前没有可用的人工客服，请稍后重试。")
+						return nil, nil
+					}
+					if err := a.TransferToAgent(ctx, openKfId, msg.ExternalUserid, target, "用户请求转人工"); err != nil {
+						logger.Errorf(ctx, "[WeChatKF] Transfer failed: %v", err)
+						clearTransferState(cacheKey)
+						_ = a.SendTextReply(ctx, openKfId, msg.ExternalUserid, "转接人工客服失败，请稍后重试。")
+						return nil, nil
+					}
+					clearTransferState(cacheKey)
+					_ = a.SendTextReply(ctx, openKfId, msg.ExternalUserid, "正在为您转接人工客服，请稍候...")
+					return nil, nil
+				}
+				// 状态不对，忽略
+				return nil, nil
+			}
+
+			if content == "transfer_cancel" {
+				clearTransferState(cacheKey)
+				// 继续正常 AI 对话，不返回 nil
+			}
+
+			// 检查转人工意图
+			if isTransferIntent(content) {
+				state := getTransferState(cacheKey)
+				if state == nil {
+					// 首次触发，发送菜单消息
+					if err := a.SendMenuMessage(ctx, openKfId, msg.ExternalUserid, "您好，请问需要转接人工客服吗？"); err != nil {
+						logger.Errorf(ctx, "[WeChatKF] Send menu failed: %v", err)
+						// 发送菜单失败，继续正常 AI 流程
+					} else {
+						setTransferState(cacheKey, "menu_sent")
+						return nil, nil // 菜单已发送，不进入 AI
+					}
+				} else if state.status == "menu_sent" {
+					// 已发送菜单，提示用户点击
+					_ = a.SendTextReply(ctx, openKfId, msg.ExternalUserid, "请点击上方菜单按钮确认转人工。")
+					return nil, nil
+				} else if state.status == "transferring" {
+					// 正在转接中
+					_ = a.SendTextReply(ctx, openKfId, msg.ExternalUserid, "正在转接中，请稍候...")
+					return nil, nil
+				}
+			}
+
 			return &im.IncomingMessage{
 				Platform:    im.PlatformWechatKF,
 				MessageType: im.MessageTypeText,
 				UserID:      msg.ExternalUserid,
-				Content:     strings.TrimSpace(msg.Content.Content),
+				Content:     content,
 				MessageID:   msg.MsgID,
 				Extra:       map[string]string{"open_kfid": openKfId},
 			}, nil
@@ -445,6 +572,244 @@ func (a *Adapter) SendReply(ctx context.Context, incoming *im.IncomingMessage, r
 	}
 
 	logger.Infof(ctx, "[WeChatKF] Reply sent successfully: touser=%s open_kfid=%s", incoming.UserID, openKfId)
+	return nil
+}
+
+// SendMenuMessage sends a menu message (msgmenu) to the user.
+func (a *Adapter) SendMenuMessage(ctx context.Context, openKfID, externalUserid, headContent string) error {
+	accessToken, err := a.getAccessToken(ctx)
+	if err != nil {
+		return fmt.Errorf("get access token: %w", err)
+	}
+
+	payload := map[string]interface{}{
+		"touser":    externalUserid,
+		"open_kfid": openKfID,
+		"msgid":     fmt.Sprintf("menu_%d", time.Now().UnixMilli()),
+		"msgtype":   "msgmenu",
+		"msgmenu": map[string]interface{}{
+			"head_content": headContent,
+			"list": []map[string]interface{}{
+				{
+					"type": "click",
+					"click": map[string]interface{}{
+						"id":      "transfer_confirm",
+						"content": "确认转人工",
+					},
+				},
+				{
+					"type": "click",
+					"click": map[string]interface{}{
+						"id":      "transfer_cancel",
+						"content": "继续咨询",
+					},
+				},
+			},
+		},
+	}
+
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal menu payload: %w", err)
+	}
+
+	sendURL := fmt.Sprintf("%s/cgi-bin/kf/send_msg?access_token=%s", a.apiBaseURL, accessToken)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, sendURL, bytes.NewReader(payloadBytes))
+	if err != nil {
+		return fmt.Errorf("create menu request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("send menu message: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		ErrCode int    `json:"errcode"`
+		ErrMsg  string `json:"errmsg"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("decode menu response: %w", err)
+	}
+	if result.ErrCode != 0 {
+		return fmt.Errorf("send menu failed: code=%d msg=%s", result.ErrCode, result.ErrMsg)
+	}
+
+	return nil
+}
+
+// SendTextReply sends a simple text message to a user.
+func (a *Adapter) SendTextReply(ctx context.Context, openKfID, externalUserid, content string) error {
+	accessToken, err := a.getAccessToken(ctx)
+	if err != nil {
+		return fmt.Errorf("get access token: %w", err)
+	}
+
+	payload := map[string]interface{}{
+		"touser":    externalUserid,
+		"open_kfid": openKfID,
+		"msgtype":   "text",
+		"text": map[string]string{
+			"content": content,
+		},
+	}
+
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal payload: %w", err)
+	}
+
+	sendURL := fmt.Sprintf("%s/cgi-bin/kf/send_msg?access_token=%s", a.apiBaseURL, accessToken)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, sendURL, bytes.NewReader(payloadBytes))
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("send message: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		ErrCode int    `json:"errcode"`
+		ErrMsg  string `json:"errmsg"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("decode response: %w", err)
+	}
+	if result.ErrCode != 0 {
+		return fmt.Errorf("send text reply failed: code=%d msg=%s", result.ErrCode, result.ErrMsg)
+	}
+
+	return nil
+}
+
+// GetAgentList retrieves the list of agents for a KF account.
+func (a *Adapter) GetAgentList(ctx context.Context, openKfID string) ([]AgentInfo, error) {
+	accessToken, err := a.getAccessToken(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("get access token: %w", err)
+	}
+
+	payload := map[string]interface{}{
+		"open_kfid": openKfID,
+		"offset":    0,
+		"limit":     100,
+	}
+
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("marshal payload: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/cgi-bin/kf/user/list?access_token=%s", a.apiBaseURL, accessToken)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payloadBytes))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("call API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		ErrCode  int         `json:"errcode"`
+		ErrMsg   string      `json:"errmsg"`
+		UserList []AgentInfo `json:"user_list"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode response: %w", err)
+	}
+	if result.ErrCode != 0 {
+		return nil, fmt.Errorf("API error: code=%d msg=%s", result.ErrCode, result.ErrMsg)
+	}
+
+	return result.UserList, nil
+}
+
+// AgentInfo holds agent information from the KF user list API.
+type AgentInfo struct {
+	UserID             string `json:"userid"`
+	Name               string `json:"name"`
+	Status             int    `json:"status"` // 1=online, 2=busy, 3=away
+	ObotTransferReject bool   `json:"obot_transfer_reject"`
+}
+
+// SelectTransferTarget selects an available agent for transfer.
+func (a *Adapter) SelectTransferTarget(ctx context.Context, openKfID string) (string, error) {
+	agents, err := a.GetAgentList(ctx, openKfID)
+	if err != nil {
+		return "", fmt.Errorf("get agent list: %w", err)
+	}
+
+	// 优先选择在线且不拒绝机器人转接的客服
+	for _, agent := range agents {
+		if agent.Status == 1 && !agent.ObotTransferReject {
+			return agent.UserID, nil
+		}
+	}
+
+	// 没有在线的，选择不拒绝机器人转接的客服（忙碌或离开）
+	for _, agent := range agents {
+		if !agent.ObotTransferReject {
+			return agent.UserID, nil
+		}
+	}
+
+	return "", fmt.Errorf("no available agent found")
+}
+
+// TransferToAgent transfers the current conversation to a human agent.
+func (a *Adapter) TransferToAgent(ctx context.Context, openKfID, externalUserid, userid, remark string) error {
+	accessToken, err := a.getAccessToken(ctx)
+	if err != nil {
+		return fmt.Errorf("get access token: %w", err)
+	}
+
+	payload := map[string]interface{}{
+		"open_kfid":       openKfID,
+		"external_userid": externalUserid,
+		"userid":          userid,
+		"need_record":     1,
+		"remark":          remark,
+	}
+
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal transfer payload: %w", err)
+	}
+
+	transferURL := fmt.Sprintf("%s/cgi-bin/kf/user/transfer?access_token=%s", a.apiBaseURL, accessToken)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, transferURL, bytes.NewReader(payloadBytes))
+	if err != nil {
+		return fmt.Errorf("create transfer request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("call transfer API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		ErrCode int    `json:"errcode"`
+		ErrMsg  string `json:"errmsg"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("decode transfer response: %w", err)
+	}
+	if result.ErrCode != 0 {
+		return fmt.Errorf("transfer error: code=%d msg=%s", result.ErrCode, result.ErrMsg)
+	}
+
 	return nil
 }
 
@@ -627,6 +992,11 @@ type syncMsgResponse struct {
 		File struct {
 			MediaID string `json:"media_id"`
 		} `json:"file,omitempty"`
+		MenuEvent *struct {
+			EventType int    `json:"event_type"`
+			MenuID    string `json:"menu_id"`
+			MenuKey   string `json:"menu_key"`
+		} `json:"menu_event,omitempty"`
 	} `json:"msg_list"`
 }
 
