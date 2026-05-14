@@ -364,6 +364,23 @@ func (a *Adapter) handleKfMsgOrEvent(ctx context.Context, event wechatKFMessage)
 			continue
 		}
 
+		// 检查会话状态：如果是人工接待状态（state=3），不处理任何消息
+		sessionState, _, err := a.GetSessionState(ctx, openKfId, msg.ExternalUserid)
+		if err != nil {
+			logger.Warnf(ctx, "[WeChatKF] GetSessionState failed: %v, continue processing", err)
+		} else if sessionState == 3 {
+			logger.Infof(ctx, "[WeChatKF] Session in human handling state (3), skip processing")
+			return nil, nil
+		}
+
+		// 对文本消息立即发送处理中提示（不进入上下文，仅提升响应感知）
+		if msg.MsgType == "text" {
+			content := strings.TrimSpace(msg.Content.Content)
+			if content != "" && !isTransferIntent(content) && content != "确认转人工" {
+				_ = a.SendTextReply(ctx, openKfId, msg.ExternalUserid, "收到，正在处理中..")
+			}
+		}
+
 		switch msg.MsgType {
 		case "text":
 			content := strings.TrimSpace(msg.Content.Content)
@@ -374,46 +391,64 @@ func (a *Adapter) handleKfMsgOrEvent(ctx context.Context, event wechatKFMessage)
 			cacheKey := fmt.Sprintf("%s:%s", openKfId, msg.ExternalUserid)
 
 			// 检查是否为 click 响应（用户点击菜单按钮）
-			if content == "transfer_confirm" {
-				state := getTransferState(cacheKey)
-				if state != nil && state.status == "menu_sent" {
-					// 执行转接
-					setTransferState(cacheKey, "transferring")
-					target, err := a.SelectTransferTarget(ctx, openKfId)
-					if err != nil {
-						logger.Errorf(ctx, "[WeChatKF] No available agent: %v", err)
-						clearTransferState(cacheKey)
-						_ = a.SendTextReply(ctx, openKfId, msg.ExternalUserid, "抱歉，当前没有可用的人工客服，请稍后重试。")
-						return nil, nil
-					}
-					if err := a.TransferToAgent(ctx, openKfId, msg.ExternalUserid, target, "用户请求转人工"); err != nil {
-						logger.Errorf(ctx, "[WeChatKF] Transfer failed: %v", err)
-						clearTransferState(cacheKey)
-						_ = a.SendTextReply(ctx, openKfId, msg.ExternalUserid, "转接人工客服失败，请稍后重试。")
-						return nil, nil
-					}
-					clearTransferState(cacheKey)
-					_ = a.SendTextReply(ctx, openKfId, msg.ExternalUserid, "正在为您转接人工客服，请稍候...")
+			// 微信菜单点击发送的是按钮文本，不是按钮 ID
+			if content == "确认转人工" {
+				// 执行转接（无论状态如何，只要收到"确认转人工"就执行）
+				logger.Infof(ctx, "[WeChatKF] Starting transfer process: userid=%s", msg.ExternalUserid)
+
+				// 1. 查询会话状态
+				state, _, err := a.GetSessionState(ctx, openKfId, msg.ExternalUserid)
+				if err != nil {
+					logger.Errorf(ctx, "[WeChatKF] GetSessionState failed: %v", err)
+					_ = a.SendTextReply(ctx, openKfId, msg.ExternalUserid, "查询会话状态失败，请稍后重试。")
 					return nil, nil
 				}
-				// 状态不对，忽略
-				return nil, nil
-			}
+				logger.Infof(ctx, "[WeChatKF] Current session state: %d", state)
 
-			if content == "transfer_cancel" {
+				if state == 3 {
+					_ = a.SendTextReply(ctx, openKfId, msg.ExternalUserid, "当前已有人工客服在为您服务。")
+					return nil, nil
+				}
+				if state == 4 {
+					_ = a.SendTextReply(ctx, openKfId, msg.ExternalUserid, "会话已结束，无法转接。")
+					return nil, nil
+				}
+
+				// 2. 获取接待人员列表
+				target, err := a.SelectTransferTarget(ctx, openKfId)
+				if err != nil {
+					logger.Errorf(ctx, "[WeChatKF] No available servicer: %v", err)
+					clearTransferState(cacheKey)
+					_ = a.SendTextReply(ctx, openKfId, msg.ExternalUserid, "抱歉，当前没有可用的人工客服，请稍后重试。")
+					return nil, nil
+				}
+				logger.Infof(ctx, "[WeChatKF] Transfer target selected: %s", target)
+
+				// 3. 变更会话状态为 3（转接给接待人员）
+				if err := a.TransferToServicer(ctx, openKfId, msg.ExternalUserid, target); err != nil {
+					logger.Errorf(ctx, "[WeChatKF] Transfer failed: %v", err)
+					clearTransferState(cacheKey)
+					_ = a.SendTextReply(ctx, openKfId, msg.ExternalUserid, "转接人工客服失败，请稍后重试。")
+					return nil, nil
+				}
+				logger.Infof(ctx, "[WeChatKF] Transfer success: userid=%s target=%s", msg.ExternalUserid, target)
 				clearTransferState(cacheKey)
-				// 继续正常 AI 对话，不返回 nil
+				_ = a.SendTextReply(ctx, openKfId, msg.ExternalUserid, "正在为您转接人工客服，请稍候...")
+				return nil, nil
 			}
 
 			// 检查转人工意图
 			if isTransferIntent(content) {
+				logger.Infof(ctx, "[WeChatKF] Transfer intent detected: content=%s", content)
 				state := getTransferState(cacheKey)
 				if state == nil {
 					// 首次触发，发送菜单消息
+					logger.Infof(ctx, "[WeChatKF] Sending transfer menu to userid=%s", msg.ExternalUserid)
 					if err := a.SendMenuMessage(ctx, openKfId, msg.ExternalUserid, "您好，请问需要转接人工客服吗？"); err != nil {
 						logger.Errorf(ctx, "[WeChatKF] Send menu failed: %v", err)
 						// 发送菜单失败，继续正常 AI 流程
 					} else {
+						logger.Infof(ctx, "[WeChatKF] Transfer menu sent successfully")
 						setTransferState(cacheKey, "menu_sent")
 						return nil, nil // 菜单已发送，不进入 AI
 					}
@@ -597,13 +632,6 @@ func (a *Adapter) SendMenuMessage(ctx context.Context, openKfID, externalUserid,
 						"content": "确认转人工",
 					},
 				},
-				{
-					"type": "click",
-					"click": map[string]interface{}{
-						"id":      "transfer_cancel",
-						"content": "继续咨询",
-					},
-				},
 			},
 		},
 	}
@@ -688,30 +716,32 @@ func (a *Adapter) SendTextReply(ctx context.Context, openKfID, externalUserid, c
 	return nil
 }
 
-// GetAgentList retrieves the list of agents for a KF account.
-func (a *Adapter) GetAgentList(ctx context.Context, openKfID string) ([]AgentInfo, error) {
+// AccountInfo holds KF account information from the account list API.
+type AccountInfo struct {
+	OpenKfID        string `json:"open_kfid"`
+	Name            string `json:"name"`
+	Avatar          string `json:"avatar"`
+	ManagePrivilege bool   `json:"manage_privilege"`
+}
+
+// ServicerInfo holds servicer (agent) information.
+type ServicerInfo struct {
+	UserID string `json:"userid"`
+	Status int    `json:"status"` // 0=接待中, 1=停止接待
+}
+
+// GetServicerList retrieves the list of servicers for a KF account.
+func (a *Adapter) GetServicerList(ctx context.Context, openKfID string) ([]ServicerInfo, error) {
 	accessToken, err := a.getAccessToken(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("get access token: %w", err)
 	}
 
-	payload := map[string]interface{}{
-		"open_kfid": openKfID,
-		"offset":    0,
-		"limit":     100,
-	}
-
-	payloadBytes, err := json.Marshal(payload)
-	if err != nil {
-		return nil, fmt.Errorf("marshal payload: %w", err)
-	}
-
-	url := fmt.Sprintf("%s/cgi-bin/kf/user/list?access_token=%s", a.apiBaseURL, accessToken)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payloadBytes))
+	url := fmt.Sprintf("%s/cgi-bin/kf/servicer/list?access_token=%s&open_kfid=%s", a.apiBaseURL, accessToken, openKfID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
@@ -719,55 +749,83 @@ func (a *Adapter) GetAgentList(ctx context.Context, openKfID string) ([]AgentInf
 	}
 	defer resp.Body.Close()
 
-	var result struct {
-		ErrCode  int         `json:"errcode"`
-		ErrMsg   string      `json:"errmsg"`
-		UserList []AgentInfo `json:"user_list"`
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response body: %w", err)
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
+
+	logger.Infof(ctx, "[WeChatKF] GetServicerList response: status=%d, body=%s", resp.StatusCode, string(body))
+
+	var result struct {
+		ErrCode      int           `json:"errcode"`
+		ErrMsg       string        `json:"errmsg"`
+		ServicerList []ServicerInfo `json:"servicer_list"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("decode response: %w, body: %s", err, string(body))
 	}
 	if result.ErrCode != 0 {
 		return nil, fmt.Errorf("API error: code=%d msg=%s", result.ErrCode, result.ErrMsg)
 	}
 
-	return result.UserList, nil
+	return result.ServicerList, nil
 }
 
-// AgentInfo holds agent information from the KF user list API.
-type AgentInfo struct {
-	UserID             string `json:"userid"`
-	Name               string `json:"name"`
-	Status             int    `json:"status"` // 1=online, 2=busy, 3=away
-	ObotTransferReject bool   `json:"obot_transfer_reject"`
-}
-
-// SelectTransferTarget selects an available agent for transfer.
-func (a *Adapter) SelectTransferTarget(ctx context.Context, openKfID string) (string, error) {
-	agents, err := a.GetAgentList(ctx, openKfID)
+// GetSessionState retrieves the current session state.
+func (a *Adapter) GetSessionState(ctx context.Context, openKfID, externalUserid string) (int, string, error) {
+	accessToken, err := a.getAccessToken(ctx)
 	if err != nil {
-		return "", fmt.Errorf("get agent list: %w", err)
+		return -1, "", fmt.Errorf("get access token: %w", err)
 	}
 
-	// 优先选择在线且不拒绝机器人转接的客服
-	for _, agent := range agents {
-		if agent.Status == 1 && !agent.ObotTransferReject {
-			return agent.UserID, nil
-		}
+	payload := map[string]interface{}{
+		"open_kfid":       openKfID,
+		"external_userid": externalUserid,
 	}
 
-	// 没有在线的，选择不拒绝机器人转接的客服（忙碌或离开）
-	for _, agent := range agents {
-		if !agent.ObotTransferReject {
-			return agent.UserID, nil
-		}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return -1, "", fmt.Errorf("marshal payload: %w", err)
 	}
 
-	return "", fmt.Errorf("no available agent found")
+	url := fmt.Sprintf("%s/cgi-bin/kf/service_state/get?access_token=%s", a.apiBaseURL, accessToken)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payloadBytes))
+	if err != nil {
+		return -1, "", fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return -1, "", fmt.Errorf("call API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return -1, "", fmt.Errorf("read response body: %w", err)
+	}
+
+	logger.Infof(ctx, "[WeChatKF] GetSessionState response: status=%d, body=%s", resp.StatusCode, string(body))
+
+	var result struct {
+		ErrCode       int    `json:"errcode"`
+		ErrMsg        string `json:"errmsg"`
+		ServiceState  int    `json:"service_state"`
+		ServicerUserid string `json:"servicer_userid"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return -1, "", fmt.Errorf("decode response: %w, body: %s", err, string(body))
+	}
+	if result.ErrCode != 0 {
+		return -1, "", fmt.Errorf("API error: code=%d msg=%s", result.ErrCode, result.ErrMsg)
+	}
+
+	return result.ServiceState, result.ServicerUserid, nil
 }
 
-// TransferToAgent transfers the current conversation to a human agent.
-func (a *Adapter) TransferToAgent(ctx context.Context, openKfID, externalUserid, userid, remark string) error {
+// TransferToServicer transfers the session to a servicer by changing state to 3.
+func (a *Adapter) TransferToServicer(ctx context.Context, openKfID, externalUserid, servicerUserid string) error {
 	accessToken, err := a.getAccessToken(ctx)
 	if err != nil {
 		return fmt.Errorf("get access token: %w", err)
@@ -776,41 +834,64 @@ func (a *Adapter) TransferToAgent(ctx context.Context, openKfID, externalUserid,
 	payload := map[string]interface{}{
 		"open_kfid":       openKfID,
 		"external_userid": externalUserid,
-		"userid":          userid,
-		"need_record":     1,
-		"remark":          remark,
+		"service_state":   3,
+		"servicer_userid": servicerUserid,
 	}
 
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("marshal transfer payload: %w", err)
+		return fmt.Errorf("marshal payload: %w", err)
 	}
 
-	transferURL := fmt.Sprintf("%s/cgi-bin/kf/user/transfer?access_token=%s", a.apiBaseURL, accessToken)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, transferURL, bytes.NewReader(payloadBytes))
+	url := fmt.Sprintf("%s/cgi-bin/kf/service_state/trans?access_token=%s", a.apiBaseURL, accessToken)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payloadBytes))
 	if err != nil {
-		return fmt.Errorf("create transfer request: %w", err)
+		return fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("call transfer API: %w", err)
+		return fmt.Errorf("call API: %w", err)
 	}
 	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("read response body: %w", err)
+	}
+
+	logger.Infof(ctx, "[WeChatKF] TransferToServicer response: status=%d, body=%s", resp.StatusCode, string(body))
 
 	var result struct {
 		ErrCode int    `json:"errcode"`
 		ErrMsg  string `json:"errmsg"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return fmt.Errorf("decode transfer response: %w", err)
+	if err := json.Unmarshal(body, &result); err != nil {
+		return fmt.Errorf("decode response: %w, body: %s", err, string(body))
 	}
 	if result.ErrCode != 0 {
 		return fmt.Errorf("transfer error: code=%d msg=%s", result.ErrCode, result.ErrMsg)
 	}
 
 	return nil
+}
+
+// SelectTransferTarget selects an available servicer for transfer.
+func (a *Adapter) SelectTransferTarget(ctx context.Context, openKfID string) (string, error) {
+	servicers, err := a.GetServicerList(ctx, openKfID)
+	if err != nil {
+		return "", fmt.Errorf("get servicer list: %w", err)
+	}
+
+	// 优先选择接待中（status=0）的接待人员
+	for _, s := range servicers {
+		if s.Status == 0 && s.UserID != "" {
+			return s.UserID, nil
+		}
+	}
+
+	return "", fmt.Errorf("no available servicer found")
 }
 
 // DownloadFile downloads a file/image from WeChat KF.
