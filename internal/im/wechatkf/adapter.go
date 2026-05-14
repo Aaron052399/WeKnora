@@ -51,6 +51,8 @@ type Adapter struct {
 	aesKey           []byte
 	apiBaseURL       string
 	extraAllowedHost string
+	transferUserID   string // 转接目标客服的 userid
+	transferMenuKey  string // 触发转人工的菜单 key
 
 	tokenMu    sync.Mutex
 	tokenCache string
@@ -63,8 +65,7 @@ var (
 	_ im.FileDownloader = (*Adapter)(nil)
 )
 
-// NewAdapter creates a new WeChat KF adapter.
-func NewAdapter(corpID, appSecret, token, encodingAESKey, apiBaseURL string) (*Adapter, error) {
+func NewAdapter(corpID, appSecret, token, encodingAESKey, apiBaseURL, transferUserID, transferMenuKey string) (*Adapter, error) {
 	aesKey, err := base64.StdEncoding.DecodeString(encodingAESKey + "=")
 	if err != nil {
 		return nil, fmt.Errorf("decode encoding_aes_key: %w", err)
@@ -73,6 +74,7 @@ func NewAdapter(corpID, appSecret, token, encodingAESKey, apiBaseURL string) (*A
 	if apiBaseURL == "" {
 		apiBaseURL = defaultAPIBaseURL
 	}
+
 	apiBaseURL = strings.TrimRight(apiBaseURL, "/")
 
 	if err := validateEndpointURL(apiBaseURL, defaultAPIBaseURL, "https"); err != nil {
@@ -87,6 +89,8 @@ func NewAdapter(corpID, appSecret, token, encodingAESKey, apiBaseURL string) (*A
 		aesKey:           aesKey,
 		apiBaseURL:       apiBaseURL,
 		extraAllowedHost: extraHostFromEndpoint(apiBaseURL, defaultAPIBaseURL),
+		transferUserID:   transferUserID,
+		transferMenuKey:  transferMenuKey,
 	}, nil
 }
 
@@ -283,6 +287,32 @@ func (a *Adapter) handleKfMsgOrEvent(ctx context.Context, event wechatKFMessage)
 	// 遍历消息列表，找到最新的客户文本消息
 	for i := len(result.MsgList) - 1; i >= 0; i-- {
 		msg := result.MsgList[i]
+
+		// 处理菜单事件 (origin=4, msgtype=menu_event)
+		if msg.Origin == 4 && msg.MsgType == "menu_event" && msg.MenuEvent != nil {
+			logger.Infof(ctx, "[WeChatKF] Menu event received: menu_key=%s menu_id=%s userid=%s",
+				msg.MenuEvent.MenuKey, msg.MenuEvent.MenuID, msg.ExternalUserid)
+
+			// 判断是否为转人工菜单
+			if a.transferMenuKey != "" && msg.MenuEvent.MenuKey == a.transferMenuKey {
+				logger.Infof(ctx, "[WeChatKF] Transfer to human agent requested: userid=%s", msg.ExternalUserid)
+				// 调用转接 API
+				if err := a.TransferToAgent(ctx, openKfId, msg.ExternalUserid, a.transferUserID, "用户请求转人工"); err != nil {
+					logger.Errorf(ctx, "[WeChatKF] Transfer to agent failed: %v", err)
+					// 转接失败，发送提示消息
+					_ = a.SendTextReply(ctx, openKfId, msg.ExternalUserid, "转接人工客服失败，请稍后重试或直接拨打客服电话。")
+				} else {
+					logger.Infof(ctx, "[WeChatKF] Transfer to agent success: userid=%s", msg.ExternalUserid)
+					// 转接成功，发送提示消息
+					_ = a.SendTextReply(ctx, openKfId, msg.ExternalUserid, "正在为您转接人工客服，请稍候...")
+				}
+				return nil, nil // 菜单事件不需要进入 AI 处理流程
+			}
+
+			// 其他菜单事件，忽略
+			return nil, nil
+		}
+
 		// origin=3 表示客户发送的消息
 		if msg.Origin != 3 {
 			continue
@@ -445,6 +475,101 @@ func (a *Adapter) SendReply(ctx context.Context, incoming *im.IncomingMessage, r
 	}
 
 	logger.Infof(ctx, "[WeChatKF] Reply sent successfully: touser=%s open_kfid=%s", incoming.UserID, openKfId)
+	return nil
+}
+
+// SendTextReply sends a simple text message to a user (used for system notifications).
+func (a *Adapter) SendTextReply(ctx context.Context, openKfID, externalUserid, content string) error {
+	accessToken, err := a.getAccessToken(ctx)
+	if err != nil {
+		return fmt.Errorf("get access token: %w", err)
+	}
+
+	payload := map[string]interface{}{
+		"touser":    externalUserid,
+		"open_kfid": openKfID,
+		"msgtype":   "text",
+		"text": map[string]string{
+			"content": content,
+		},
+	}
+
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal payload: %w", err)
+	}
+
+	sendURL := fmt.Sprintf("%s/cgi-bin/kf/send_msg?access_token=%s", a.apiBaseURL, accessToken)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, sendURL, bytes.NewReader(payloadBytes))
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("send message: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		ErrCode int    `json:"errcode"`
+		ErrMsg  string `json:"errmsg"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("decode response: %w", err)
+	}
+	if result.ErrCode != 0 {
+		return fmt.Errorf("send text reply failed: code=%d msg=%s", result.ErrCode, result.ErrMsg)
+	}
+
+	return nil
+}
+
+// TransferToAgent transfers the current conversation to a human agent.
+func (a *Adapter) TransferToAgent(ctx context.Context, openKfID, externalUserid, userid, remark string) error {
+	accessToken, err := a.getAccessToken(ctx)
+	if err != nil {
+		return fmt.Errorf("get access token: %w", err)
+	}
+
+	payload := map[string]interface{}{
+		"open_kfid":       openKfID,
+		"external_userid": externalUserid,
+		"userid":          userid,
+		"need_record":     1,
+		"remark":          remark,
+	}
+
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal transfer payload: %w", err)
+	}
+
+	transferURL := fmt.Sprintf("%s/cgi-bin/kf/user/transfer?access_token=%s", a.apiBaseURL, accessToken)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, transferURL, bytes.NewReader(payloadBytes))
+	if err != nil {
+		return fmt.Errorf("create transfer request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("call transfer API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		ErrCode int    `json:"errcode"`
+		ErrMsg  string `json:"errmsg"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("decode transfer response: %w", err)
+	}
+	if result.ErrCode != 0 {
+		return fmt.Errorf("transfer error: code=%d msg=%s", result.ErrCode, result.ErrMsg)
+	}
+
 	return nil
 }
 
@@ -627,6 +752,11 @@ type syncMsgResponse struct {
 		File struct {
 			MediaID string `json:"media_id"`
 		} `json:"file,omitempty"`
+		MenuEvent *struct {
+			EventType int    `json:"event_type"`
+			MenuID    string `json:"menu_id"`
+			MenuKey   string `json:"menu_key"`
+		} `json:"menu_event,omitempty"`
 	} `json:"msg_list"`
 }
 
