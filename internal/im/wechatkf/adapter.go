@@ -370,10 +370,11 @@ func stripMarkdown(text string) string {
 	text = regexp.MustCompile(`(?m)^>\s+`).ReplaceAllString(text, "")
 	// 移除分割线 --- 或 ***
 	text = regexp.MustCompile(`(?m)^[-*_]{3,}$`).ReplaceAllString(text, "")
-	// 移除列表标记 - 或 * 开头
-	text = regexp.MustCompile(`(?m)^[\s]*[-*]\s+`).ReplaceAllString(text, "")
-	// 移除有序列表标记 1. 2. 等
-	text = regexp.MustCompile(`(?m)^[\s]*\d+\.\s+`).ReplaceAllString(text, "")
+	// 无序列表 - 或 * 开头 → • 开头（微信客服能正常显示）
+	text = regexp.MustCompile(`(?m)^[\s]*[-*]\s+`).ReplaceAllString(text, "• ")
+	// 嵌套有序列表（有缩进）→ 1) 格式，保留层级感
+	text = regexp.MustCompile(`(?m)^\s+(\d+)\.\s+`).ReplaceAllString(text, "$1) ")
+	// 顶层有序列表（无缩进）→ 保留 1. 格式不动
 	return strings.TrimSpace(text)
 }
 
