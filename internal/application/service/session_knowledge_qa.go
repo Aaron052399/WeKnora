@@ -822,7 +822,7 @@ func buildFallbackMessages(chatManage *types.ChatManage, promptContent string) [
 	messages := make([]chat.Message, 0, len(chatManage.History)*2+1)
 	messages = chatpipeline.AppendHistoryMessages(messages, chatManage.History)
 
-	userMsg := chat.Message{Role: "user", Content: promptContent}
+	userMsg := chat.Message{Role: "system", Content: promptContent}
 	if chatManage.ChatModelSupportsVision && len(chatManage.Images) > 0 {
 		userMsg.Images = chatManage.Images
 	}
