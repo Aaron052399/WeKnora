@@ -56,7 +56,10 @@ fix-docker.sh
 
 # WeChat Mini Program local/private configuration
 miniprogram/project.private.config.json
+
+# 本地修改无用文件
 docs/prompts-zh/agent-system-prompt.md
 docs/prompts-zh/fallback-prompt.md
 docs/prompts-zh/README.md
 docs/prompts-zh/system-prompt.md
+config/prompt_templates/intent_prompts.yaml.bak
