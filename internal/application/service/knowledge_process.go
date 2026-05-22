@@ -142,6 +142,34 @@ type ProcessChunksOptions struct {
 	Metadata     map[string]string
 }
 
+// finalizeIndexedKnowledgeState marks a document searchable as soon as chunks
+// and indexes are persisted; post-processing tasks should not keep parsing UI
+// indicators alive once retrieval can use the document.
+func finalizeIndexedKnowledgeState(
+	knowledge *types.Knowledge,
+	totalStorageSize int64,
+	textChunkCount int,
+	hasPendingMultimodal bool,
+	now time.Time,
+) {
+	if hasPendingMultimodal {
+		knowledge.ParseStatus = types.ParseStatusProcessing
+		knowledge.SummaryStatus = types.SummaryStatusNone
+	} else {
+		knowledge.ParseStatus = types.ParseStatusCompleted
+		if textChunkCount > 0 {
+			knowledge.SummaryStatus = types.SummaryStatusPending
+		} else {
+			knowledge.SummaryStatus = types.SummaryStatusNone
+		}
+	}
+
+	knowledge.EnableStatus = "enabled"
+	knowledge.StorageSize = totalStorageSize
+	knowledge.ProcessedAt = &now
+	knowledge.UpdatedAt = now
+}
+
 // buildSplitterConfig creates a SplitterConfig with fallbacks from a KnowledgeBase.
 // Defaults mirror chunker.DefaultChunkSize / DefaultChunkOverlap so behavior is
 // identical whether callers come through this path or invoke the chunker
@@ -244,7 +272,8 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 
 	// 删除旧的索引数据 — only when vector/keyword indexing is enabled
 	tenantInfo := ctx.Value(types.TenantInfoContextKey).(*types.Tenant)
-	retrieveEngine, err := retriever.NewCompositeRetrieveEngine(s.retrieveEngine, tenantInfo.GetEffectiveEngines())
+	retrieveEngine, err := retriever.CreateRetrieveEngineForKB(
+		ctx, s.retrieveEngine, s.ownership, tenantInfo.ID, kb.VectorStoreID)
 	if err == nil && embeddingModel != nil {
 		if err := retrieveEngine.DeleteByKnowledgeIDList(ctx, []string{knowledge.ID}, embeddingModel.GetDimensions(), knowledge.Type); err != nil {
 			logger.Warnf(ctx, "Failed to delete existing index data (may not exist): %v", err)
@@ -558,15 +587,14 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 	pendingMultimodal := isImage && options.EnableMultimodel && len(options.StoredImages) > 0
 	pendingPDFMultimodal := !isImage && !isVideo && options.EnableMultimodel && len(options.StoredImages) > 0
 
-	// For image files or documents with pending multimodal processing, keep "processing" status
-	if pendingMultimodal || pendingPDFMultimodal {
-		knowledge.ParseStatus = types.ParseStatusProcessing
-	}
-	knowledge.EnableStatus = "enabled"
-	knowledge.StorageSize = totalStorageSize
 	now := time.Now()
-	knowledge.ProcessedAt = &now
-	knowledge.UpdatedAt = now
+	finalizeIndexedKnowledgeState(
+		knowledge,
+		totalStorageSize,
+		len(textChunks),
+		pendingMultimodal || pendingPDFMultimodal,
+		now,
+	)
 
 	if err := s.repo.UpdateKnowledge(ctx, knowledge); err != nil {
 		logger.GetLogger(ctx).WithField("error", err).Errorf("processChunks update knowledge failed")
@@ -953,7 +981,8 @@ func (s *knowledgeService) ProcessSummaryGeneration(ctx context.Context, t *asyn
 		}
 		ctx = context.WithValue(ctx, types.TenantInfoContextKey, tenantInfo)
 
-		retrieveEngine, err := retriever.NewCompositeRetrieveEngine(s.retrieveEngine, tenantInfo.GetEffectiveEngines())
+		retrieveEngine, err := retriever.CreateRetrieveEngineForKB(
+			ctx, s.retrieveEngine, s.ownership, tenantInfo.ID, kb.VectorStoreID)
 		if err != nil {
 			logger.Errorf(ctx, "Failed to init retrieve engine: %v", err)
 			return fmt.Errorf("failed to init retrieve engine: %w", err)
@@ -1123,7 +1152,8 @@ func (s *knowledgeService) ProcessQuestionGeneration(ctx context.Context, t *asy
 	}
 	ctx = context.WithValue(ctx, types.TenantInfoContextKey, tenantInfo)
 
-	retrieveEngine, err := retriever.NewCompositeRetrieveEngine(s.retrieveEngine, tenantInfo.GetEffectiveEngines())
+	retrieveEngine, err := retriever.CreateRetrieveEngineForKB(
+		ctx, s.retrieveEngine, s.ownership, tenantInfo.ID, kb.VectorStoreID)
 	if err != nil {
 		exitStatus = "init_retrieve_engine_failed"
 		logger.Errorf(ctx, "Failed to init retrieve engine: %v", err)
@@ -1577,8 +1607,8 @@ func (s *knowledgeService) updateChunkVector(ctx context.Context, kbID string, c
 		ids = append(ids, chunk.ID)
 	}
 
-	tenantInfo := ctx.Value(types.TenantInfoContextKey).(*types.Tenant)
-	retrieveEngine, err := retriever.NewCompositeRetrieveEngine(s.retrieveEngine, tenantInfo.GetEffectiveEngines())
+	retrieveEngine, err := retriever.CreateRetrieveEngineForKB(
+		ctx, s.retrieveEngine, s.ownership, types.MustTenantIDFromContext(ctx), sourceKB.VectorStoreID)
 	if err != nil {
 		return err
 	}

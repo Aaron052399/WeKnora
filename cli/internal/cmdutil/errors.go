@@ -9,13 +9,13 @@ import (
 	"strings"
 )
 
-// ErrorCode is a namespaced stable identifier carried in the failure envelope.
-// SemVer governance: v0.x maintains the registry below; new codes are noted
-// in release notes. v0.9 introduces a CI compat test (see ADR-6b).
+// ErrorCode is a namespaced stable identifier emitted on stderr in the
+// `code: message` failure line. SemVer governance: v0.x maintains the
+// registry below; new codes are noted in release notes.
 type ErrorCode string
 
 const (
-	// auth.* — authentication / permission
+	// auth.* - authentication / permission
 	CodeAuthUnauthenticated    ErrorCode = "auth.unauthenticated"
 	CodeAuthTokenExpired       ErrorCode = "auth.token_expired"
 	CodeAuthBadCredential      ErrorCode = "auth.bad_credential"
@@ -28,14 +28,14 @@ const (
 	CodeResourceAlreadyExists ErrorCode = "resource.already_exists"
 	CodeResourceLocked        ErrorCode = "resource.locked"
 
-	// input.* — flag and argument validation
-	CodeInputInvalidArgument     ErrorCode = "input.invalid_argument"
-	CodeInputMissingFlag         ErrorCode = "input.missing_flag"
+	// input.* - flag and argument validation
+	CodeInputInvalidArgument ErrorCode = "input.invalid_argument"
+	CodeInputMissingFlag     ErrorCode = "input.missing_flag"
 	// CodeInputConfirmationRequired marks a high-risk write that has no
-	// interactive UI (non-TTY or --json) and was invoked without -y/--yes.
-	// Mapped to exit code 10 (lark-cli skill protocol — see cli/AGENTS.md).
-	// Agents must surface the envelope to the user and only retry with -y
-	// after explicit human approval; never auto-retry.
+	// interactive UI (non-TTY or JSON-output mode) and was invoked without
+	// -y/--yes. Mapped to exit code 10 (see cli/README.md). Agents must
+	// surface the error to the user and only retry with -y after explicit
+	// human approval; never auto-retry.
 	CodeInputConfirmationRequired ErrorCode = "input.confirmation_required"
 
 	// server.* / network.*
@@ -46,23 +46,41 @@ const (
 	CodeNetworkError              ErrorCode = "network.error"
 	// CodeSessionCreateFailed marks a chat invocation where the auto-created
 	// session POST failed. Surfaced as a typed code distinct from generic
-	// server.error so agents can retry with their own --session-id.
+	// server.error so agents can retry with their own --session.
 	CodeSessionCreateFailed ErrorCode = "server.session_create_failed"
 
-	// local.* — config / file / keychain on the user's machine
+	// operation.* - CLI-level wait/poll results
+	// CodeOperationTimeout marks a CLI-level wait/poll operation that exhausted
+	// its --timeout window. Distinct from CodeServerTimeout (HTTP 504). Mapped
+	// to exit 124 (matches the convention from GNU `timeout`).
+	CodeOperationTimeout ErrorCode = "operation.timeout"
+	// CodeOperationFailed marks a CLI-level wait/poll operation where one or
+	// more targets reached a terminal failure (e.g. doc wait found a doc with
+	// parse_status=failed). Distinct from server.* / network.* because the
+	// failure is the target's own terminal state, not a transient transport
+	// issue. Maps to exit 1 via the fall-through bucket.
+	CodeOperationFailed ErrorCode = "operation.failed"
+	// CodeOperationCancelled marks a long-running command interrupted by a
+	// caught signal (SIGINT / SIGTERM after main.go's signal.NotifyContext
+	// fires). Distinct from CodeUserAborted (declined confirm prompt) — the
+	// hints differ. main.go overrides the exit code to 130 for cancelled
+	// contexts so the user-visible exit follows Unix signal convention.
+	CodeOperationCancelled ErrorCode = "operation.cancelled"
+
+	// local.* - config / file / keychain on the user's machine
 	CodeLocalConfigCorrupt   ErrorCode = "local.config_corrupt"
 	CodeLocalKeychainDenied  ErrorCode = "local.keychain_denied"
 	CodeLocalFileIO          ErrorCode = "local.file_io"
 	CodeLocalUnimplemented   ErrorCode = "local.unimplemented"
 	CodeLocalContextNotFound ErrorCode = "local.context_not_found"
-	// v0.2 KB-resolution chain (spec §1.3) and project-link (spec §2.4) codes.
+	// KB-resolution chain and project-link codes.
 	CodeKBIDRequired       ErrorCode = "local.kb_id_required"
 	CodeKBNotFound         ErrorCode = "local.kb_not_found"
 	CodeProjectLinkCorrupt ErrorCode = "local.project_link_corrupt"
 	// CodeUserAborted marks a user-cancelled destructive operation (declined a
-	// confirm prompt). Distinct from SilentError so envelopes still carry a
-	// stable code; distinct from input.* because the user supplied valid args
-	// and simply chose not to proceed.
+	// confirm prompt). Distinct from SilentError so the stderr line still
+	// carries a stable code; distinct from input.* because the user supplied
+	// valid args and simply chose not to proceed.
 	CodeUserAborted ErrorCode = "local.user_aborted"
 	// CodeUploadFileNotFound marks a `weknora doc upload` invocation pointing at
 	// a path that does not exist. Distinct from CodeLocalFileIO (permission /
@@ -81,7 +99,9 @@ const (
 )
 
 // Error is the typed error implementations carry through the call stack.
-// RunE returns a *Error and the root command formats it into the envelope.
+// RunE returns a *Error and the root command renders it on stderr in
+// `code: message[: cause]\nhint: ...` form. Exit code is derived by
+// ExitCode().
 type Error struct {
 	Code       ErrorCode
 	Message    string
@@ -89,19 +109,11 @@ type Error struct {
 	Cause      error
 	Retryable  bool
 	HTTPStatus int
-	// Risk classifies the operation that produced this error. Set by callers
-	// invoking destructive write paths so envelope.risk surfaces to agents.
-	// Stored as the format.Risk JSON shape via OperationRisk to avoid an
-	// import cycle with internal/format.
-	OperationRisk *OperationRisk
-}
-
-// OperationRisk mirrors format.Risk in the cmdutil layer (avoiding a circular
-// import). cmdutil → format is OK; the inverse is not, so cmdutil owns its
-// own type and ToErrorBody / PrintErrorEnvelope translate.
-type OperationRisk struct {
-	Level  string // "read" | "write" | "high-risk-write"
-	Action string
+	// Silent suppresses PrintError's stderr output while preserving the
+	// typed Code for ExitCode. Set by commands that already wrote their
+	// own output (e.g. bulk operations reporting partial-success data on
+	// stdout) but still need to surface a non-zero exit code.
+	Silent bool
 }
 
 func (e *Error) Error() string {
@@ -126,8 +138,21 @@ func Wrapf(code ErrorCode, cause error, format string, args ...any) *Error {
 	return &Error{Code: code, Message: fmt.Sprintf(format, args...), Cause: cause}
 }
 
+// WrapHTTP wraps a transport / response error with the typed code derived
+// from its HTTP shape (404 → resource.not_found, 401 → auth.unauthenticated,
+// non-HTTP → network.error, …). Shortcut for the universal pattern
+// `Wrapf(ClassifyHTTPError(err), err, format, args...)` used by every SDK
+// call site - single source for the wrap-and-classify policy.
+//
+// Use this for any error returned from a wire call. Stays paired with
+// ClassifyHTTPErrorOutputs() in the acceptance/contract test, which
+// enumerates the codes this helper can yield.
+func WrapHTTP(cause error, format string, args ...any) *Error {
+	return Wrapf(ClassifyHTTPError(cause), cause, format, args...)
+}
+
 // FlagError signals user-visible flag/argument problems; the root command
-// prints help on top of the message and exits 2 (gh-style).
+// prints help on top of the message and exits 2.
 type FlagError struct{ err error }
 
 func (e *FlagError) Error() string { return e.err.Error() }
@@ -143,7 +168,7 @@ var SilentError = errors.New("silent error (handled)")
 // CancelError marks a user-cancelled operation (Ctrl-C / "no" at confirm).
 var CancelError = errors.New("operation cancelled")
 
-// Typed predicates — use these instead of comparing ErrorCode strings (Stripe pattern).
+// Typed predicates - use these instead of comparing ErrorCode strings.
 // They walk the error chain so wrapped errors still match.
 
 // IsAuthError matches any auth.* code.
@@ -183,7 +208,7 @@ func matchPrefix(err error, prefix string) bool {
 }
 
 // ClassifyHTTPStatus maps an HTTP status code to the canonical ErrorCode.
-// Single source of truth so envelope codes stay aligned whether the failure
+// Single source of truth so error codes stay aligned whether the failure
 // was detected by the SDK (string-formatted error) or by the CLI directly
 // (e.g. raw passthrough reading resp.StatusCode).
 func ClassifyHTTPStatus(status int) ErrorCode {
@@ -210,7 +235,7 @@ func ClassifyHTTPStatus(status int) ErrorCode {
 // parsing the "HTTP error <status>: ..." message format the SDK currently
 // emits (client.parseResponse). Until the SDK exposes a typed APIError this
 // is the lowest-friction way to surface 401/404/429/etc. as the right
-// envelope code instead of every server-side problem collapsing to
+// typed code instead of every server-side problem collapsing to
 // server.error.
 //
 // Returns CodeNetworkError when err is not an HTTP error (transport / DNS),
@@ -258,6 +283,8 @@ func AllCodes() []ErrorCode {
 		CodeProjectLinkCorrupt,
 		CodeUserAborted, CodeUploadFileNotFound,
 		CodeSSEStreamAborted, CodeSessionCreateFailed,
+		// operation
+		CodeOperationTimeout, CodeOperationFailed, CodeOperationCancelled,
 		// mcp
 		CodeMCPReadonlyMode, CodeMCPToolNotAllowed, CodeMCPSchemaUnknown,
 	}
@@ -278,6 +305,6 @@ func ClassifyHTTPErrorOutputs() []ErrorCode {
 		CodeServerRateLimited,     // 429
 		CodeServerError,           // 5xx / parse-failure / default
 		CodeInputInvalidArgument,  // 4xx (else)
-		CodeNetworkError,          // 非 HTTP error
+		CodeNetworkError,          // non-HTTP error
 	}
 }

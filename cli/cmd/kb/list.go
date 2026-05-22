@@ -9,27 +9,37 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/Tencent/WeKnora/cli/internal/agent"
 	"github.com/Tencent/WeKnora/cli/internal/cmdutil"
-	"github.com/Tencent/WeKnora/cli/internal/format"
 	"github.com/Tencent/WeKnora/cli/internal/iostreams"
 	"github.com/Tencent/WeKnora/cli/internal/text"
 	sdk "github.com/Tencent/WeKnora/client"
 )
 
-// ListOptions captures `weknora kb list` flags.
+// kbListFields enumerates the fields surfaced for `--format json` discovery on
+// `kb list`. Nested config structs (chunking / image / FAQ / VLM / storage
+// / extract) are intentionally omitted - users wanting those can use `--jq`
+// against the full object.
+var kbListFields = []string{
+	"id", "name", "type", "description",
+	"is_temporary", "is_pinned",
+	"embedding_model_id", "summary_model_id",
+	"knowledge_count", "chunk_count",
+	"is_processing", "processing_count",
+	"created_at", "updated_at",
+}
+
+// ListOptions captures `kb list` filter flag state.
 type ListOptions struct {
-	JSONOut bool
+	Pinned bool // --pinned: client-side filter to KBs with IsPinned == true
+	// Limit caps the returned slice client-side. 0 = no cap, 1..10000 = explicit.
+	// The KB list SDK is unpaginated; --all-pages is intentionally not exposed
+	// because it would be a no-op.
+	Limit int
 }
 
 // ListService is the narrow SDK surface this command depends on.
 type ListService interface {
 	ListKnowledgeBases(ctx context.Context) ([]sdk.KnowledgeBase, error)
-}
-
-// listResult is the typed payload emitted under data.items.
-type listResult struct {
-	Items []sdk.KnowledgeBase `json:"items"`
 }
 
 // NewCmdList builds `weknora kb list`.
@@ -38,40 +48,75 @@ func NewCmdList(f *cmdutil.Factory) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List knowledge bases visible to the active context",
+		Long:  `List knowledge bases visible to the active context, sorted by most recently updated. Pass --pinned to restrict to pinned KBs.`,
 		Args:  cobra.NoArgs,
 		RunE: func(c *cobra.Command, _ []string) error {
+			fopts, err := cmdutil.CheckFormatFlag(c)
+			if err != nil {
+				return err
+			}
+			fopts.ResolveDefault(iostreams.IO.IsStdoutTTY())
 			cli, err := f.Client()
 			if err != nil {
 				return err
 			}
-			return runList(c.Context(), opts, cli)
+			return runList(c.Context(), opts, fopts, cli)
 		},
 	}
-	cmd.Flags().BoolVar(&opts.JSONOut, "json", false, "Output JSON envelope")
-	agent.SetAgentHelp(cmd, "Lists all knowledge bases. Returns data.items: [{id, name, ...}]; empty array when none.")
+	cmd.Flags().BoolVar(&opts.Pinned, "pinned", false, "Only show pinned knowledge bases")
+	cmd.Flags().IntVarP(&opts.Limit, "limit", "L", 30, "Maximum results to return (0 = no cap, 1..10000 = explicit)")
+	cmdutil.AddFormatFlag(cmd, kbListFields...)
+	cmdutil.SetAgentHelp(cmd, cmdutil.AgentHelp{
+		UsedFor:  "List knowledge bases in the current tenant. Agents should use --format json to consume a stable {data, total, page, page_size} response.",
+		Examples: []string{"weknora kb list --format json"},
+		Output:   "array of KnowledgeBase objects with id, name, is_pinned, type, embedding_model_id",
+	})
 	return cmd
 }
 
-func runList(ctx context.Context, opts *ListOptions, svc ListService) error {
+func runList(ctx context.Context, opts *ListOptions, fopts *cmdutil.FormatOptions, svc ListService) error {
+	if opts.Limit < 0 || opts.Limit > 10000 {
+		return &cmdutil.Error{
+			Code:    cmdutil.CodeInputInvalidArgument,
+			Message: fmt.Sprintf("--limit must be in 0..10000 (0 = no cap), got %d", opts.Limit),
+		}
+	}
 	items, err := svc.ListKnowledgeBases(ctx)
 	if err != nil {
-		return cmdutil.Wrapf(cmdutil.ClassifyHTTPError(err), err, "list knowledge bases")
+		return cmdutil.WrapHTTP(err, "list knowledge bases")
 	}
 	if items == nil {
 		items = []sdk.KnowledgeBase{} // ensure JSON [] not null
 	}
-	// Spec §1.2: default sort by updated_at desc. Server return order is not
+	if opts.Pinned {
+		filtered := items[:0]
+		for _, kb := range items {
+			if kb.IsPinned {
+				filtered = append(filtered, kb)
+			}
+		}
+		items = filtered
+	}
+	// Default sort by updated_at desc. Server return order is not
 	// guaranteed, so client-side sort makes output deterministic regardless
 	// of backend storage choices.
 	sort.Slice(items, func(i, j int) bool {
 		return items[i].UpdatedAt.After(items[j].UpdatedAt)
 	})
+	// --limit applies after sort so the cap returns the top-N most-recent.
+	if opts.Limit > 0 && len(items) > opts.Limit {
+		items = items[:opts.Limit]
+	}
 
-	if opts.JSONOut {
-		return format.WriteEnvelope(iostreams.IO.Out, format.Success(listResult{Items: items}, nil))
+	if fopts.WantsJSON() {
+		return fopts.Emit(iostreams.IO.Out, items)
 	}
 
 	if len(items) == 0 {
+		if opts.Pinned {
+			fmt.Fprintln(iostreams.IO.Out, "(no pinned knowledge bases)")
+			return nil
+		}
 		fmt.Fprintln(iostreams.IO.Out, "(no knowledge bases)")
 		return nil
 	}

@@ -12,39 +12,45 @@ import (
 	"github.com/Tencent/WeKnora/cli/internal/iostreams"
 )
 
-// ListOptions captures `weknora auth list` flag state.
-type ListOptions struct {
-	JSONOut bool
+type ListOptions struct{}
+
+// authListFields enumerates the fields surfaced for `--format json` discovery on
+// `auth list`. Each entry is a per-context summary row.
+var authListFields = []string{
+	"name", "host", "user", "mode", "current",
 }
 
-// listEntry is one row in the rendered list / one element of envelope.data.
 type listEntry struct {
 	Name    string `json:"name"`
 	Host    string `json:"host"`
 	User    string `json:"user,omitempty"`
-	Mode    string `json:"mode"` // "api-key" / "password" / "unknown"
+	Mode    string `json:"mode"` // ModeBearer / ModeAPIKey / ModeUnknown
 	Current bool   `json:"current"`
 }
 
-// NewCmdList builds `weknora auth list`. Mirrors gh's per-host enumeration
-// and lark `auth list`: render one row per registered context, marking the
-// active one. Reads only ~/.config/weknora/config.yaml — no network, no
-// keyring touch.
+// NewCmdList builds `weknora auth list`. Per-host enumeration: render one
+// row per registered context, marking the active one. Reads only
+// ~/.config/weknora/config.yaml - no network, no keyring touch.
 func NewCmdList(f *cmdutil.Factory) *cobra.Command {
-	opts := &ListOptions{}
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List configured authentication contexts",
+		Long:  `Show every configured context (name, host, user, mode, current). Read-only; no network or keyring access.`,
 		Args:  cobra.NoArgs,
 		RunE: func(c *cobra.Command, _ []string) error {
-			return runList(opts, f)
+			fopts, err := cmdutil.CheckFormatFlag(c)
+			if err != nil {
+				return err
+			}
+			fopts.ResolveDefault(iostreams.IO.IsStdoutTTY())
+			return runList(fopts, f)
 		},
 	}
-	cmd.Flags().BoolVar(&opts.JSONOut, "json", false, "Output JSON envelope")
+	cmdutil.AddFormatFlag(cmd, authListFields...)
 	return cmd
 }
 
-func runList(opts *ListOptions, f *cmdutil.Factory) error {
+func runList(fopts *cmdutil.FormatOptions, f *cmdutil.Factory) error {
 	cfg, err := f.Config()
 	if err != nil {
 		return err
@@ -55,15 +61,14 @@ func runList(opts *ListOptions, f *cmdutil.Factory) error {
 			Name:    name,
 			Host:    c.Host,
 			User:    c.User,
-			Mode:    inferMode(c.APIKeyRef, c.TokenRef),
+			Mode:    modeFromRefs(c.APIKeyRef, c.TokenRef),
 			Current: name == cfg.CurrentContext,
 		})
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
 
-	if opts.JSONOut {
-		return cmdutil.NewJSONExporter().Write(iostreams.IO.Out,
-			format.Success(entries, &format.Meta{Context: cfg.CurrentContext}))
+	if fopts.WantsJSON() {
+		return fopts.Emit(iostreams.IO.Out, entries)
 	}
 	if len(entries) == 0 {
 		fmt.Fprintln(iostreams.IO.Out, "No contexts configured. Run `weknora auth login` to create one.")
@@ -76,29 +81,7 @@ func runList(opts *ListOptions, f *cmdutil.Factory) error {
 		if e.Current {
 			marker = "* "
 		}
-		fmt.Fprintf(tw, "%s%s\t%s\t%s\t%s\n", marker, e.Name, e.Host, dashIfEmpty(e.User), e.Mode)
+		fmt.Fprintf(tw, "%s%s\t%s\t%s\t%s\n", marker, e.Name, e.Host, format.DashIfEmpty(e.User), e.Mode)
 	}
 	return tw.Flush()
-}
-
-// inferMode reports which credential shape the context was logged in with.
-// A context with both refs set (which shouldn't happen with the current
-// login flow but might appear in hand-edited configs) is treated as
-// password — JWT wins because it's the more capable mode.
-func inferMode(apiKeyRef, tokenRef string) string {
-	switch {
-	case tokenRef != "":
-		return "password"
-	case apiKeyRef != "":
-		return "api-key"
-	default:
-		return "unknown"
-	}
-}
-
-func dashIfEmpty(s string) string {
-	if s == "" {
-		return "-"
-	}
-	return s
 }

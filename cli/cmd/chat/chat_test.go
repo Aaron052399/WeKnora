@@ -1,9 +1,11 @@
 package chat
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
@@ -12,7 +14,7 @@ import (
 	sdk "github.com/Tencent/WeKnora/client"
 )
 
-// fakeChatService implements chatService for unit tests. Tests configure the
+// fakeChatService implements ChatService for unit tests. Tests configure the
 // callback driver via streamEvents (delivered in order) and observe captured
 // inputs through the exported fields.
 type fakeChatService struct {
@@ -37,7 +39,7 @@ func (f *fakeChatService) CreateSession(_ context.Context, req *sdk.CreateSessio
 		return f.createSessionResp, nil
 	}
 	// Default: return a deterministic session id derived from the title so
-	// envelope assertions don't depend on uuid generation.
+	// JSON assertions don't depend on uuid generation.
 	return &sdk.Session{ID: "sess_auto", Title: req.Title}, nil
 }
 
@@ -56,9 +58,15 @@ func (f *fakeChatService) KnowledgeQAStream(ctx context.Context, sessionID strin
 	return f.streamErr
 }
 
-// Sanity: fakeChatService must satisfy chatService. Mirrors the production
-// var _ chatService = (*sdk.Client)(nil) check at the bottom of chat.go.
-var _ chatService = (*fakeChatService)(nil)
+// Sanity: fakeChatService must satisfy ChatService. Mirrors the production
+// var _ ChatService = (*sdk.Client)(nil) check at the bottom of chat.go.
+var _ ChatService = (*fakeChatService)(nil)
+
+// textOpts returns a FormatOptions configured for the text (human) render
+// path — the most common shape under test.
+func textOpts() *cmdutil.FormatOptions {
+	return &cmdutil.FormatOptions{Mode: cmdutil.FormatText}
+}
 
 func TestChat_StreamMode(t *testing.T) {
 	out, errBuf := iostreams.SetForTestWithTTY(t)
@@ -73,7 +81,7 @@ func TestChat_StreamMode(t *testing.T) {
 		},
 	}
 	opts := &Options{Query: "hi", KBID: "kb_1"}
-	if err := runChat(context.Background(), opts, svc); err != nil {
+	if err := runChat(context.Background(), opts, textOpts(), svc); err != nil {
 		t.Fatalf("runChat: %v", err)
 	}
 	got := out.String()
@@ -111,80 +119,52 @@ func TestChat_JSONMode(t *testing.T) {
 			{ResponseType: sdk.ResponseTypeComplete, Done: true},
 		},
 	}
-	opts := &Options{Query: "q", KBID: "kb_42", JSONOut: true}
-	if err := runChat(context.Background(), opts, svc); err != nil {
+	opts := &Options{Query: "q", KBID: "kb_42"}
+	if err := runChat(context.Background(), opts, &cmdutil.FormatOptions{Mode: cmdutil.FormatJSON}, svc); err != nil {
 		t.Fatalf("runChat: %v", err)
 	}
 
 	// JSON mode must NOT print the human session-hint on stderr; the session
-	// id is carried inside the envelope instead.
+	// id is carried inside the JSON object instead.
 	if errBuf.Len() != 0 {
 		t.Errorf("expected empty stderr in JSON mode, got %q", errBuf.String())
 	}
 
-	var env struct {
-		OK   bool `json:"ok"`
-		Data struct {
-			Answer             string `json:"answer"`
-			SessionID          string `json:"session_id"`
-			AssistantMessageID string `json:"assistant_message_id"`
-			KBID               string `json:"kb_id"`
-			Query              string `json:"query"`
-			References         []struct {
-				KnowledgeID string `json:"knowledge_id"`
-			} `json:"references"`
-		} `json:"data"`
+	var got struct {
+		Answer             string `json:"answer"`
+		SessionID          string `json:"session_id"`
+		AssistantMessageID string `json:"assistant_message_id"`
+		KBID               string `json:"kb_id"`
+		Query              string `json:"query"`
+		References         []struct {
+			KnowledgeID string `json:"knowledge_id"`
+		} `json:"references"`
 	}
-	if err := json.Unmarshal(out.Bytes(), &env); err != nil {
-		t.Fatalf("decode envelope: %v\n%s", err, out.String())
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("decode JSON: %v\n%s", err, out.String())
 	}
-	if !env.OK {
-		t.Errorf("expected ok:true, got %s", out.String())
+	if got.Answer != "answer body" {
+		t.Errorf("answer: got %q", got.Answer)
 	}
-	if env.Data.Answer != "answer body" {
-		t.Errorf("answer: got %q", env.Data.Answer)
+	if got.SessionID != "sess_auto" {
+		t.Errorf("session_id: got %q", got.SessionID)
 	}
-	if env.Data.SessionID != "sess_auto" {
-		t.Errorf("session_id: got %q", env.Data.SessionID)
+	if got.AssistantMessageID != "msg_99" {
+		t.Errorf("assistant_message_id: got %q", got.AssistantMessageID)
 	}
-	if env.Data.AssistantMessageID != "msg_99" {
-		t.Errorf("assistant_message_id: got %q", env.Data.AssistantMessageID)
+	if got.KBID != "kb_42" {
+		t.Errorf("kb_id: got %q", got.KBID)
 	}
-	if env.Data.KBID != "kb_42" {
-		t.Errorf("kb_id: got %q", env.Data.KBID)
+	if got.Query != "q" {
+		t.Errorf("query: got %q", got.Query)
 	}
-	if env.Data.Query != "q" {
-		t.Errorf("query: got %q", env.Data.Query)
-	}
-	if len(env.Data.References) != 1 || env.Data.References[0].KnowledgeID != "k1" {
-		t.Errorf("references payload missing: %+v", env.Data.References)
-	}
-}
-
-func TestChat_NoStreamFlag(t *testing.T) {
-	// TTY enabled, but --no-stream forces accumulate mode → no live writes
-	// during callback; entire answer printed once after Done.
-	out, _ := iostreams.SetForTestWithTTY(t)
-	var written string
-	svc := &fakeChatService{
-		streamEvents: []*sdk.StreamResponse{
-			{ResponseType: sdk.ResponseTypeAnswer, Content: "buffered "},
-			{ResponseType: sdk.ResponseTypeAnswer, Content: "answer"},
-			{ResponseType: sdk.ResponseTypeComplete, Done: true},
-		},
-	}
-	opts := &Options{Query: "q", KBID: "kb", NoStream: true}
-	if err := runChat(context.Background(), opts, svc); err != nil {
-		t.Fatalf("runChat: %v", err)
-	}
-	written = out.String()
-	if !strings.Contains(written, "buffered answer") {
-		t.Errorf("expected concatenated answer, got %q", written)
+	if len(got.References) != 1 || got.References[0].KnowledgeID != "k1" {
+		t.Errorf("references payload missing: %+v", got.References)
 	}
 }
 
 func TestChat_NonTTY_AccumulateMode(t *testing.T) {
-	// Non-TTY iostreams forces accumulate mode even without --no-stream.
+	// Non-TTY iostreams forces accumulate mode.
 	out, _ := iostreams.SetForTest(t)
 	svc := &fakeChatService{
 		streamEvents: []*sdk.StreamResponse{
@@ -193,7 +173,7 @@ func TestChat_NonTTY_AccumulateMode(t *testing.T) {
 		},
 	}
 	opts := &Options{Query: "q", KBID: "kb"}
-	if err := runChat(context.Background(), opts, svc); err != nil {
+	if err := runChat(context.Background(), opts, textOpts(), svc); err != nil {
 		t.Fatalf("runChat: %v", err)
 	}
 	if !strings.Contains(out.String(), "piped") {
@@ -207,18 +187,18 @@ func TestChat_SessionIDProvided(t *testing.T) {
 		streamEvents: []*sdk.StreamResponse{{ResponseType: sdk.ResponseTypeComplete, Done: true}},
 	}
 	opts := &Options{Query: "q", KBID: "kb", SessionID: "sess_existing"}
-	if err := runChat(context.Background(), opts, svc); err != nil {
+	if err := runChat(context.Background(), opts, textOpts(), svc); err != nil {
 		t.Fatalf("runChat: %v", err)
 	}
 	if svc.createCalled {
-		t.Error("CreateSession must NOT be invoked when --session-id is provided")
+		t.Error("CreateSession must NOT be invoked when --session is provided")
 	}
 	if svc.gotSessionID != "sess_existing" {
 		t.Errorf("stream sessionID: got %q want sess_existing", svc.gotSessionID)
 	}
 	// No auto-create message because the user supplied the id.
 	if strings.Contains(errBuf.String(), "session:") {
-		t.Errorf("unexpected session hint emitted with explicit --session-id: %q", errBuf.String())
+		t.Errorf("unexpected session hint emitted with explicit --session: %q", errBuf.String())
 	}
 }
 
@@ -227,7 +207,7 @@ func TestChat_KBIDRequired(t *testing.T) {
 	svc := &fakeChatService{}
 	// Run with KBID empty (bypassing the cobra resolver).
 	opts := &Options{Query: "q"}
-	err := runChat(context.Background(), opts, svc)
+	err := runChat(context.Background(), opts, textOpts(), svc)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -247,7 +227,7 @@ func TestChat_EmptyQuery(t *testing.T) {
 	_, _ = iostreams.SetForTest(t)
 	svc := &fakeChatService{}
 	opts := &Options{Query: "", KBID: "kb"}
-	err := runChat(context.Background(), opts, svc)
+	err := runChat(context.Background(), opts, textOpts(), svc)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -268,7 +248,7 @@ func TestChat_SDKError_PreStream(t *testing.T) {
 		streamErr: errors.New("HTTP error 401: token rejected"),
 	}
 	opts := &Options{Query: "q", KBID: "kb"}
-	err := runChat(context.Background(), opts, svc)
+	err := runChat(context.Background(), opts, textOpts(), svc)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -290,7 +270,7 @@ func TestChat_SDKError_MidStream_AbortsAsSSE(t *testing.T) {
 		streamErr:    errors.New("connection reset"),
 	}
 	opts := &Options{Query: "q", KBID: "kb"}
-	err := runChat(context.Background(), opts, svc)
+	err := runChat(context.Background(), opts, textOpts(), svc)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -309,7 +289,7 @@ func TestChat_ContextCancelled(t *testing.T) {
 	cancel() // simulate Ctrl-C delivered before the SDK returns.
 	svc := &fakeChatService{streamErr: context.Canceled}
 	opts := &Options{Query: "q", KBID: "kb"}
-	err := runChat(ctx, opts, svc)
+	err := runChat(ctx, opts, textOpts(), svc)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -317,8 +297,8 @@ func TestChat_ContextCancelled(t *testing.T) {
 	if !errors.As(err, &typed) {
 		t.Fatalf("expected *cmdutil.Error, got %T", err)
 	}
-	if typed.Code != cmdutil.CodeUserAborted {
-		t.Errorf("code: got %q want %q", typed.Code, cmdutil.CodeUserAborted)
+	if typed.Code != cmdutil.CodeOperationCancelled {
+		t.Errorf("code: got %q want %q", typed.Code, cmdutil.CodeOperationCancelled)
 	}
 }
 
@@ -328,7 +308,7 @@ func TestChat_SessionCreateFails(t *testing.T) {
 		createSessionErr: errors.New("dial tcp: connection refused"),
 	}
 	opts := &Options{Query: "q", KBID: "kb"}
-	err := runChat(context.Background(), opts, svc)
+	err := runChat(context.Background(), opts, textOpts(), svc)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -353,7 +333,7 @@ func TestChat_SessionCreate404SurfacesNotFound(t *testing.T) {
 		createSessionErr: errors.New("HTTP error 404: tenant not found"),
 	}
 	opts := &Options{Query: "q", KBID: "kb"}
-	err := runChat(context.Background(), opts, svc)
+	err := runChat(context.Background(), opts, textOpts(), svc)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -363,5 +343,59 @@ func TestChat_SessionCreate404SurfacesNotFound(t *testing.T) {
 	}
 	if typed.Code != cmdutil.CodeResourceNotFound {
 		t.Errorf("code: got %q want %q", typed.Code, cmdutil.CodeResourceNotFound)
+	}
+}
+
+func TestChat_FormatNDJSON_PassthroughsSDKEvents(t *testing.T) {
+	// Fake stream emits 3 events: thinking, answer, complete.
+	svc := &fakeChatService{
+		streamEvents: []*sdk.StreamResponse{
+			{ResponseType: sdk.ResponseTypeThinking, Content: "search KB"},
+			{ResponseType: sdk.ResponseTypeAnswer, Content: "hello"},
+			{ResponseType: sdk.ResponseTypeComplete, Done: true, SessionID: "sess_x"},
+		},
+	}
+	var stdout bytes.Buffer
+	prev := iostreams.IO.Out
+	iostreams.IO.Out = &stdout
+	defer func() { iostreams.IO.Out = prev }()
+	// Also redirect stderr so the auto-created session hint doesn't write to
+	// real stderr during tests.
+	prevErr := iostreams.IO.Err
+	iostreams.IO.Err = os.Stderr
+	defer func() { iostreams.IO.Err = prevErr }()
+
+	opts := &Options{Query: "hi", KBID: "kb_x"}
+	fopts := &cmdutil.FormatOptions{Mode: cmdutil.FormatNDJSON}
+	if err := runChat(context.Background(), opts, fopts, svc); err != nil {
+		t.Fatalf("runChat: %v", err)
+	}
+	lines := strings.Split(strings.TrimRight(stdout.String(), "\n"), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("got %d lines, want 3:\n%s", len(lines), stdout.String())
+	}
+	// Each line must be valid JSON with the right response_type.
+	var first map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &first); err != nil {
+		t.Fatalf("line 1 not JSON: %v", err)
+	}
+	if first["response_type"] != "thinking" {
+		t.Errorf("first event response_type=%v, want thinking", first["response_type"])
+	}
+	// Second line: answer.
+	var second map[string]any
+	if err := json.Unmarshal([]byte(lines[1]), &second); err != nil {
+		t.Fatalf("line 2 not JSON: %v", err)
+	}
+	if second["response_type"] != "answer" {
+		t.Errorf("second event response_type=%v, want answer", second["response_type"])
+	}
+	// Third line: complete with done=true.
+	var third map[string]any
+	if err := json.Unmarshal([]byte(lines[2]), &third); err != nil {
+		t.Fatalf("line 3 not JSON: %v", err)
+	}
+	if third["done"] != true {
+		t.Errorf("third event done=%v, want true", third["done"])
 	}
 }

@@ -18,6 +18,7 @@ type SystemInfo struct {
 	GraphDatabaseEngine string `json:"graph_database_engine,omitempty"`
 	MinioEnabled        bool   `json:"minio_enabled,omitempty"`
 	DBVersion           string `json:"db_version,omitempty"`
+	DBMigrationError    string `json:"db_migration_error,omitempty"`
 }
 
 // ParserEngine represents a document parser engine
@@ -48,6 +49,7 @@ type StorageCheckRequest struct {
 	COS      json.RawMessage `json:"cos,omitempty"`
 	TOS      json.RawMessage `json:"tos,omitempty"`
 	S3       json.RawMessage `json:"s3,omitempty"`
+	OBS      json.RawMessage `json:"obs,omitempty"`
 }
 
 // StorageCheckResponse is the response for storage engine check

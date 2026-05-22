@@ -45,12 +45,25 @@
                         </div>
                     </transition>
                 </div>
-                <div v-for="(session, id) in messagesList" :key='id'>
+                <!--
+                  关键：必须用 session.id 作为 key，不能用 v-for 的索引。
+                  向上滚动加载历史时会插入一批消息（push/unshift）到列表，
+                  若用索引作 key 会让所有已渲染消息的 key 漂移，触发整个列表的销毁重建
+                  （botmsg / AgentStreamDisplay 全部重新挂载、markdown 重新渲染），
+                  这是历史加载时白屏 + layout shift 蔓延到 session 列表的根因。
+                  仅对极少数尚未拿到 id 的本地占位消息 fallback 到 role+created_at+index。
+                -->
+                <div
+                    v-for="(session, index) in messagesList"
+                    :key="session.id || `${session.role}-${session.created_at}-${index}`"
+                    class="msg-item-wrapper"
+                >
+
                     <div v-if="session.role == 'user'">
                         <usermsg :content="session.content" :mentioned_items="session.mentioned_items" :images="session.images" :attachments="session.attachments" :embeddedMode="embeddedMode"></usermsg>
                     </div>
                     <div v-if="session.role == 'assistant'">
-                        <botmsg :content="session.content" :session="session" :user-query="getUserQuery(id)" @scroll-bottom="scrollToBottom"
+                        <botmsg :content="session.content" :session="session" :user-query="getUserQuery(index)" @scroll-bottom="scrollToBottom"
                             :isFirstEnter="isFirstEnter" :embeddedMode="embeddedMode"></botmsg>
                     </div>
                 </div>
@@ -92,7 +105,7 @@
 </template>
 <script setup>
 import { storeToRefs } from 'pinia';
-import { ref, onMounted, onUnmounted, nextTick, watch, reactive, onBeforeUnmount, defineProps } from 'vue';
+import { ref, onMounted, onUnmounted, nextTick, watch, reactive, markRaw, onBeforeUnmount, defineProps } from 'vue';
 import { useRoute, useRouter, onBeforeRouteLeave, onBeforeRouteUpdate } from 'vue-router';
 import InputField from '../../components/Input-field.vue';
 import botmsg from './components/botmsg.vue';
@@ -126,6 +139,28 @@ const route = useRoute();
 const router = useRouter();
 const session_id = ref(props.session_id || route.params.chatid);
 const sessionData = ref(null);
+
+// 拉 session 详情，并按其 last_request_state 把输入栏状态恢复到当时的发起态。
+// 嵌入式（embeddedMode）由宿主页面注入 agent/KB，所以跳过整套恢复逻辑，
+// 避免污染宿主的 settings store。
+const loadSessionAndHydrate = async (sid) => {
+    if (!sid || props.embeddedMode) return;
+    try {
+        const sessionRes = await getSession(sid);
+        if (sessionRes?.data) {
+            sessionData.value = sessionRes.data;
+            const lastState = sessionRes.data.last_request_state;
+            if (lastState) {
+                // 先把当前的"全局默认"快照下来，再用 session 状态覆盖；
+                // 离开会话时会从快照还原，避免本会话的状态污染新建对话。
+                useSettingsStoreInstance.snapshotAsDefaultsIfNeeded();
+                useSettingsStoreInstance.applyLastRequestState(lastState);
+            }
+        }
+    } catch (error) {
+        console.error('Failed to load session data:', error);
+    }
+};
 const inputFieldRef = ref();
 const created_at = ref('');
 const limit = ref(20);
@@ -137,6 +172,8 @@ const isNeedTitle = ref(false);
 const isFirstEnter = ref(true);
 const loading = ref(false);
 const historyLoading = ref(true);
+const historyLoadingMore = ref(false);
+const hasMoreHistory = ref(true);
 let fullContent = ref('')
 let userquery = ref('')
 const scrollContainer = ref(null)
@@ -237,6 +274,16 @@ const getUserQuery = (index) => {
     }
     return '';
 };
+
+const findLastMessage = (predicate) => {
+    for (let i = messagesList.length - 1; i >= 0; i--) {
+        const item = messagesList[i];
+        if (predicate(item)) {
+            return item;
+        }
+    }
+    return undefined;
+};
 watch([() => route.params], (newvalue) => {
     isFirstEnter.value = true;
     if (newvalue[0].chatid) {
@@ -248,12 +295,20 @@ watch([() => route.params], (newvalue) => {
         
         // 切换会话时，重置状态
         historyLoading.value = true;
+        historyLoadingMore.value = false;
+        hasMoreHistory.value = true;
+        created_at.value = '';
         loading.value = false;
         isReplying.value = false;
         currentAssistantMessageId.value = '';
         userHasScrolledUp.value = false;
-        
+
+        // 跨会话切换：先把旧会话覆盖前的全局默认还原，再让新会话重新拍快照
+        // 并应用自己的 last_request_state（在 loadSessionAndHydrate 内部完成）。
+        useSettingsStoreInstance.restoreDefaultsIfSnapshotted();
+
         checkmenuTitle(session_id.value)
+        loadSessionAndHydrate(session_id.value);
         let data = {
             session_id: session_id.value,
             created_at: '',
@@ -282,10 +337,11 @@ const debounce = (fn, delay) => {
     }
 }
 const onChatScrollTop = () => {
-    if (scrollLock.value) return;
+    if (scrollLock.value || historyLoadingMore.value || !hasMoreHistory.value) return;
+    if (!scrollContainer.value) return;
     const { scrollTop, scrollHeight } = scrollContainer.value;
     isFirstEnter.value = false
-    if (scrollTop == 0) {
+    if (scrollTop <= 0) {
         let data = {
             session_id: session_id.value,
             created_at: created_at.value,
@@ -301,13 +357,36 @@ const handleScroll = () => {
 };
 
 const getmsgList = (data, isScrollType = false, scrollHeight) => {
+    if (isScrollType) {
+        if (historyLoadingMore.value || !hasMoreHistory.value) return;
+        historyLoadingMore.value = true;
+    }
     getMessageList(data).then(res => {
-        if (res && res.data?.length) {
-            created_at.value = res.data[0].created_at;
-            handleMsgList(res.data, isScrollType, scrollHeight);
+        const batch = res?.data;
+        if (!batch?.length) {
+            if (isScrollType) {
+                hasMoreHistory.value = false;
+            }
+            return;
+        }
+        const nextCursor = batch[0].created_at;
+        if (isScrollType && created_at.value && nextCursor === created_at.value) {
+            hasMoreHistory.value = false;
+            return;
+        }
+        if (batch.length < limit.value) {
+            hasMoreHistory.value = false;
+        }
+        created_at.value = nextCursor;
+        handleMsgList(batch, isScrollType, scrollHeight);
+    }).catch((err) => {
+        console.error('Failed to load messages:', err);
+        if (isScrollType) {
+            hasMoreHistory.value = false;
         }
     }).finally(() => {
         historyLoading.value = false;
+        historyLoadingMore.value = false;
     })
 }
 
@@ -403,23 +482,33 @@ const reconstructEventStreamFromSteps = (agentSteps, messageContent, isCompleted
     return events;
 };
 const handleMsgList = async (data, isScrollType = false, newScrollHeight) => {
-    let chatlist = data.reverse()
+    // API 返回 created_at 升序（同秒时 user 在 assistant 前），保持该顺序渲染。
+    const chatlist = [...data];
+    const existingIds = new Set(messagesList.map(m => m.id).filter(Boolean));
+    const processed = [];
     for (let i = 0, len = chatlist.length; i < len; i++) {
         let item = chatlist[i];
+        if (item.id && existingIds.has(item.id)) {
+            continue;
+        }
+        if (item.id) {
+            existingIds.add(item.id);
+        }
         item.isAgentMode = false; // Agent 模式标记
-        item.agentEventStream = item.agentEventStream || [];
-        item._eventMap = new Map();
-        item._pendingToolCalls = new Map();
-        
+        // 历史消息的 agent_steps / agentEventStream 体量大、嵌套深，且是只读的，
+        // 用 markRaw 跳过 Vue 的深响应式转换，避免一次性 unshift 多条时主线程被 Proxy 转换卡住造成白屏。
+        item.agent_steps = item.agent_steps ? markRaw(item.agent_steps) : item.agent_steps;
+        item.agentEventStream = markRaw(item.agentEventStream || []);
+        item._eventMap = markRaw(new Map());
+        item._pendingToolCalls = markRaw(new Map());
+
         // Check if this message has agent_steps from database (historical agent conversation)
         // If so, reconstruct the agentEventStream to restore the exact conversation state
         if (item.agent_steps && Array.isArray(item.agent_steps) && item.agent_steps.length > 0) {
-            console.log('[Message Load] Reconstructing agent steps for message:', item.id, 'steps:', item.agent_steps.length);
             item.isAgentMode = true;
-            item.agentEventStream = reconstructEventStreamFromSteps(item.agent_steps, item.content, item.is_completed, item.is_fallback, item.agent_duration_ms || 0);
+            item.agentEventStream = markRaw(reconstructEventStreamFromSteps(item.agent_steps, item.content, item.is_completed, item.is_fallback, item.agent_duration_ms || 0));
             // 隐藏最终答案内容，因为它已经包含在 agentEventStream 的 answer 事件中
             item.hideContent = true;
-            console.log('[Message Load] Reconstructed', item.agentEventStream.length, 'events from agent steps');
         }
         
         if (item.content) {
@@ -447,15 +536,26 @@ const handleMsgList = async (data, isScrollType = false, newScrollHeight) => {
         // 非 Agent 模式下若 content 为空（例如用户停止时尚未产出任何文字），
         // 保持为空；botmsg.vue 会因 hasActualContent=false 不渲染内容区和 toolbar。
         // 此前这里会兜底为 "chat.cannotAnswer"，会让停止场景显示误导性文案并出现复制按钮。
-        messagesList.unshift(item);
-        if (isFirstEnter.value) {
-            scrollToBottom(true);
-        } else if (isScrollType) {
-            nextTick(() => {
-                const { scrollHeight } = scrollContainer.value;
-                scrollContainer.value.scrollTop = scrollHeight - newScrollHeight
-            })
+        processed.push(item);
+    }
+    if (processed.length > 0) {
+        if (isScrollType) {
+            // 逆序逐个 unshift，才能保持 user → assistant 的对话顺序。
+            for (let i = processed.length - 1; i >= 0; i--) {
+                messagesList.unshift(processed[i]);
+            }
+        } else {
+            messagesList.push(...processed);
         }
+    }
+    if (isFirstEnter.value) {
+        scrollToBottom(true);
+    } else if (isScrollType && scrollContainer.value && typeof newScrollHeight === 'number') {
+        nextTick(() => {
+            if (!scrollContainer.value) return;
+            const { scrollHeight } = scrollContainer.value;
+            scrollContainer.value.scrollTop = scrollHeight - newScrollHeight;
+        });
     }
     if (messagesList[messagesList.length - 1] && !messagesList[messagesList.length - 1].is_completed) {
         isReplying.value = true;
@@ -551,8 +651,12 @@ const sendMsg = async (value, modelId = '', mentionedItems = [], imageFiles = []
     // Get web search status from settings store
     const webSearchEnabled = props.embeddedMode ? false : useSettingsStoreInstance.isWebSearchEnabled;
     
-    // Get memory status from settings store
-    const enableMemory = props.embeddedMode ? false : useSettingsStoreInstance.isMemoryEnabled;
+    // Memory toggle is now a server-side per-user preference (see PUT
+    // /auth/me/preferences). For the normal logged-in chat we leave the
+    // field unset so the backend reads `user.preferences.enable_memory`;
+    // for embedded widgets we still send an explicit `false` so a user's
+    // personal "memory on" setting doesn't leak into a KB-embed context.
+    const enableMemoryOverride = props.embeddedMode ? false : undefined;
     
     // Get knowledge_base_ids from settings store (selected by user via KnowledgeBaseSelector)
     // Merge @mentioned KB/file IDs so retrieval uses the same targets user @mentioned (including shared KBs)
@@ -587,7 +691,7 @@ const sendMsg = async (value, modelId = '', mentionedItems = [], imageFiles = []
         agent_enabled: agentEnabled,
         agent_id: selectedAgentId,
         web_search_enabled: webSearchEnabled,
-        enable_memory: enableMemory,
+        enable_memory: enableMemoryOverride,
         summary_model_id: modelId,
         mcp_service_ids: mcpServiceIds,
         mentioned_items: mentionedItems,
@@ -638,7 +742,7 @@ onChunk((data) => {
         });
         
         // 检查是否是继续流式传输（消息已存在）
-        const existingMessage = messagesList.findLast((item) => item.id === data.id || item.request_id === data.id);
+        const existingMessage = findLastMessage((item) => item.id === data.id || item.request_id === data.id);
         if (!existingMessage) {
             // 新消息，设置 loading 状态
         loading.value = true;
@@ -689,7 +793,7 @@ onChunk((data) => {
             return;
         }
         // 非 Agent 模式：将 references 保存到消息中供 botmsg 使用
-        let existingMessage = messagesList.findLast((item) => item.request_id === data.id || item.id === data.id);
+        let existingMessage = findLastMessage((item) => item.request_id === data.id || item.id === data.id);
         
         // 如果消息还不存在，先创建一个空的 assistant 消息
         if (!existingMessage) {
@@ -737,7 +841,7 @@ onChunk((data) => {
     // 文案拼进 content，保留用户点停止时已经流式输出的内容不变。
     if (data.response_type === 'stop') {
         console.log('[Stop Event] Non-agent generation stopped');
-        const stoppedMessage = messagesList.findLast((item) => {
+        const stoppedMessage = findLastMessage((item) => {
             if (item.request_id === data.id) return true;
             return item.id === data.id;
         });
@@ -752,7 +856,7 @@ onChunk((data) => {
     }
 
     // 检查消息是否已经完成，如果已完成则忽略后续的完成事件（防止空内容覆盖）
-    const existingMessage = messagesList.findLast((item) => {
+    const existingMessage = findLastMessage((item) => {
         if (item.request_id === data.id) {
             return true
         }
@@ -808,7 +912,7 @@ onChunk((data) => {
 })
 // 处理 Agent 流式数据 (Cursor-style UI)
 const handleAgentChunk = (data) => {
-    let message = messagesList.findLast((item) => item.request_id === data.id || item.id === data.id);
+    let message = findLastMessage((item) => item.request_id === data.id || item.id === data.id);
     
     if (!message) {
         // 创建新的 Assistant 消息 - 此时开始显示内容，关闭 loading
@@ -1172,7 +1276,7 @@ const handleAgentChunk = (data) => {
 };
 
 const updateAssistantSession = (payload) => {
-    const message = messagesList.findLast((item) => {
+    const message = findLastMessage((item) => {
         if (item.request_id === payload.id) {
             return true
         }
@@ -1201,6 +1305,8 @@ const handleSessionCleared = (e) => {
     if (e.detail?.sessionId === session_id.value) {
         messagesList.splice(0);
         created_at.value = '';
+        hasMoreHistory.value = true;
+        historyLoadingMore.value = false;
     }
 };
 
@@ -1225,16 +1331,9 @@ onMounted(async () => {
     loading.value = false;
     isReplying.value = false;
     
-    // Load session data to get agent_config
-    try {
-        const sessionRes = await getSession(session_id.value);
-        if (sessionRes?.data) {
-            sessionData.value = sessionRes.data;
-        }
-    } catch (error) {
-        console.error('Failed to load session data:', error);
-    }
-    
+    // 拉会话详情；若服务端记录了 last_request_state，则按其恢复输入栏状态。
+    await loadSessionAndHydrate(session_id.value);
+
     checkmenuTitle(session_id.value)
     if (firstQuery.value) {
         scrollLock.value = true;
@@ -1243,6 +1342,8 @@ onMounted(async () => {
         usemenuStore.changeFirstQuery('', [], '', [], []);
     } else {
         scrollLock.value = false;
+        hasMoreHistory.value = true;
+        historyLoadingMore.value = false;
         let data = {
             session_id: session_id.value,
             created_at: '',
@@ -1266,10 +1367,14 @@ onUnmounted(() => {
 });
 onBeforeRouteLeave((to, from, next) => {
     clearData()
+    // 离开聊天会话 → 还原"用户全局默认"，避免旧会话的请求态泄漏到新建对话。
+    useSettingsStoreInstance.restoreDefaultsIfSnapshotted();
     next()
 })
 onBeforeRouteUpdate((to, from, next) => {
     clearData()
+    // 仅"会话 → 会话"会落到这里；跨会话覆盖的还原放到 route.params 的 watch 里，
+    // 因为新会话的 getSession 也在那边触发，便于保证 restore→snapshot→apply 顺序。
     next()
 })
 </script>
@@ -1452,6 +1557,22 @@ onBeforeRouteUpdate((to, from, next) => {
     flex: 1;
     margin: 0 auto;
     width: 100%;
+
+    /*
+      给每条消息加 layout/style containment：
+      - 一条消息的内部布局变化不再让浏览器去 invalidate 整个文档，
+        这是修掉"hover 到 session 列表也变白"那个问题的关键。
+      - 不要再用 content-visibility: auto / contain-intrinsic-size：
+        agent 消息真实高度差异巨大（几百 ~ 数千 px），估的占位高度会让消息进入视口时
+        反复发生"占位 -> 真实高度"的大幅 layout shift + 首次 paint 滞后，
+        反而在向上滚动时制造"未画完"的白屏闪烁。
+        当前 handleMsgList 全流程 ~50ms，根本无需跳过渲染，老老实实正常渲染最稳。
+      - 不开 contain: paint：AgentStreamDisplay 里有 tooltip / popover 等会溢出的浮层，
+        paint containment 会把它们裁掉。
+    */
+    .msg-item-wrapper {
+        contain: layout style;
+    }
 
     .botanswer_laoding_gif {
         width: 24px;

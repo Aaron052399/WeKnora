@@ -1,8 +1,8 @@
-// Package contextcmd holds `weknora context` command tree (use; list / set /
-// delete in v0.4).
+// Package contextcmd holds the `weknora context` command tree
+// (list / add / remove / use).
 //
 // Package name `contextcmd` (not `context`) to avoid shadowing stdlib context.
-// The cobra Use: string is "context" — this is what users type.
+// The cobra Use: string is "context" - this is what users type.
 package contextcmd
 
 import (
@@ -19,6 +19,9 @@ func NewCmd(f *cmdutil.Factory) *cobra.Command {
 		Args:  cobra.NoArgs,
 		Run:   func(c *cobra.Command, _ []string) { _ = c.Help() },
 	}
+	cmd.AddCommand(NewCmdList(f))
+	cmd.AddCommand(NewCmdAdd(f))
+	cmd.AddCommand(NewCmdRemove(f))
 	cmd.AddCommand(NewCmdUse(f))
 	return cmd
 }

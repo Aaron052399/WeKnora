@@ -1,23 +1,22 @@
-// Package doctor implements `weknora doctor` — 4-item self-check (spec §1.2).
+// Package doctor implements `weknora doctor` - 4-item self-check.
 //
-// Status semantics (4-tier, from larksuite/cli's pass/fail/warn/skip set):
+// Status semantics (4-tier):
 //
-//	ok   — passed
-//	warn — soft problem; non-blocking (e.g. server minor older than CLI,
+//	ok   - passed
+//	warn - soft problem; non-blocking (e.g. server minor older than CLI,
 //	       keychain unavailable so falling back to file store)
-//	fail — failed; "hint" actionable
-//	skip — cascade-skipped (prereq failed) or --offline mode
+//	fail - failed; "hint" actionable
+//	skip - cascade-skipped (prereq failed) or --offline mode
 //
-// Envelope (v0.2):
-//   - any check is fail   → envelope.ok=false, exit 1 (RunE returns SilentError
-//     so the data envelope is still emitted; the framework's error-envelope
-//     printer is bypassed for this command)
-//   - warn only / all ok  → envelope.ok=true,  exit 0
-//   - warn does NOT flip envelope.ok
+// JSON output emits the Result object directly (bare data). Exit-code
+// signal:
+//   - any check is fail   → exit 1 (RunE returns SilentError so the data
+//     object is still emitted)
+//   - warn only / all ok  → exit 0
 //
-// data.summary.all_passed gives the agent a one-line short-circuit; v0.2
-// keeps it true ONLY when no warn / fail / skip checks are present. Agents
-// SHOULD also inspect data.checks[].status to distinguish warn from ok.
+// summary.all_passed gives the agent a one-line short-circuit; it is true
+// ONLY when no warn / fail / skip checks are present. Agents SHOULD also
+// inspect checks[].status to distinguish warn from ok.
 package doctor
 
 import (
@@ -29,21 +28,21 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/Tencent/WeKnora/cli/internal/agent"
 	"github.com/Tencent/WeKnora/cli/internal/build"
 	"github.com/Tencent/WeKnora/cli/internal/cmdutil"
 	"github.com/Tencent/WeKnora/cli/internal/compat"
-	"github.com/Tencent/WeKnora/cli/internal/format"
 	"github.com/Tencent/WeKnora/cli/internal/iostreams"
 	"github.com/Tencent/WeKnora/cli/internal/secrets"
 	sdk "github.com/Tencent/WeKnora/client"
 )
 
-// Options captures the CLI flags for `weknora doctor`.
+// doctorFields enumerates the fields surfaced for `--format json` discovery on
+// `doctor`. Items here refer to data.checks[*] entries (Check struct).
+var doctorFields = []string{"name", "status", "details", "hint"}
+
 type Options struct {
 	NoCache bool
 	Offline bool
-	JSONOut bool
 }
 
 // Status is the per-check outcome on the wire (JSON Marshal still emits the
@@ -66,11 +65,11 @@ type Check struct {
 	Hint    string `json:"hint,omitempty"`
 }
 
-// Summary is the agent-friendly short-circuit payload (spec §1.2).
+// Summary is the agent-friendly short-circuit payload.
 //
 // AllPassed is true only when there are zero warn/fail/skip rows; warn does
-// not block exit-0 (envelope.ok stays true) but it does flip AllPassed so
-// agents reading just the boolean still notice the soft issue.
+// not block exit-0 but it does flip AllPassed so agents reading just the
+// boolean still notice the soft issue.
 type Summary struct {
 	AllPassed bool `json:"all_passed"`
 	Passed    int  `json:"passed"`
@@ -79,7 +78,7 @@ type Summary struct {
 	Skipped   int  `json:"skipped"`
 }
 
-// Result is the full envelope data.
+// Result is the bare JSON payload.
 type Result struct {
 	Summary Summary `json:"summary"`
 	Checks  []Check `json:"checks"`
@@ -99,18 +98,24 @@ func NewCmd(f *cmdutil.Factory) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Run 4 self-checks: base URL, auth, server version, credential storage",
+		Args:  cobra.NoArgs,
 		RunE: func(c *cobra.Command, _ []string) error {
+			fopts, err := cmdutil.CheckFormatFlag(c)
+			if err != nil {
+				return err
+			}
+			fopts.ResolveDefault(iostreams.IO.IsStdoutTTY())
 			svc, err := buildServices(f)
 			if err != nil {
 				return err
 			}
 			cliVer, _, _ := build.Info()
 			r := runChecks(c.Context(), opts, svc, cliVer)
-			emit(opts, r)
-			// v0.2 exit-code policy: fail → exit 1 (gh / kubectl convention);
-			// warn / ok / skip → exit 0. SilentError suppresses both the human
-			// "error: ..." line and the error envelope printer, so the data
-			// envelope already written by emit() is the only stdout content.
+			emit(fopts, r)
+			// Exit-code policy: fail → exit 1; warn / ok / skip → exit 0.
+			// SilentError suppresses both the human "error: ..." line and
+			// the stderr error formatter, so the JSON already written by
+			// emit() is the only stdout content.
 			if r.Summary.Failed > 0 {
 				return cmdutil.SilentError
 			}
@@ -119,8 +124,7 @@ func NewCmd(f *cmdutil.Factory) *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&opts.NoCache, "no-cache", false, "Bypass server-info cache (located at $XDG_CACHE_HOME/weknora/server-info.yaml); force re-probe")
 	cmd.Flags().BoolVar(&opts.Offline, "offline", false, "Skip network checks; only verify local keyring/file storage (credential_storage check still runs)")
-	cmd.Flags().BoolVar(&opts.JSONOut, "json", false, "Output JSON envelope")
-	agent.SetAgentHelp(cmd, "Returns 4 health checks. AGENT short-circuit: read data.summary.all_passed; if false, inspect data.checks[].status (ok/warn/fail/skip). exit 1 only when any status=fail; warn does not change envelope.ok.")
+	cmdutil.AddFormatFlag(cmd, doctorFields...)
 	return cmd
 }
 
@@ -128,7 +132,7 @@ func NewCmd(f *cmdutil.Factory) *cobra.Command {
 // offline-mode skip and prereq-failed skip. Returns true when the check has
 // been completed (Status set on c) and the caller should NOT run its body.
 //
-// A prereq is considered "passing" if its Status is OK or Warn — warn signals
+// A prereq is considered "passing" if its Status is OK or Warn - warn signals
 // a soft problem that does not block downstream functionality. Only fail/skip
 // cascades into a downstream skip.
 func cascade(c *Check, offline bool, prereqs ...*Check) bool {
@@ -155,7 +159,7 @@ func runChecks(ctx context.Context, opts *Options, svc Services, cliVer string) 
 		{Name: "credential_storage"},
 	}
 
-	// 1. base_url_reachable — gated by offline only.
+	// 1. base_url_reachable - gated by offline only.
 	if !cascade(&checks[0], opts.Offline) {
 		t0 := time.Now()
 		if err := svc.PingBaseURL(ctx); err != nil {
@@ -168,7 +172,7 @@ func runChecks(ctx context.Context, opts *Options, svc Services, cliVer string) 
 		}
 	}
 
-	// 2. auth_credential — needs base_url.
+	// 2. auth_credential - needs base_url.
 	if !cascade(&checks[1], opts.Offline, &checks[0]) {
 		if _, err := svc.GetCurrentUser(ctx); err != nil {
 			checks[1].Status = StatusFail
@@ -179,7 +183,7 @@ func runChecks(ctx context.Context, opts *Options, svc Services, cliVer string) 
 		}
 	}
 
-	// 3. server_version — needs auth_credential.
+	// 3. server_version - needs auth_credential.
 	if !cascade(&checks[2], opts.Offline, &checks[1]) {
 		info, fromCache, err := loadOrProbeServerInfo(ctx, opts, svc)
 		if err != nil {
@@ -190,18 +194,18 @@ func runChecks(ctx context.Context, opts *Options, svc Services, cliVer string) 
 		}
 	}
 
-	// 4. credential_storage — independent of network; never gated by offline.
+	// 4. credential_storage - independent of network; never gated by offline.
 	fillCredentialStorageCheck(&checks[3])
 
 	return Result{Summary: summarize(checks), Checks: checks}
 }
 
 // fillVersionCheck applies compat.Compat to (server, cli) version pair and
-// sets Status/Details/Hint on c. fromCache toggles the "cached" suffix —
+// sets Status/Details/Hint on c. fromCache toggles the "cached" suffix -
 // the loader knows authoritatively which branch it took, time-based
 // derivation from ProbedAt is unreliable since SaveCache uses time.Now().
 //
-// v0.2 mapping:
+// Mapping:
 //
 //	compat.OK        → StatusOK
 //	compat.SoftWarn  → StatusWarn  (server older but in-range; soft skew)
@@ -234,8 +238,8 @@ func fillVersionCheck(c *Check, info *compat.Info, cliVer string, fromCache bool
 	}
 }
 
-// credStoreFactory is the seam tests use to inject a fake-store outcome —
-// keyring success, file-store fallback, or hard failure — without touching
+// credStoreFactory is the seam tests use to inject a fake-store outcome -
+// keyring success, file-store fallback, or hard failure - without touching
 // the lazy-resolve buildServices contract (round-4 fix). Production stays
 // at secrets.NewBestEffortStore.
 var credStoreFactory = func() (secrets.Store, error) { return secrets.NewBestEffortStore() }
@@ -243,7 +247,7 @@ var credStoreFactory = func() (secrets.Store, error) { return secrets.NewBestEff
 // SetCredStoreFactoryForTest overrides the credential-storage factory used by
 // runChecks and returns a cleanup function that restores the previous value.
 // Exported so out-of-package tests (notably cli/acceptance/contract) can
-// pin the credential_storage outcome — otherwise the check probes the real
+// pin the credential_storage outcome - otherwise the check probes the real
 // OS keyring, which is present on macOS dev machines but not on Linux CI
 // runners without libsecret, producing host-dependent test flakes.
 //
@@ -264,7 +268,7 @@ func SetCredStoreFactoryForTest(fn func() (secrets.Store, error)) (restore func(
 //
 //	keyring usable  → StatusOK   (preferred path)
 //	file fallback   → StatusWarn (keyring unavailable, secrets still persist
-//	                  with 0600 file perms — agent containers / WSL hit this)
+//	                  with 0600 file perms - agent containers / WSL hit this)
 //	construction fails → StatusFail
 //
 // Detection of "fallback to file store" relies on the type returned by
@@ -325,16 +329,12 @@ func summarize(cs []Check) Summary {
 	return s
 }
 
-// emit renders the doctor result. JSON path constructs the envelope directly
-// rather than calling format.Success because envelope.ok must reflect "no
-// fail" — warn does not flip it (per package doc), but fail does. We can't
-// use format.Failure either, since that drops the data field.
-func emit(opts *Options, r Result) {
-	if opts.JSONOut {
-		_ = format.WriteEnvelope(iostreams.IO.Out, format.Envelope{
-			OK:   r.Summary.Failed == 0,
-			Data: r,
-		})
+// emit renders the doctor result. The JSON path emits the Result directly;
+// pass/fail signaling is conveyed by summary.failed (and the process exit
+// code, set by the caller).
+func emit(fopts *cmdutil.FormatOptions, r Result) {
+	if fopts.WantsJSON() {
+		_ = fopts.Emit(iostreams.IO.Out, r)
 		return
 	}
 	for _, c := range r.Checks {
@@ -356,9 +356,9 @@ func emit(opts *Options, r Result) {
 
 // marker returns the human-mode prefix glyph for a check status.
 //
-// Glyphs follow gh / kubectl convention. Agent / JSON consumers read the
-// stable status string from data.checks[].status; the glyphs are presentation-
-// only and never appear in --json output.
+// Agent / JSON consumers read the stable status string from
+// data.checks[].status; the glyphs are presentation-only and never appear
+// in --format json output.
 func marker(s Status) string {
 	switch s {
 	case StatusFail:
@@ -377,7 +377,7 @@ func marker(s Status) string {
 // server, not localhost.
 //
 // Critically: this does NOT pre-resolve f.Client(). doctor's package promise
-// (top comment) is that credential_storage runs even when no auth is set up —
+// (top comment) is that credential_storage runs even when no auth is set up -
 // e.g. first-time `weknora doctor` to diagnose setup. Pre-resolving Client
 // here would early-exit with auth.unauthenticated before any check runs,
 // contradicting the docs. Instead, GetCurrentUser / GetSystemInfo lazily
@@ -442,7 +442,7 @@ func (s *realServices) GetCurrentUser(ctx context.Context) (*sdk.CurrentUserResp
 
 // GetSystemInfo lazily resolves the SDK client (same rationale as GetCurrentUser).
 // In the cascade ordering, auth_credential gates server_version, so this only
-// runs when auth_credential succeeded — but the lazy resolution keeps doctor
+// runs when auth_credential succeeded - but the lazy resolution keeps doctor
 // useful when only credential_storage is checkable (e.g., user not yet logged in).
 func (s *realServices) GetSystemInfo(ctx context.Context) (*sdk.SystemInfo, error) {
 	cli, err := s.f.Client()
@@ -451,4 +451,3 @@ func (s *realServices) GetSystemInfo(ctx context.Context) (*sdk.SystemInfo, erro
 	}
 	return cli.GetSystemInfo(ctx)
 }
-

@@ -1,11 +1,7 @@
 // Package xdg consolidates the XDG-rooted file path lookup and atomic-write
-// idioms used by config / compat / secrets / future stores.
-//
-// Before extraction these patterns were copy-pasted across cli/internal/{config,
-// compat, secrets}; reuse review surfaced 3× duplication of Path and 2× of the
-// tmp+rename atomic-write recipe. Centralizing here means a single place to fix
-// behavior (mode bits, fallback dirs, mkdir order, error wrapping) and one less
-// thing to copy when v0.2 adds project-link / state stores.
+// idioms used by config / compat / secrets / projectlink. Centralizing means
+// a single place to fix behavior (mode bits, fallback dirs, mkdir order,
+// error wrapping) instead of copy-pasting across stores.
 package xdg
 
 import (
@@ -21,9 +17,8 @@ import (
 // under $HOME used when the env var is unset (".config" / ".cache" / etc.).
 // parts join under "weknora/" inside the chosen root.
 //
-// Honors the XDG vars on every OS (CLI convention — gh / kubectl / helm all
-// do this even on macOS, where os.UserConfigDir would otherwise return
-// ~/Library/Application Support).
+// Honors the XDG vars on every OS, even macOS - where os.UserConfigDir
+// would otherwise return ~/Library/Application Support.
 func Path(envVar, fallbackDir string, parts ...string) (string, error) {
 	if x := os.Getenv(envVar); x != "" {
 		return filepath.Join(append([]string{x, "weknora"}, parts...)...), nil

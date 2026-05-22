@@ -6,12 +6,14 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/Tencent/WeKnora/cli/internal/agent"
 	"github.com/Tencent/WeKnora/cli/internal/cmdutil"
 	"github.com/Tencent/WeKnora/cli/internal/config"
-	"github.com/Tencent/WeKnora/cli/internal/format"
 	"github.com/Tencent/WeKnora/cli/internal/iostreams"
 )
+
+// contextUseFields enumerates fields surfaced for `--format json` discovery on
+// `context use`.
+var contextUseFields = []string{"current_context", "previous_context"}
 
 // NewCmdUse builds the `weknora context use <name>` command.
 func NewCmdUse(f *cmdutil.Factory) *cobra.Command {
@@ -29,13 +31,18 @@ you to. Context selection is a user preference; one-shot overrides should use
 the global --context flag instead, which writes nothing to disk.`,
 		Example: `  weknora context use staging               # persist switch
   weknora --context staging kb list         # one-shot override (no disk write)
-  weknora context use --help                # this help`,
+  weknora context use staging --format json        # {current_context, previous_context}`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
-			return runUse(args[0])
+			fopts, err := cmdutil.CheckFormatFlag(c)
+			if err != nil {
+				return err
+			}
+			fopts.ResolveDefault(iostreams.IO.IsStdoutTTY())
+			return runUse(args[0], fopts)
 		},
 	}
-	agent.SetAgentHelp(cmd, "Switches default CLI context. Returns previous_context + current_context. Errors with hint when name unknown.")
+	cmdutil.AddFormatFlag(cmd, contextUseFields...)
 	return cmd
 }
 
@@ -44,7 +51,7 @@ type useResult struct {
 	PreviousContext string `json:"previous_context,omitempty"`
 }
 
-func runUse(name string) error {
+func runUse(name string, fopts *cmdutil.FormatOptions) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return err
@@ -57,10 +64,16 @@ func runUse(name string) error {
 	if err := config.Save(cfg); err != nil {
 		return err
 	}
-	return format.WriteEnvelope(iostreams.IO.Out, format.Success(useResult{
-		CurrentContext:  name,
-		PreviousContext: prev,
-	}, nil))
+	result := useResult{CurrentContext: name, PreviousContext: prev}
+	if fopts.WantsJSON() {
+		return fopts.Emit(iostreams.IO.Out, result)
+	}
+	if prev != "" && prev != name {
+		fmt.Fprintf(iostreams.IO.Out, "✓ Switched context to %s (was %s)\n", name, prev)
+	} else {
+		fmt.Fprintf(iostreams.IO.Out, "✓ Active context: %s\n", name)
+	}
+	return nil
 }
 
 func notFoundError(name string, cfg *config.Config) error {
@@ -68,7 +81,7 @@ func notFoundError(name string, cfg *config.Config) error {
 		return &cmdutil.Error{
 			Code:    cmdutil.CodeLocalContextNotFound,
 			Message: fmt.Sprintf("context not found: %s", name),
-			Hint:    "no contexts registered — run `weknora auth login` first",
+			Hint:    "no contexts registered - run `weknora auth login` first",
 		}
 	}
 	keys := contextKeys(cfg.Contexts)

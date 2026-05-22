@@ -3,44 +3,64 @@ package doc
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
+	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
 
-	"github.com/Tencent/WeKnora/cli/internal/agent"
 	"github.com/Tencent/WeKnora/cli/internal/cmdutil"
-	"github.com/Tencent/WeKnora/cli/internal/format"
 	"github.com/Tencent/WeKnora/cli/internal/iostreams"
 	"github.com/Tencent/WeKnora/cli/internal/text"
 	sdk "github.com/Tencent/WeKnora/client"
 )
 
-// ListOptions captures `weknora doc list` flags.
-type ListOptions struct {
-	Page     int
-	PageSize int
-	JSONOut  bool
+// docListFields enumerates the fields surfaced for `--format json` discovery on
+// `doc list`. Filter applies to each Knowledge object in the bare array.
+var docListFields = []string{
+	"id", "knowledge_base_id", "tag_id", "type", "title", "description",
+	"source", "channel", "parse_status", "summary_status", "enable_status",
+	"embedding_model_id", "file_name", "file_type", "file_size", "file_hash",
+	"file_path", "storage_size",
+	"created_at", "updated_at", "processed_at", "error_message",
 }
+
+type ListOptions struct {
+	PageSize int // Items per server batch. With --all-pages, controls
+	// per-request load. Without, controls the single page size.
+	Status string // --status: filter by parse_status (server-side query param)
+	// Limit caps the returned items client-side (default 30; 0 = no cap).
+	// Applied after pagination / --all-pages accumulation and sort.
+	Limit int
+	// AllPages walks server pages internally, accumulating items until
+	// total exhausted or --limit hit.
+	AllPages bool
+	// Additional server-side filters (each maps 1:1 to a sdk.KnowledgeListFilter
+	// field). Empty / zero values are omitted from the request.
+	Keyword   string
+	FileType  string
+	Source    string
+	TagID     string
+	StartTime string // raw RFC3339; parsed into filter.StartTime
+	EndTime   string // raw RFC3339; parsed into filter.EndTime
+}
+
+// rfc3339Example is the canonical RFC3339 hint surfaced when --start-time /
+// --end-time fail to parse. Picked to match Go's reference time docs.
+const rfc3339Example = "2006-01-02T15:04:05Z"
+
+// docListStatusValues mirrors internal/types/knowledge.go ParseStatus*
+// constants - these are the values the server accepts on the
+// ?parse_status= query. Kept in sync manually since the SDK doesn't
+// re-export the enum.
+var docListStatusValues = []string{"pending", "processing", "completed", "failed"}
 
 // ListService is the narrow SDK surface this command depends on.
 // *sdk.Client satisfies it.
 type ListService interface {
-	ListKnowledge(ctx context.Context, kbID string, page, pageSize int, tagID string) ([]sdk.Knowledge, int64, error)
-}
-
-// listResult is the typed payload emitted under data on success.
-//
-// Items is non-nil even when empty (json:"[]" not "null") so agents can iterate
-// without nil-checks. Page metadata is duplicated here (and not in _meta) to
-// keep the payload self-describing for downstream consumers that strip _meta.
-type listResult struct {
-	Items    []sdk.Knowledge `json:"items"`
-	Page     int             `json:"page"`
-	PageSize int             `json:"page_size"`
-	Total    int64           `json:"total"`
-	KBID     string          `json:"kb_id"`
+	ListKnowledgeWithFilter(ctx context.Context, kbID string, page, pageSize int, filter sdk.KnowledgeListFilter) ([]sdk.Knowledge, int64, error)
 }
 
 // NewCmdList builds `weknora doc list`.
@@ -59,9 +79,14 @@ backend storage order is not guaranteed and varies between deployments.`,
 		Example: `  weknora doc list                                                  # uses project link / env
   weknora doc list --kb a32a63ff-fb36-4874-bcaa-30f48570a694        # explicit UUID
   weknora doc list --kb my-kb                                       # resolved by name
-  weknora doc list --page 2 --json                                  # paginated envelope output`,
+  weknora doc list --all-pages --format json                               # walk every page`,
 		Args: cobra.NoArgs,
 		RunE: func(c *cobra.Command, _ []string) error {
+			fopts, err := cmdutil.CheckFormatFlag(c)
+			if err != nil {
+				return err
+			}
+			fopts.ResolveDefault(iostreams.IO.IsStdoutTTY())
 			kbID, err := f.ResolveKB(c)
 			if err != nil {
 				return err
@@ -70,23 +95,96 @@ backend storage order is not guaranteed and varies between deployments.`,
 			if err != nil {
 				return err
 			}
-			return runList(c.Context(), opts, cli, kbID)
+			return runList(c.Context(), opts, fopts, cli, kbID)
 		},
 	}
 	// --kb is read by Factory.ResolveKB; declare it here so cobra parses the
 	// value into the command's flag set.
 	cmd.Flags().String("kb", "", "Knowledge base UUID or name (overrides env / project link)")
-	cmd.Flags().IntVar(&opts.Page, "page", 1, "Page number (1-based)")
-	cmd.Flags().IntVar(&opts.PageSize, "page-size", 20, "Items per page")
-	cmd.Flags().BoolVar(&opts.JSONOut, "json", false, "Output JSON envelope")
-	agent.SetAgentHelp(cmd, "Lists docs in the resolved KB. Returns data: {items, page, page_size, total, kb_id}; pass --kb when not running inside a project.")
+	cmd.Flags().IntVar(&opts.PageSize, "page-size", 50, "Items per server batch (1..1000)")
+	cmd.Flags().IntVarP(&opts.Limit, "limit", "L", 30, "Maximum results to return (0 = no cap, 1..10000 = explicit)")
+	cmd.Flags().BoolVar(&opts.AllPages, "all-pages", false, "Walk all server pages until exhausted (or --limit hit)")
+	cmd.Flags().StringVar(&opts.Status, "status", "", "Filter by parse status: pending | processing | completed | failed")
+	cmd.Flags().StringVar(&opts.Keyword, "keyword", "", "Server-side substring match against title / file_name (case-sensitive)")
+	cmd.Flags().StringVar(&opts.FileType, "file-type", "", `Filter by file extension (e.g. "pdf", "md")`)
+	cmd.Flags().StringVar(&opts.Source, "source", "", `Filter by ingestion source (e.g. "api", "web")`)
+	cmd.Flags().StringVar(&opts.TagID, "tag-id", "", "Filter by tag association")
+	cmd.Flags().StringVar(&opts.StartTime, "start-time", "", "Include docs with updated_at >= this RFC3339 timestamp (e.g. 2006-01-02T15:04:05Z)")
+	cmd.Flags().StringVar(&opts.EndTime, "end-time", "", "Include docs with updated_at <= this RFC3339 timestamp (e.g. 2006-01-02T15:04:05Z)")
+	cmdutil.AddFormatFlag(cmd, docListFields...)
 	return cmd
 }
 
-func runList(ctx context.Context, opts *ListOptions, svc ListService, kbID string) error {
-	items, total, err := svc.ListKnowledge(ctx, kbID, opts.Page, opts.PageSize, "")
-	if err != nil {
-		return cmdutil.Wrapf(cmdutil.ClassifyHTTPError(err), err, "list documents")
+func runList(ctx context.Context, opts *ListOptions, fopts *cmdutil.FormatOptions, svc ListService, kbID string) error {
+	if opts.PageSize < 1 || opts.PageSize > 1000 {
+		return &cmdutil.Error{
+			Code:    cmdutil.CodeInputInvalidArgument,
+			Message: fmt.Sprintf("--page-size must be in 1..1000, got %d", opts.PageSize),
+		}
+	}
+	if opts.Limit < 0 || opts.Limit > 10000 {
+		return &cmdutil.Error{
+			Code:    cmdutil.CodeInputInvalidArgument,
+			Message: fmt.Sprintf("--limit must be in 0..10000 (0 = no cap), got %d", opts.Limit),
+		}
+	}
+	if opts.Status != "" && !validDocListStatus(opts.Status) {
+		return &cmdutil.Error{
+			Code: cmdutil.CodeInputInvalidArgument,
+			Message: fmt.Sprintf("--status must be one of: %s - got %q",
+				strings.Join(docListStatusValues, " | "), opts.Status),
+		}
+	}
+	filter := sdk.KnowledgeListFilter{
+		ParseStatus: opts.Status,
+		Keyword:     opts.Keyword,
+		FileType:    opts.FileType,
+		Source:      opts.Source,
+		TagID:       opts.TagID,
+	}
+	if opts.StartTime != "" {
+		t, err := time.Parse(time.RFC3339, opts.StartTime)
+		if err != nil {
+			return cmdutil.NewError(cmdutil.CodeInputInvalidArgument,
+				fmt.Sprintf("--start-time must be RFC3339 (e.g. %s), got %q", rfc3339Example, opts.StartTime))
+		}
+		filter.StartTime = t
+	}
+	if opts.EndTime != "" {
+		t, err := time.Parse(time.RFC3339, opts.EndTime)
+		if err != nil {
+			return cmdutil.NewError(cmdutil.CodeInputInvalidArgument,
+				fmt.Sprintf("--end-time must be RFC3339 (e.g. %s), got %q", rfc3339Example, opts.EndTime))
+		}
+		filter.EndTime = t
+	}
+
+	// Pagination is always 1-indexed internally. --all-pages walks; the
+	// non-walking path returns the first page only.
+	var items []sdk.Knowledge
+	if opts.AllPages {
+		accum := make([]sdk.Knowledge, 0)
+		for page := 1; ; page++ {
+			chunk, total, err := svc.ListKnowledgeWithFilter(ctx, kbID, page, opts.PageSize, filter)
+			if err != nil {
+				return cmdutil.WrapHTTP(err, "list documents")
+			}
+			accum = append(accum, chunk...)
+			if opts.Limit > 0 && len(accum) >= opts.Limit {
+				accum = accum[:opts.Limit]
+				break
+			}
+			if int64(len(accum)) >= total || len(chunk) == 0 {
+				break
+			}
+		}
+		items = accum
+	} else {
+		chunk, _, err := svc.ListKnowledgeWithFilter(ctx, kbID, 1, opts.PageSize, filter)
+		if err != nil {
+			return cmdutil.WrapHTTP(err, "list documents")
+		}
+		items = chunk
 	}
 	if items == nil {
 		items = []sdk.Knowledge{} // ensure JSON [] not null
@@ -97,16 +195,14 @@ func runList(ctx context.Context, opts *ListOptions, svc ListService, kbID strin
 	sort.Slice(items, func(i, j int) bool {
 		return items[i].UpdatedAt.After(items[j].UpdatedAt)
 	})
-
-	r := listResult{
-		Items:    items,
-		Page:     opts.Page,
-		PageSize: opts.PageSize,
-		Total:    total,
-		KBID:     kbID,
+	// --limit applies after sort so users get the top-N most-recent items
+	// when combined with a single-page fetch where page_size > limit.
+	if opts.Limit > 0 && len(items) > opts.Limit {
+		items = items[:opts.Limit]
 	}
-	if opts.JSONOut {
-		return format.WriteEnvelope(iostreams.IO.Out, format.Success(r, &format.Meta{KBID: kbID}))
+
+	if fopts.WantsJSON() {
+		return fopts.Emit(iostreams.IO.Out, items)
 	}
 
 	if len(items) == 0 {
@@ -118,27 +214,21 @@ func runList(ctx context.Context, opts *ListOptions, svc ListService, kbID strin
 	fmt.Fprintln(tw, "ID\tNAME\tSTATUS\tSIZE\tUPDATED")
 	now := time.Now()
 	for _, k := range items {
-		name := text.Truncate(40, displayName(k))
+		name := text.Truncate(40, text.KnowledgeDisplayName(k.FileName, k.Title, k.ID))
 		updated := text.FuzzyAgo(now, k.UpdatedAt)
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", k.ID, name, k.ParseStatus, formatSize(k.FileSize), updated)
 	}
 	return tw.Flush()
 }
 
-// displayName picks the most informative human label for a knowledge entry.
-// File-uploads use FileName; URL / text entries fall back to Title.
-func displayName(k sdk.Knowledge) string {
-	if k.FileName != "" {
-		return k.FileName
-	}
-	if k.Title != "" {
-		return k.Title
-	}
-	return k.ID
+// validDocListStatus reports whether s matches one of the server-accepted
+// parse_status enum values surfaced via --status.
+func validDocListStatus(s string) bool {
+	return slices.Contains(docListStatusValues, s)
 }
 
 // formatSize renders a byte count as a short human string (KB / MB).
-// Kept tiny on purpose — go-humanize would pull a transitive dep just for one
+// Kept tiny on purpose - go-humanize would pull a transitive dep just for one
 // column. A "-" placeholder hides zero-size entries (URL / text).
 func formatSize(bytes int64) string {
 	if bytes <= 0 {

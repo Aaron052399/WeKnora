@@ -1,6 +1,7 @@
 package session
 
 import (
+	stderrors "errors"
 	"net/http"
 
 	"github.com/Tencent/WeKnora/internal/config"
@@ -23,8 +24,10 @@ type Handler struct {
 	customAgentService   interfaces.CustomAgentService   // Service for managing custom agents
 	tenantService        interfaces.TenantService        // Service for loading tenant (shared agent context)
 	agentShareService    interfaces.AgentShareService    // Service for resolving shared agents (KB scope in retrieval)
+	kbShareService       interfaces.KBShareService       // Service for resolving shared KB permissions
 	fileService          interfaces.FileService          // Service for file storage (image uploads)
 	modelService         interfaces.ModelService         // Service for model management (VLM access)
+	userService          interfaces.UserService          // Service for resolving per-user preferences (e.g. enable_memory default)
 	attachmentProcessor  *AttachmentProcessor            // Processor for file attachments
 }
 
@@ -38,8 +41,10 @@ func NewHandler(
 	customAgentService interfaces.CustomAgentService,
 	tenantService interfaces.TenantService,
 	agentShareService interfaces.AgentShareService,
+	kbShareService interfaces.KBShareService,
 	fileService interfaces.FileService,
 	modelService interfaces.ModelService,
+	userService interfaces.UserService,
 	documentReader interfaces.DocumentReader,
 	imageResolver *docparser.ImageResolver,
 ) *Handler {
@@ -52,8 +57,10 @@ func NewHandler(
 		customAgentService:   customAgentService,
 		tenantService:        tenantService,
 		agentShareService:    agentShareService,
+		kbShareService:       kbShareService,
 		fileService:          fileService,
 		modelService:         modelService,
+		userService:          userService,
 		attachmentProcessor: NewAttachmentProcessor(
 			fileService,
 			documentReader,
@@ -160,7 +167,7 @@ func (h *Handler) GetSession(c *gin.Context) {
 	logger.Infof(ctx, "Retrieving session, ID: %s", id)
 	session, err := h.sessionService.GetSession(ctx, id)
 	if err != nil {
-		if err == errors.ErrSessionNotFound {
+		if stderrors.Is(err, errors.ErrSessionNotFound) {
 			logger.Warnf(ctx, "Session not found, ID: %s", id)
 			c.Error(errors.NewNotFoundError(err.Error()))
 			return
@@ -275,7 +282,7 @@ func (h *Handler) UpdateSession(c *gin.Context) {
 
 	// Call service to update session
 	if err := h.sessionService.UpdateSession(ctx, &session); err != nil {
-		if err == errors.ErrSessionNotFound {
+		if stderrors.Is(err, errors.ErrSessionNotFound) {
 			logger.Warnf(ctx, "Session not found, ID: %s", id)
 			c.Error(errors.NewNotFoundError(err.Error()))
 			return
@@ -326,7 +333,7 @@ func (h *Handler) DeleteSession(c *gin.Context) {
 
 	// Call service to delete session
 	if err := h.sessionService.DeleteSession(ctx, id); err != nil {
-		if err == errors.ErrSessionNotFound {
+		if stderrors.Is(err, errors.ErrSessionNotFound) {
 			logger.Warnf(ctx, "Session not found, ID: %s", id)
 			c.Error(errors.NewNotFoundError(err.Error()))
 			return
@@ -369,6 +376,11 @@ func (h *Handler) ClearSessionMessages(c *gin.Context) {
 	logger.Infof(ctx, "Clearing all messages for session: %s", id)
 
 	if err := h.messageService.ClearSessionMessages(ctx, id); err != nil {
+		if stderrors.Is(err, errors.ErrSessionNotFound) {
+			logger.Warnf(ctx, "Session not found, ID: %s", id)
+			c.Error(errors.NewNotFoundError(err.Error()))
+			return
+		}
 		logger.ErrorWithFields(ctx, err, map[string]interface{}{"session_id": id})
 		c.Error(errors.NewInternalServerError(err.Error()))
 		return
@@ -442,6 +454,11 @@ func (h *Handler) BatchDeleteSessions(c *gin.Context) {
 	}
 
 	if err := h.sessionService.BatchDeleteSessions(ctx, sanitizedIDs); err != nil {
+		if stderrors.Is(err, errors.ErrSessionNotFound) {
+			logger.Warnf(ctx, "No visible sessions found for batch delete")
+			c.Error(errors.NewNotFoundError(err.Error()))
+			return
+		}
 		logger.ErrorWithFields(ctx, err, nil)
 		c.Error(errors.NewInternalServerError(err.Error()))
 		return

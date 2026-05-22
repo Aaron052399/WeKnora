@@ -1,9 +1,8 @@
-// Package linkcmd implements `weknora link` — binds the current working
+// Package linkcmd implements `weknora link` - binds the current working
 // directory to a knowledge base by writing .weknora/project.yaml. Always
-// overwrites an existing link silently, mirroring `vercel link` /
-// `netlify link` / `kubectl apply` rather than `git init`'s
-// refuse-if-exists posture. The cobra Long: text covers the user-facing
-// modes (--kb / TTY / non-TTY).
+// overwrites an existing link silently rather than refusing when one is
+// already present. The cobra Long: text covers the user-facing modes
+// (--kb / TTY / non-TTY).
 package linkcmd
 
 import (
@@ -15,18 +14,17 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/Tencent/WeKnora/cli/internal/agent"
 	"github.com/Tencent/WeKnora/cli/internal/cmdutil"
-	"github.com/Tencent/WeKnora/cli/internal/format"
 	"github.com/Tencent/WeKnora/cli/internal/iostreams"
 	"github.com/Tencent/WeKnora/cli/internal/projectlink"
 )
 
-// Options captures `weknora link` flags.
+// linkFields enumerates the fields surfaced for `--format json` discovery on
+// `link`. Tracks the small linkResult struct.
+var linkFields = []string{"context", "kb_id", "kb_name", "project_link_path"}
+
 type Options struct {
-	Context string // --context: record a specific context instead of the active one
-	KB      string // --kb: KB UUID or name; empty triggers interactive prompt on TTY
-	JSONOut bool   // --json
+	KB string // --kb: KB UUID or name; empty triggers interactive prompt on TTY
 }
 
 // linkResult is the typed payload emitted under data.
@@ -50,7 +48,7 @@ overridden by the --kb flag or WEKNORA_KB_ID env var.
 
 Pass --kb <id-or-name> for non-interactive use (scripts, CI). Run on a TTY
 without --kb to be prompted from the list of available KBs. Always overwrites
-any existing link — re-run to switch.
+any existing link - re-run to switch.
 
 AI agents: link writes to the user's working directory. Only run it when the
 user explicitly asked to bind this directory; don't run it as a side effect.`,
@@ -59,24 +57,27 @@ user explicitly asked to bind this directory; don't run it as a side effect.`,
   weknora link                                              # interactive (TTY)`,
 		Args: cobra.NoArgs,
 		RunE: func(c *cobra.Command, _ []string) error {
-			return runLink(c.Context(), opts, f)
+			fopts, err := cmdutil.CheckFormatFlag(c)
+			if err != nil {
+				return err
+			}
+			fopts.ResolveDefault(iostreams.IO.IsStdoutTTY())
+			return runLink(c.Context(), opts, fopts, f)
 		},
 	}
-	cmd.Flags().StringVar(&opts.Context, "context", "", "Context to record in the link (defaults to active context)")
 	cmd.Flags().StringVar(&opts.KB, "kb", "", "Knowledge base UUID or name; omit on a TTY for interactive prompt")
-	cmd.Flags().BoolVar(&opts.JSONOut, "json", false, "Output JSON envelope")
-	agent.SetAgentHelp(cmd, "Writes .weknora/project.yaml binding cwd to a KB. Pass --kb (id or name) for non-interactive use. Always overwrites.")
+	cmdutil.AddFormatFlag(cmd, linkFields...)
 	return cmd
 }
 
-func runLink(ctx context.Context, opts *Options, f *cmdutil.Factory) error {
+func runLink(ctx context.Context, opts *Options, fopts *cmdutil.FormatOptions, f *cmdutil.Factory) error {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return cmdutil.Wrapf(cmdutil.CodeLocalFileIO, err, "get cwd")
 	}
 	linkPath := filepath.Join(cwd, projectlink.DirName, projectlink.FileName)
 
-	ctxName, err := resolveContext(opts, f)
+	ctxName, err := resolveContext(f)
 	if err != nil {
 		return err
 	}
@@ -101,11 +102,8 @@ func runLink(ctx context.Context, opts *Options, f *cmdutil.Factory) error {
 		KBName:          kbName,
 		ProjectLinkPath: linkPath,
 	}
-	if opts.JSONOut {
-		return format.WriteEnvelope(iostreams.IO.Out, format.Success(r, &format.Meta{
-			Context: ctxName,
-			KBID:    kbID,
-		}))
+	if fopts.WantsJSON() {
+		return fopts.Emit(iostreams.IO.Out, r)
 	}
 	if kbName != "" {
 		fmt.Fprintf(iostreams.IO.Out, "✓ Linked %s to %s (kb=%s, id=%s)\n", linkPath, ctxName, kbName, kbID)
@@ -115,11 +113,12 @@ func runLink(ctx context.Context, opts *Options, f *cmdutil.Factory) error {
 	return nil
 }
 
-// resolveContext picks the auth context to record in the link.
-func resolveContext(opts *Options, f *cmdutil.Factory) (string, error) {
-	if opts.Context != "" {
-		return opts.Context, nil
-	}
+// resolveContext picks the auth context to record in the link. There is no
+// per-invocation override flag on `weknora link` itself - to record under a
+// different context, use the global persistent flag (`weknora --context
+// staging link --kb my-kb`); the active context at link time is what gets
+// written.
+func resolveContext(f *cmdutil.Factory) (string, error) {
 	cfg, err := f.Config()
 	if err != nil {
 		return "", err
@@ -164,7 +163,7 @@ func resolveKB(ctx context.Context, opts *Options, f *cmdutil.Factory) (string, 
 func promptForKB(ctx context.Context, svc cmdutil.KBLister, f *cmdutil.Factory) (string, string, error) {
 	kbs, err := svc.ListKnowledgeBases(ctx)
 	if err != nil {
-		return "", "", cmdutil.Wrapf(cmdutil.ClassifyHTTPError(err), err, "list knowledge bases")
+		return "", "", cmdutil.WrapHTTP(err, "list knowledge bases")
 	}
 	if len(kbs) == 0 {
 		return "", "", cmdutil.NewError(cmdutil.CodeKBNotFound, "no knowledge bases visible to active context; create one first")

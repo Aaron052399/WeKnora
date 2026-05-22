@@ -24,7 +24,7 @@ func TestUse_OK(t *testing.T) {
 		t.Fatalf("Save initial config: %v", err)
 	}
 
-	if err := runUse("production"); err != nil {
+	if err := runUse("production", &cmdutil.FormatOptions{Mode: cmdutil.FormatText}); err != nil {
 		t.Fatalf("runUse: %v", err)
 	}
 
@@ -52,7 +52,7 @@ func TestUse_NotFound_WithDidYouMean(t *testing.T) {
 		t.Fatalf("Save: %v", err)
 	}
 
-	err := runUse("prodution") // typo: missing 'c'
+	err := runUse("prodution", &cmdutil.FormatOptions{Mode: cmdutil.FormatText}) // typo: missing 'c'
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -75,16 +75,16 @@ func TestUse_NotFound_DeterministicTieBreak(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	_, _ = iostreams.SetForTest(t)
 	cfg := &config.Config{Contexts: map[string]config.Context{
-		"prod":  {Host: "https://a"},
-		"prom":  {Host: "https://b"},
-		"prog":  {Host: "https://c"},
+		"prod": {Host: "https://a"},
+		"prom": {Host: "https://b"},
+		"prog": {Host: "https://c"},
 	}}
 	if err := config.Save(cfg); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 	// "prox" is distance 1 from prod / prom (both win); lex tie-break → prod.
 	for i := 0; i < 5; i++ {
-		err := runUse("prox")
+		err := runUse("prox", &cmdutil.FormatOptions{Mode: cmdutil.FormatText})
 		if err == nil {
 			t.Fatalf("iter %d: expected error", i)
 		}
@@ -99,7 +99,7 @@ func TestUse_NotFound_EmptyContexts(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	_, _ = iostreams.SetForTest(t)
 
-	err := runUse("anything")
+	err := runUse("anything", &cmdutil.FormatOptions{Mode: cmdutil.FormatText})
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -118,12 +118,12 @@ func TestUse_CaseSensitive(t *testing.T) {
 	}}
 	_ = config.Save(cfg)
 
-	err := runUse("production") // lowercase — must NOT match "Production"
+	err := runUse("production", &cmdutil.FormatOptions{Mode: cmdutil.FormatText}) // lowercase - must NOT match "Production"
 	if err == nil {
 		t.Fatal("expected case-sensitive miss")
 	}
 	cm := err.(*cmdutil.Error)
-	// did-you-mean kicks in (distance 1 — "P"→"p")
+	// did-you-mean kicks in (distance 1 - "P"→"p")
 	if !strings.Contains(cm.Hint, "Production") {
 		t.Errorf("hint should suggest 'Production' (case-different), got %q", cm.Hint)
 	}

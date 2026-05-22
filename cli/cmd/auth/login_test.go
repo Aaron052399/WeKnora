@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -61,7 +62,7 @@ func TestRunLogin_PasswordMode(t *testing.T) {
 		Host:    "https://kb.example.com",
 		Context: "prod",
 	}
-	require.NoError(t, runLogin(context.Background(), opts, f, svc))
+	require.NoError(t, runLogin(context.Background(), opts, &cmdutil.FormatOptions{Mode: cmdutil.FormatText}, f, svc))
 
 	assert.Equal(t, "a@b.c", svc.got.email)
 	assert.Equal(t, "secret", svc.got.password)
@@ -73,27 +74,70 @@ func TestRunLogin_PasswordMode(t *testing.T) {
 func TestRunLogin_WithToken(t *testing.T) {
 	iostreams.SetForTest(t)
 	f, store := newTestFactoryWithConfig(t, prompt.AgentPrompter{})
+	restore := stubAPIKeyValidator(func(_ context.Context, _, _ string) (*sdk.AuthUser, error) {
+		return &sdk.AuthUser{ID: "u1", Email: "ci@example.com", TenantID: 7}, nil
+	})
+	defer restore()
 	opts := &LoginOptions{
 		Host:        "https://kb.example.com",
 		Context:     "ci",
 		WithToken:   true,
 		StdinReader: strings.NewReader("  sk-1234  \n"),
 	}
-	require.NoError(t, runLogin(context.Background(), opts, f, nil))
+	require.NoError(t, runLogin(context.Background(), opts, &cmdutil.FormatOptions{Mode: cmdutil.FormatText}, f, nil))
 	got, _ := store.Get("ci", "api_key")
 	assert.Equal(t, "sk-1234", got)
+	cfg, _ := f.Config()
+	assert.Equal(t, "ci@example.com", cfg.Contexts["ci"].User, "validator-returned user should be persisted")
+	assert.Equal(t, uint64(7), cfg.Contexts["ci"].TenantID)
+}
+
+func TestRunLogin_WithToken_ServerRejects(t *testing.T) {
+	iostreams.SetForTest(t)
+	f, _ := newTestFactoryWithConfig(t, prompt.AgentPrompter{})
+	restore := stubAPIKeyValidator(func(_ context.Context, _, _ string) (*sdk.AuthUser, error) {
+		return nil, errors.New("HTTP 401: invalid api key")
+	})
+	defer restore()
+	opts := &LoginOptions{
+		Host:        "https://kb.example.com",
+		Context:     "ci",
+		WithToken:   true,
+		StdinReader: strings.NewReader("sk-bad"),
+	}
+	err := runLogin(context.Background(), opts, &cmdutil.FormatOptions{Mode: cmdutil.FormatText}, f, nil)
+	require.Error(t, err)
+	var typed *cmdutil.Error
+	require.ErrorAs(t, err, &typed)
+	assert.Equal(t, cmdutil.CodeAuthBadCredential, typed.Code,
+		"server-side rejection must surface as auth.bad_credential, not persist the key")
+}
+
+// stubAPIKeyValidator swaps defaultAPIKeyValidator for the test and returns
+// a restore func to defer.
+func stubAPIKeyValidator(fn apiKeyValidator) func() {
+	saved := defaultAPIKeyValidator
+	defaultAPIKeyValidator = fn
+	return func() { defaultAPIKeyValidator = saved }
 }
 
 func TestRunLogin_WithToken_Empty(t *testing.T) {
 	iostreams.SetForTest(t)
 	f, _ := newTestFactoryWithConfig(t, prompt.AgentPrompter{})
+	// Validator must NOT be called when stdin is empty - verify by setting
+	// a panic-on-call sentinel.
+	restore := stubAPIKeyValidator(func(_ context.Context, _, _ string) (*sdk.AuthUser, error) {
+		t.Fatal("validator should not be called on empty stdin")
+		return nil, nil
+	})
+	defer restore()
 	opts := &LoginOptions{
 		Host:        "https://kb.example.com",
 		Context:     "ci",
 		WithToken:   true,
 		StdinReader: strings.NewReader(""),
 	}
-	err := runLogin(context.Background(), opts, f, nil)
+	err := runLogin(context.Background(), opts, &cmdutil.FormatOptions{Mode: cmdutil.FormatText}, f, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "input.missing_flag")
 }
@@ -101,7 +145,7 @@ func TestRunLogin_WithToken_Empty(t *testing.T) {
 func TestRunLogin_BadHost(t *testing.T) {
 	iostreams.SetForTest(t)
 	f, _ := newTestFactoryWithConfig(t, prompt.AgentPrompter{})
-	err := runLogin(context.Background(), &LoginOptions{Host: "ftp://nope"}, f, nil)
+	err := runLogin(context.Background(), &LoginOptions{Host: "ftp://nope"}, &cmdutil.FormatOptions{Mode: cmdutil.FormatText}, f, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "input.invalid_argument")
 }
@@ -110,7 +154,7 @@ func TestRunLogin_LoginRefused(t *testing.T) {
 	iostreams.SetForTest(t)
 	f, _ := newTestFactoryWithConfig(t, scriptedPrompter{email: "a@b.c", password: "x"})
 	svc := &fakeLoginService{resp: &sdk.LoginResponse{Success: false, Message: "bad password"}}
-	err := runLogin(context.Background(), &LoginOptions{Host: "https://x", Context: "p"}, f, svc)
+	err := runLogin(context.Background(), &LoginOptions{Host: "https://x", Context: "p"}, &cmdutil.FormatOptions{Mode: cmdutil.FormatText}, f, svc)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "auth.bad_credential")
 }

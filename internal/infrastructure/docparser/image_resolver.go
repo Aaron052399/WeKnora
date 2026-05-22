@@ -13,6 +13,8 @@ import (
 	"log"
 	"mime"
 	"net/http"
+	"net/url"
+	"os"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -100,6 +102,7 @@ func (r *ImageResolver) ResolveAndStore(
 	for _, ref := range result.ImageRefs {
 		refMap[ref.OriginalRef] = ref
 	}
+	savedRefs := make(map[string]StoredImage)
 
 	// Process each image reference found in the markdown.
 	// The URL group supports one level of balanced parentheses so that URLs
@@ -121,49 +124,94 @@ func (r *ImageResolver) ResolveAndStore(
 		}
 
 		// Find inline image bytes from the result
-		ref, found := refMap[refPath]
-		if !found || len(ref.ImageData) == 0 {
+		stored, ok := r.saveReferencedImage(ctx, fileSvc, tenantID, refPath, refMap, savedRefs)
+		if !ok {
 			continue
 		}
-
-		// Filter out small icons and decorative images. Skip the filter
-		// when the reference is the originally uploaded file itself, so
-		// that a standalone image upload is never silently dropped even
-		// if its dimensions are below the icon threshold.
-		if !ref.IsOriginal && isIconImage(ref.ImageData) {
-			// Remove the image reference from markdown entirely
-			markdown = markdown[:m[0]] + markdown[m[1]:]
-			continue
-		}
-
-		// Determine extension
-		ext := extFromMime(ref.MimeType)
-		if ext == "" {
-			ext = filepath.Ext(ref.Filename)
-		}
-		if ext == "" {
-			ext = ".png"
-		}
-
-		// Save via FileService — returns provider:// path
-		fileName := uuid.New().String() + ext
-		servingURL, saveErr := fileSvc.SaveBytes(ctx, ref.ImageData, tenantID, fileName, false)
-		if saveErr != nil {
-			log.Printf("WARN: failed to save image %s: %v", refPath, saveErr)
-			continue
-		}
-
-		images = append(images, StoredImage{
-			OriginalRef: refPath,
-			ServingURL:  servingURL,
-			MimeType:    ref.MimeType,
-		})
+		images = appendStoredImage(images, stored)
 
 		// Replace in markdown
-		markdown = markdown[:m[4]] + servingURL + markdown[m[5]:]
+		markdown = markdown[:m[4]] + stored.ServingURL + markdown[m[5]:]
 	}
 
+	md5, imgRelativeHTML, _ := r.ResolveRelativeHTMLImages(ctx, markdown, fileSvc, tenantID, refMap, savedRefs)
+	markdown = md5
+	images = append(images, imgRelativeHTML...)
+
 	return markdown, images, nil
+}
+
+func appendStoredImage(images []StoredImage, stored StoredImage) []StoredImage {
+	for _, existing := range images {
+		if existing.OriginalRef == stored.OriginalRef && existing.ServingURL == stored.ServingURL {
+			return images
+		}
+	}
+	return append(images, stored)
+}
+
+func (r *ImageResolver) saveReferencedImage(
+	ctx context.Context,
+	fileSvc interfaces.FileService,
+	tenantID uint64,
+	refPath string,
+	refMap map[string]types.ImageRef,
+	savedRefs map[string]StoredImage,
+) (StoredImage, bool) {
+	if stored, ok := savedRefs[refPath]; ok {
+		return stored, true
+	}
+
+	ref, found := refMap[refPath]
+	if !found || len(ref.ImageData) == 0 {
+		return StoredImage{}, false
+	}
+
+	if !ref.IsOriginal && isIconImage(ref.ImageData) {
+		return StoredImage{}, false
+	}
+
+	// Reuse a previously saved upload when the same source image (identified by
+	// ref.Filename) has already been persisted under a different markdown ref
+	// path (e.g. "images/foo.png" vs "./images/foo.png"). This avoids writing
+	// the same bytes to object storage multiple times.
+	if ref.Filename != "" {
+		if cached, ok := savedRefs["__filename__:"+ref.Filename]; ok {
+			stored := StoredImage{
+				OriginalRef: refPath,
+				ServingURL:  cached.ServingURL,
+				MimeType:    cached.MimeType,
+			}
+			savedRefs[refPath] = stored
+			return stored, true
+		}
+	}
+
+	ext := extFromMime(ref.MimeType)
+	if ext == "" {
+		ext = filepath.Ext(ref.Filename)
+	}
+	if ext == "" {
+		ext = ".png"
+	}
+
+	fileName := uuid.New().String() + ext
+	servingURL, saveErr := fileSvc.SaveBytes(ctx, ref.ImageData, tenantID, fileName, false)
+	if saveErr != nil {
+		log.Printf("WARN: failed to save image %s: %v", refPath, saveErr)
+		return StoredImage{}, false
+	}
+
+	stored := StoredImage{
+		OriginalRef: refPath,
+		ServingURL:  servingURL,
+		MimeType:    ref.MimeType,
+	}
+	savedRefs[refPath] = stored
+	if ref.Filename != "" {
+		savedRefs["__filename__:"+ref.Filename] = stored
+	}
+	return stored, true
 }
 
 func extFromMime(mime string) string {
@@ -187,8 +235,37 @@ func extFromMime(mime string) string {
 
 // isProviderScheme checks if the path uses a provider:// scheme (local://, minio://, cos://, tos://).
 func isProviderScheme(p string) bool {
-	for _, prefix := range []string{"local://", "minio://", "cos://", "tos://", "s3://"} {
+	for _, prefix := range []string{"local://", "minio://", "cos://", "tos://", "s3://", "obs://"} {
 		if strings.HasPrefix(p, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// isWhitelistedImageHost checks if the image URL's host is in the whitelist.
+// Whitelisted hosts are trusted (e.g. internal MinerU service) — images are
+// still downloaded for validation and OCR/caption analysis, but not uploaded
+// to object storage. The markdown keeps the original URL.
+// Configure via IMAGE_HOST_KEEP_URL env var (comma-separated hosts).
+func isWhitelistedImageHost(rawURL string) bool {
+	whitelist := strings.TrimSpace(os.Getenv("IMAGE_HOST_KEEP_URL"))
+	if whitelist == "" {
+		return false
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	host := strings.ToLower(u.Host)
+	hostname := strings.ToLower(u.Hostname())
+	for _, h := range strings.Split(whitelist, ",") {
+		h = strings.ToLower(strings.TrimSpace(h))
+		if h == "" {
+			continue
+		}
+		// Exact host match (includes port) or hostname match (any port)
+		if host == h || hostname == h {
 			return true
 		}
 	}
@@ -256,6 +333,10 @@ var imgHTMLDataURI = regexp.MustCompile(
 	`(?i)<img\s[^>]*?src\s*=\s*["'](data:image/[^;]+;base64,[^"']+)["'][^>]*?/?\s*>`,
 )
 
+var imgHTMLRelativeSrc = regexp.MustCompile(
+	`(?i)<img\b([^>]*?)\bsrc\s*=\s*['"]([^'"]+)['"]([^>]*)>`,
+)
+
 // ResolveHTMLDataURIImages finds <img src="data:image/*;base64,..."> tags in markdown,
 // decodes the images, stores them via fileSvc, and replaces each tag with a markdown
 // image reference using the storage URL.
@@ -315,6 +396,41 @@ func (r *ImageResolver) ResolveHTMLDataURIImages(
 		markdown = markdown[:m[0]] + fmt.Sprintf("![image](%s)", servingURL) + markdown[m[1]:]
 		processed++
 	}
+	return markdown, images, nil
+}
+
+// ResolveRelativeHTMLImages finds HTML <img> tags whose src points at a
+// relative document image reference, stores the corresponding bytes via
+// fileSvc, and replaces only the src attribute value with the storage URL.
+func (r *ImageResolver) ResolveRelativeHTMLImages(
+	ctx context.Context,
+	markdown string,
+	fileSvc interfaces.FileService,
+	tenantID uint64,
+	refMap map[string]types.ImageRef,
+	savedRefs map[string]StoredImage,
+) (updatedMarkdown string, images []StoredImage, err error) {
+	matches := imgHTMLRelativeSrc.FindAllStringSubmatchIndex(markdown, -1)
+	if len(matches) == 0 {
+		return markdown, nil, nil
+	}
+
+	for i := len(matches) - 1; i >= 0; i-- {
+		m := matches[i]
+		src := strings.TrimSpace(markdown[m[4]:m[5]])
+		if src == "" || strings.HasPrefix(src, "http://") || strings.HasPrefix(src, "https://") ||
+			isProviderScheme(src) || strings.HasPrefix(strings.ToLower(src), "data:image/") {
+			continue
+		}
+
+		stored, ok := r.saveReferencedImage(ctx, fileSvc, tenantID, src, refMap, savedRefs)
+		if !ok {
+			continue
+		}
+		images = appendStoredImage(images, stored)
+		markdown = markdown[:m[4]] + stored.ServingURL + markdown[m[5]:]
+	}
+
 	return markdown, images, nil
 }
 
@@ -670,10 +786,18 @@ func (r *ImageResolver) ResolveRemoteImages(
 			continue
 		}
 
-		// --- SSRF check (centralised entry-point with whitelist support) ---
-		if err := secutils.ValidateURLForSSRF(imgURL); err != nil {
-			log.Printf("WARN: remote image blocked by SSRF check (%v): %s", err, imgURL)
-			continue
+		// For whitelisted hosts: download to validate (mime type, icon check),
+		// create StoredImage for downstream OCR/caption analysis, but do NOT
+		// upload to storage and keep the original URL in markdown.
+		// The multimodal service will download from the original URL later.
+		whitelisted := isWhitelistedImageHost(imgURL)
+
+		// --- SSRF check (skip for whitelisted) ---
+		if !whitelisted {
+			if err := secutils.ValidateURLForSSRF(imgURL); err != nil {
+				log.Printf("WARN: remote image blocked by SSRF check (%v): %s", err, imgURL)
+				continue
+			}
 		}
 
 		// --- Download ---
@@ -697,12 +821,20 @@ func (r *ImageResolver) ResolveRemoteImages(
 			ext = ".png" // safe default
 		}
 
-		// --- Upload to storage ---
-		fileName := uuid.New().String() + ext
-		servingURL, saveErr := fileSvc.SaveBytes(ctx, data, tenantID, fileName, false)
-		if saveErr != nil {
-			log.Printf("WARN: failed to save remote image %s: %v", imgURL, saveErr)
-			continue
+		var servingURL string
+		if whitelisted {
+			// Keep the original URL — ImageMultimodalService will download it
+			// directly for OCR/caption analysis.
+			servingURL = imgURL
+		} else {
+			// --- Upload to storage ---
+			fileName := uuid.New().String() + ext
+			var saveErr error
+			servingURL, saveErr = fileSvc.SaveBytes(ctx, data, tenantID, fileName, false)
+			if saveErr != nil {
+				log.Printf("WARN: failed to save remote image %s: %v", imgURL, saveErr)
+				continue
+			}
 		}
 
 		images = append(images, StoredImage{
@@ -711,8 +843,10 @@ func (r *ImageResolver) ResolveRemoteImages(
 			MimeType:    mimeType,
 		})
 
-		// Replace URL in markdown.
-		markdown = markdown[:m[4]] + servingURL + markdown[m[5]:]
+		if !whitelisted {
+			// Replace URL in markdown.
+			markdown = markdown[:m[4]] + servingURL + markdown[m[5]:]
+		}
 		processed++
 	}
 

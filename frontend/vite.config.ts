@@ -9,6 +9,13 @@ import vueJsx from '@vitejs/plugin-vue-jsx'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const require = createRequire(import.meta.url)
 
+const pkg = require('./package.json') as { version?: string }
+const FRONTEND_VERSION = pkg.version ?? 'unknown'
+const DEV_PROXY_TARGET =
+  process.env.VITE_DEV_PROXY_TARGET ||
+  process.env.FRONTEND_BACKEND_URL ||
+  'http://localhost:8080'
+
 function resolveVueOfficePptxEntry(): string {
   try {
     const pkgDir = dirname(require.resolve('@vue-office/pptx/package.json'))
@@ -25,6 +32,9 @@ function resolveVueOfficePptxEntry(): string {
 }
 
 export default defineConfig({
+  define: {
+    __FRONTEND_VERSION__: JSON.stringify(FRONTEND_VERSION),
+  },
   plugins: [
     vue(),
     vueJsx(),
@@ -41,12 +51,12 @@ export default defineConfig({
     // 代理配置，用于开发环境
     proxy: {
       '/api': {
-        target: 'http://localhost:8080',
+        target: DEV_PROXY_TARGET,
         changeOrigin: true,
         secure: false,
       },
       '/files': {
-        target: 'http://localhost:8080',
+        target: DEV_PROXY_TARGET,
         changeOrigin: true,
         secure: false,
       }
