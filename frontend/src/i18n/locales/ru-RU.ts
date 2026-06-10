@@ -27,6 +27,248 @@ export default {
     agents: 'Агенты',
     organizations: 'Общие пространства'
   },
+  newUserGuide: {
+    stepOf: '{current} / {total}',
+    skip: 'Пропустить',
+    prev: 'Назад',
+    next: 'Далее',
+    done: 'Готово',
+    reopen: 'Обучение',
+    steps: {
+      welcome: {
+        title: 'Добро пожаловать в WeKnora',
+        desc: 'Несколько простых шагов познакомят вас с базами знаний, чатом и агентами. Нажмите «Далее», чтобы начать.',
+      },
+      knowledge: {
+        title: 'Создайте базу знаний',
+        desc: 'С этого всё начинается: загружайте документы, веб-страницы или FAQ, и WeKnora автоматически разберёт и проиндексирует их. Нажмите здесь, чтобы открыть базы знаний.',
+      },
+      chat: {
+        title: 'Начните чат с ИИ',
+        desc: 'Задавайте вопросы на основе вашей базы знаний и получайте точные ответы со ссылками на источники. Нажмите здесь, чтобы начать новый чат.',
+      },
+      agents: {
+        title: 'Создавайте собственных агентов',
+        desc: 'Объединяйте базы знаний, промпты и инструменты в переиспользуемых агентов, закрепляя свою экспертизу.',
+      },
+      settings: {
+        title: 'Аккаунт и настройки',
+        desc: 'Откройте это меню, чтобы управлять аккаунтом, участниками и системными настройками. Обучение можно снова открыть кнопкой помощи рядом с именем вверху меню.',
+      },
+      models: {
+        title: 'Настройте модели',
+        desc: 'Ключевой шаг: добавьте модели чата, эмбеддингов и другие в управлении моделями, чтобы базы знаний и чат работали. Нажмите «Добавить модель», чтобы начать.',
+      },
+      done: {
+        title: 'Всё готово',
+        desc: 'Теперь вы знаете основы — начните создавать своего помощника на основе знаний! Вернуться к обучению можно кнопкой помощи рядом с именем в этом меню.',
+      },
+    },
+  },
+  contextualGuide: {
+    stepOf: '{current} / {total}',
+    skip: 'Пропустить',
+    prev: 'Назад',
+    next: 'Далее',
+    done: 'Понятно',
+    interactHint: 'Нажмите на выделенную область, чтобы продолжить',
+    kbList: {
+      steps: {
+        create: {
+          title: 'Создайте первую базу знаний',
+          desc: 'В базах знаний хранятся документы и FAQ. Нажмите выделенную кнопку «Новая база знаний» ниже — мы проведём вас по форме.',
+        },
+      },
+    },
+    tenantModels: {
+      needModelsFirst: 'Сначала добавьте модель чата и Embedding, затем создавайте базу знаний.',
+      needChatModelFirst: 'Перед созданием агента добавьте модель чата (KnowledgeQA).',
+      steps: {
+        intro: {
+          title: 'Сначала настройте модели',
+          desc: 'Для документной базы нужна модель чата (сводки и ответы) и модель Embedding (векторный поиск). Добавьте их в системных настройках.',
+        },
+        addModel: {
+          title: 'Добавить модели',
+          desc: 'Нажмите «Добавить модель» и настройте типы KnowledgeQA (чат) и Embedding. В Lite можно загрузить локальные модели через Ollama.',
+        },
+        done: {
+          title: 'Затем продолжите',
+          desc: 'После сохранения моделей закройте настройки и нажмите «Новая база знаний». Мастер проведёт через тип, индексацию и привязку моделей.',
+        },
+      },
+      stepsAgent: {
+        intro: {
+          title: 'Сначала настройте модель чата',
+          desc: 'Для создания агента нужна хотя бы одна модель KnowledgeQA. Добавьте её в системных настройках (Embedding нужен только для баз знаний).',
+        },
+        addModel: {
+          title: 'Добавить модель чата',
+          desc: 'Нажмите «Добавить модель» и настройте тип KnowledgeQA.',
+        },
+        done: {
+          title: 'Затем создайте агента',
+          desc: 'После сохранения закройте настройки и нажмите «Создать агента». Мастер охватит режим, базы знаний и мультимодальные опции.',
+        },
+      },
+    },
+    kbCreate: {
+      steps: {
+        type: {
+          title: 'Выберите тип',
+          desc: 'Для PDF, Word и похожих файлов — база документов. Для пар вопрос–ответ — база FAQ. Тип после создания изменить нельзя.',
+        },
+        name: {
+          title: 'Введите название',
+          desc: 'Например «Руководство продукта» или «FAQ поддержки». Описание необязательно.',
+        },
+        indexing: {
+          title: 'Возможности индексации',
+          desc: 'По умолчанию включены векторный и ключевой поиск. Можно включить Wiki или граф знаний. Оставьте хотя бы один режим поиска.',
+        },
+        navModels: {
+          title: 'Модели (обязательно)',
+          desc: 'Каждой базе нужна модель чата; для поиска также нужен Embedding. Откройте «Конфигурация моделей» слева.',
+        },
+        llm: {
+          title: 'Модель чата / сводки',
+          desc: 'Для сводок и ответов. Если список пуст, через выпадающий список откройте настройки и добавьте модель.',
+        },
+        embedding: {
+          title: 'Модель Embedding',
+          desc: 'Преобразует текст в векторы для семантического поиска. Работает с векторным/ключевым индексом выше.',
+        },
+        parser: {
+          title: 'Парсер (необязательно)',
+          desc: 'Как разбираются PDF и Office. По умолчанию подходит в большинстве случаев; меняйте при необходимости OCR.',
+        },
+        chunking: {
+          title: 'Разбиение (необязательно)',
+          desc: 'Как документ делится на фрагменты для поиска. Размеры по умолчанию подобраны для RAG.',
+        },
+        storage: {
+          title: 'Хранилище (необязательно)',
+          desc: 'Где хранятся исходные файлы (локально или объектное хранилище). Обычно достаточно значения арендатора.',
+        },
+        navMultimodal: {
+          title: 'Мультимодальность / изображения (необязательно)',
+          desc: 'Включите, если в документах много диаграмм, сканов или изображений, требующих визуального понимания.',
+        },
+        multimodalToggle: {
+          title: 'Включить мультимодальный разбор',
+          desc: 'При включении загрузки с изображениями обрабатываются VLM для лучшего поиска.',
+        },
+        multimodalVllm: {
+          title: 'Выберите модель VLM',
+          desc: 'Для мультимодальности нужна VLM. Если список пуст, добавьте модель в настройках.',
+        },
+        faq: {
+          title: 'Индексация FAQ',
+          desc: 'Выберите режим индексации пар вопрос–ответ. Записи FAQ можно добавить после создания.',
+        },
+        submit: {
+          title: 'Создать базу знаний',
+          desc: 'Проверьте тип, название и модели, затем нажмите выделенную кнопку «Создать». Далее подскажем загрузить первый документ.',
+        },
+      },
+    },
+    agentList: {
+      steps: {
+        create: {
+          title: 'Создайте агента',
+          desc: 'Агенты объединяют модели, базы знаний, инструменты и промпты в переиспользуемых помощников. Нажмите выделенную кнопку «Создать агента».',
+        },
+      },
+    },
+    agentCreate: {
+      steps: {
+        mode: {
+          title: 'Выберите режим работы',
+          desc: '«Быстрый ответ» для простого Q&A; «Умное рассуждение» — инструменты и многошаговое мышление для сложных задач.',
+        },
+        agentType: {
+          title: 'Выберите тип агента',
+          desc: 'Пресеты подставляют системный промпт, рекомендуемые инструменты и область знаний (например, построение Wiki, анализ данных). При смене типа обновляются имя и описание.',
+        },
+        name: {
+          title: 'Название и описание',
+          desc: 'Укажите узнаваемое имя. В режиме умного рассуждения может подставиться значение по умолчанию.',
+        },
+        navModel: {
+          title: 'Привязать модель чата',
+          desc: 'Каждому агенту нужна модель KnowledgeQA как движок рассуждений.',
+        },
+        model: {
+          title: 'Выбор модели',
+          desc: 'Выберите из настроенных моделей чата или сначала добавьте в системных настройках.',
+        },
+        navKnowledge: {
+          title: 'Связать базы знаний',
+          desc: 'Определите, к каким знаниям агент может обращаться. По умолчанию — все базы.',
+        },
+        knowledge: {
+          title: 'Область знаний',
+          desc: '«Все» — универсальный помощник; «Выбранные» — домен; «Нет» — только модель или веб-поиск.',
+        },
+        navWebsearch: {
+          title: 'Веб-поиск (необязательно)',
+          desc: 'Разрешить агенту вызывать внешний поиск для актуальной информации.',
+        },
+        navMultimodal: {
+          title: 'Загрузка изображений (необязательно)',
+          desc: 'Позволяет отправлять изображения в чате; нужна VLM в настройках.',
+        },
+        multimodal: {
+          title: 'Включить понимание изображений',
+          desc: 'Включите переключатель и выберите VLM ниже.',
+        },
+        navTools: {
+          title: 'Инструменты и MCP (необязательно)',
+          desc: 'В режиме умного рассуждения включите встроенные инструменты и MCP для поиска, кода и др.',
+        },
+        submit: {
+          title: 'Сохранить агента',
+          desc: 'Нажмите выделенную кнопку подтверждения. Затем выберите этого агента в чате.',
+        },
+      },
+    },
+    kbDetail: {
+      steps: {
+        intro: {
+          title: 'База знаний пуста',
+          desc: 'Добавьте первый материал, чтобы искать по нему и общаться в чате. Поддерживаемые файлы можно перетащить мышью.',
+        },
+        upload: {
+          title: 'Добавить документы',
+          desc: 'Здесь можно загрузить файлы или папки, импортировать URL или создать материал онлайн.',
+        },
+        done: {
+          title: 'Готово после индексации',
+          desc: 'После обработки документов укажите эту базу через @ в чате и получайте ответы со ссылками на источники.',
+        },
+      },
+    },
+    chat: {
+      steps: {
+        kb: {
+          title: 'Выберите область знаний',
+          desc: 'Нажмите @, чтобы выбрать одну или несколько баз знаний или файлов. Иначе используются настройки текущего агента.',
+        },
+        input: {
+          title: 'Введите вопрос',
+          desc: 'Опишите, что хотите узнать, или нажмите на рекомендуемый вопрос выше.',
+        },
+        send: {
+          title: 'Отправить, чтобы начать чат',
+          desc: 'После отправки создаётся новая сессия. ИИ отвечает на основе базы знаний и показывает цитаты.',
+        },
+        done: {
+          title: 'Можно исследовать',
+          desc: 'Задайте вопрос по загруженным документам и посмотрите ответы со ссылками на источники.',
+        },
+      },
+    },
+  },
   batchManage: {
     title: 'Управление диалогами',
     selectAll: 'Выбрать все',
@@ -247,8 +489,10 @@ export default {
     batchDeleteFailed: 'Ошибка пакетного удаления',
     statusCompleted: 'Завершено',
     statusProcessing: 'Обработка',
+    statusFinalizing: 'Оптимизация',
     statusPending: 'Ожидание',
     statusFailed: 'Ошибка',
+    statusCancelled: 'Отменено',
     statusDraft: 'Черновик',
     selectKnowledgeBaseFirst: 'Пожалуйста, сначала выберите базу знаний',
     sessionCreationFailed: 'Не удалось создать диалог',
@@ -326,6 +570,28 @@ export default {
       sharedAt: 'Дата общего доступа',
       lastUpdated: 'Последнее обновление'
     },
+    infoCard: {
+      tooltip: 'Просмотр информации о базе знаний',
+      title: 'Информация о базе знаний',
+      basic: 'Основное',
+      access: 'Доступ',
+      binding: 'Привязка хранилища',
+      capabilities: 'Возможности',
+      stats: 'Статистика',
+      type: 'Тип',
+      createdAt: 'Создано',
+      source: 'Источник',
+      sharedTo: 'Общий доступ',
+      enabled: 'Включено',
+      vectorStore: 'Векторное хранилище',
+      fileStorage: 'Файловое хранилище',
+      documentCount: 'Документы',
+      faqCount: 'FAQ',
+      supportedFileTypes: 'Допустимые форматы',
+      chunking: 'Разделение',
+      parentShort: 'родитель',
+      childShort: 'потомок',
+    },
     addDocument: 'Добавить документ',
     createdAt: 'Создано',
     updatedAt: 'Обновлено',
@@ -334,7 +600,164 @@ export default {
     rebuildConfirm: 'Подтвердить пересборку документа "{fileName}"? Существующие фрагменты будут удалены и документ будет повторно проанализирован.',
     rebuildSubmitted: 'Задача пересборки отправлена',
     rebuildFailed: 'Ошибка пересборки, попробуйте позже',
-    rebuildInProgress: 'Документ сейчас анализируется, попробуйте позже'
+    rebuildInProgress: 'Документ сейчас анализируется, попробуйте позже',
+    cancelParse: 'Остановить разбор',
+    cancelParseConfirmBody: 'Остановить разбор «{title}»? Уже записанные фрагменты сохранятся, и их можно будет разобрать заново через «Пересобрать». Ожидающие задачи оптимизации (резюме / вопросы и ответы / граф знаний) будут немедленно отменены.',
+    cancelParseSubmitted: 'Разбор остановлен',
+    cancelParseFailed: 'Не удалось остановить, попробуйте позже'
+  },
+  uploadConfirm: {
+    title: 'Подтверждение загрузки',
+    fileList: 'Файлы для загрузки',
+    parseConfig: 'Настройки разбора',
+    configNav: 'Навигация по настройкам разбора',
+    tabOverview: 'Обзор',
+    overviewTitle: 'Настройки разбора для этой партии',
+    overviewDesc: 'Нажмите на строку, чтобы изменить',
+    backToOverview: 'Вернуться к обзору',
+    summaryChunkOverlapShort: 'Перекрытие {overlap}',
+    summaryParentChildShort: 'Родительско-дочернее',
+    summaryParserMode: 'Режим',
+    summaryParserBuiltin: 'Встроенный движок (по умолчанию)',
+    summaryChunkSize: 'Размер чанка',
+    summaryChunkOverlap: 'Перекрытие',
+    summaryStrategy: 'Стратегия',
+    summaryStrategyDefault: 'По умолчанию',
+    summaryParentChild: 'Родительско-дочернее',
+    summaryParentChildOn: 'Вкл. (родитель {parent} / дочерний {child})',
+    summaryParentChildOff: 'Выкл.',
+    summaryStatus: 'Статус',
+    summaryModel: 'Модель',
+    summaryQuestionCount: 'Вопросов на чанк',
+    summaryQuestionCountValue: '{count}',
+    summaryGraphTags: 'Типы связей',
+    summaryGraphTagsValue: '{count}',
+    navChunkingSummary: 'Чанк {size}',
+    statusOn: 'Вкл.',
+    statusOff: 'Выкл.',
+    notSet: 'Не задано',
+    confirm: 'Загрузить и обработать',
+    cancel: 'Отмена',
+    uploading: 'Загрузка {current}/{total}',
+    tabParser: 'Парсер',
+    tabChunking: 'Разбиение',
+    tabMultimodal: 'Мультимодальность',
+    tabAsr: 'Аудио',
+    tabQuestion: 'Генерация вопросов',
+    tabGraph: 'Граф знаний',
+    noFiles: 'Оставьте хотя бы один файл для загрузки',
+    noItems: 'Добавьте хотя бы один файл или URL',
+    urlItemLabel: 'URL',
+    urlAdded: 'URL добавлен',
+    urlDuplicate: 'Этот URL уже в списке',
+    addUrl: 'Добавить',
+    vlmModelRequired: 'В партии есть изображения. Включите мультимодальность и выберите модель VLM.',
+    multimodalRequiredForImages: 'Выкл. (в партии есть изображения)',
+    asrModelRequired: 'В партии есть аудио. Включите ASR и выберите модель распознавания речи.',
+    asrRequiredForAudio: 'Выкл. (в партии есть аудио)',
+    vlmModelSelectRequired: 'Мультимодальность включена. Выберите модель VLM.',
+    asrModelSelectRequired: 'Распознавание речи включено. Выберите модель ASR.',
+    continueAdd: 'Добавить ещё',
+    addMoreFiles: 'Добавить файлы',
+    addMoreFolder: 'Добавить из папки',
+    filesAdded: 'Добавлено файлов: {count}',
+    filesAllDuplicate: 'Выбранные файлы уже в списке',
+    titleUrl: 'Подтверждение импорта URL',
+    titleManual: 'Подтверждение публикации',
+    overviewDescUrl: 'После подтверждения настроек URL будет загружен и обработан',
+    overviewDescManual: 'После подтверждения настроек документ будет опубликован и проиндексирован',
+    confirmUrl: 'Импортировать и обработать',
+    confirmManual: 'Опубликовать и обработать',
+    titleReparse: 'Подтверждение повторной обработки',
+    overviewDescReparse: 'После подтверждения настроек существующее содержимое будет удалено, а документ обработан заново',
+    confirmReparse: 'Подтвердить и обработать заново',
+    reparseSource: 'Документ для повторной обработки',
+    reparseHint: 'Используются настройки прошлой обработки; их можно изменить здесь',
+    urlSource: 'Источник импорта',
+    manualSource: 'Документ для публикации',
+    editUrl: 'Изменить URL',
+    manualCharCount: '{count} символов',
+  },
+  knowledgeStages: {
+    processConfig: {
+      title: 'Конфигурация обработки',
+      kbDefault: 'Используются настройки базы знаний по умолчанию',
+      chunking: 'Разбиение',
+      chunkSize: 'размер {n}',
+      parentChildOn: 'родитель-потомок вкл',
+      parentChildOff: 'родитель-потомок выкл',
+      parser: 'Движок парсера',
+      multimodal: 'Мультимодальность',
+      asr: 'Аудио (ASR)',
+      question: 'Генерация вопросов',
+      questionOn: 'вкл ({n} на фрагмент)',
+      graph: 'Граф знаний',
+      on: 'вкл',
+      off: 'выкл',
+    },
+    title: 'Конвейер обработки',
+    root: 'Обработка знаний',
+    attempt: 'Попытка {n}',
+    attemptLatest: 'Попытка {n} (последняя)',
+    retry: 'Повторить парсинг',
+    copyDetails: 'Скопировать детали',
+    copied: 'Скопировано в буфер обмена',
+    noActivity: 'Нет активности парсинга',
+    totalDuration: 'Всего: {d}',
+    total: 'Всего {d}',
+    detail: {
+      started: 'Начало',
+      finished: 'Окончание',
+      duration: 'Длительность',
+      input: 'Вход',
+      output: 'Выход',
+      metadata: 'Метаданные',
+      error: 'Ошибка',
+      showJson: 'Показать JSON',
+      hideJson: 'Скрыть JSON',
+    },
+    stage: {
+      docreader: 'Парсинг документа',
+      chunking: 'Разбиение',
+      embedding: 'Векторизация',
+      multimodal: 'Мультимодальное распознавание',
+      postprocess: 'Постобработка',
+    },
+    status: {
+      pending: 'Ожидание',
+      running: 'Выполняется',
+      finalizing: 'Оптимизация',
+      done: 'Готово',
+      failed: 'Ошибка',
+      skipped: 'Пропущено',
+      cancelled: 'Отменено',
+    },
+    errorCode: {
+      DOCREADER_TIMEOUT: 'Истекло время парсинга документа',
+      DOCREADER_TIMEOUT_SUGGESTION: 'Файл может быть слишком большим, или служба парсинга занята. Повторите позже или разделите документ.',
+      DOCREADER_UNAVAILABLE: 'Парсер документов недоступен',
+      DOCREADER_UNAVAILABLE_SUGGESTION: 'Служба парсинга отключена. Обратитесь к администратору.',
+      DOCREADER_PARSE_FAILED: 'Ошибка парсинга документа',
+      DOCREADER_PARSE_FAILED_SUGGESTION: 'Не удалось распарсить файл. Убедитесь, что он не повреждён.',
+      CHUNKING_FAILED: 'Ошибка разбиения',
+      CHUNKING_FAILED_SUGGESTION: 'Попробуйте изменить настройки разбиения базы знаний.',
+      EMBEDDING_RATE_LIMIT: 'Превышен лимит запросов к службе эмбеддингов',
+      EMBEDDING_RATE_LIMIT_SUGGESTION: 'Поставщик эмбеддингов ограничивает запросы. Повторите позже.',
+      EMBEDDING_PROVIDER_FAIL: 'Ошибка поставщика эмбеддингов',
+      EMBEDDING_PROVIDER_FAIL_SUGGESTION: 'Поставщик эмбеддингов вернул ошибку. Проверьте настройки поставщика.',
+      VECTORSTORE_WRITE_FAILED: 'Ошибка записи в векторное хранилище',
+      VECTORSTORE_WRITE_FAILED_SUGGESTION: 'Векторное хранилище отклонило запись. Проверьте доступность хранилища.',
+      MULTIMODAL_VLM_FAILED: 'Ошибка распознавания изображений',
+      MULTIMODAL_VLM_FAILED_SUGGESTION: 'Часть изображений не удалось обработать. Документ всё ещё может быть пригоден.',
+      MULTIMODAL_ALL_FAILED: 'Все изображения не прошли мультимодальную обработку',
+      MULTIMODAL_ALL_FAILED_SUGGESTION: 'Проверьте конфигурацию мультимодальной модели.',
+      TASK_TIMEOUT: 'Задача превысила максимальное время выполнения',
+      TASK_TIMEOUT_SUGGESTION: 'Задача выполнялась дольше допустимого. Повторите или обратитесь в поддержку.',
+      UPSTREAM_FAILED: 'Остановлено из-за ошибки на предыдущем этапе',
+      UPSTREAM_FAILED_SUGGESTION: 'Предыдущий этап завершился с ошибкой и заблокировал выполнение.',
+      UNKNOWN: 'Неизвестная ошибка',
+      UNKNOWN_SUGGESTION: 'Проверьте логи приложения для подробностей.',
+    },
   },
   agent: {
     taskLabel: 'Задача:',
@@ -347,6 +770,10 @@ export default {
     toolFallback: 'Инструмент',
     stepsCompleted: 'Выполнено <strong>{steps}</strong> шаг(ов)',
     stepsCompletedWithDuration: 'Выполнено <strong>{steps}</strong> шаг(ов) за <strong>{duration}</strong>',
+    reasoningRounds: '<strong>{rounds}</strong> раунд(ов) рассуждений',
+    toolCalls: '<strong>{tools}</strong> вызов(ов) инструментов',
+    durationSuffix: '<strong>{duration}</strong>',
+    stepSummarySeparator: ' · ',
     editor: {
       skillsConfig: 'Skills',
       skillsConfigDesc: 'Настройка предустановленных Skills для агента, предоставляющих специализированные знания и рабочие процессы',
@@ -375,6 +802,8 @@ export default {
       webSearchConfig: 'Web Search',
       webSearchConfigDesc: 'Configure web search capabilities for the agent',
       configuration: 'Configuration',
+      agentId: 'Agent ID',
+      agentIdDesc: 'Use this ID to target the agent in API integrations',
       name: 'Name',
       namePlaceholder: 'Enter agent name',
       nameRequired: 'Agent name is required',
@@ -631,14 +1060,14 @@ export default {
     mcpService: 'Сервис MCP',
     conversationConfig: 'Настройки диалога',
     conversationStrategy: 'Стратегия диалога',
-    systemSettings: 'Настройки системы',
+    versionInfo: 'Информация о версии',
     tenantInfo: 'Информация о арендаторе',
     apiInfo: 'Информация API',
     navGroups: {
-      workspaceAccount: 'Пространство и аккаунт',
+      account: 'Аккаунт',
+      workspace: 'Пространство',
       modelsRuntime: 'Модели',
-      integrations: 'Расширения',
-      knowledgeInfra: 'Движки',
+      dataExtensions: 'Данные и расширения',
       platform: 'Платформа',
     },
     roleDenied: {
@@ -715,6 +1144,11 @@ export default {
     parser: {
       title: 'Парсер',
       description: 'Состояние и конфигурация парсеров документов. Настройки здесь приоритетнее переменных окружения сервера. Оставьте пустым для значений по умолчанию.',
+      // Section / label keys for the redesigned drawer
+      supportedFileTypes: 'Поддерживаемые форматы',
+      statusSection: 'Статус',
+      configSection: 'Конфигурация',
+      featuresLabel: 'Опции',
       loading: 'Загрузка...',
       retry: 'Повторить',
       noEngineDetected: 'Парсеры не обнаружены. Убедитесь, что сервис DocReader работает.',
@@ -728,6 +1162,8 @@ export default {
       selfHostedEndpoint: 'Собственная конечная точка',
       formulaRecognition: 'Распознавание формул',
       tableRecognition: 'Распознавание таблиц',
+      sealRecognition: 'Распознавание печатей',
+      chartRecognition: 'Распознавание диаграмм',
       language: 'Язык',
       testConnection: 'Проверить с текущими параметрами',
       saveConfig: 'Сохранить конфигурацию',
@@ -744,11 +1180,20 @@ export default {
       languagePlaceholder: 'напр. ch, en, ja (по умолчанию ch)',
       mineruCloudApiKeyPlaceholder: 'MinerU Cloud API Key',
       vlmLabel: 'vlm (визуальная языковая модель)',
-      mineruHtmlLabel: 'MinerU-HTML (HTML парсинг)'
+      mineruHtmlLabel: 'MinerU-HTML (HTML парсинг)',
+      paddleocrVlEndpointPlaceholder: 'напр. http://your-paddleocr-vl:8080',
+      paddleocrVlEndpointHint: 'Адрес полного сервиса PaddleOCR-VL (pipeline); суффикс /layout-parsing не требуется',
+      paddleocrVlCloudTokenPlaceholder: 'Токен PaddleOCR-VL AI Studio'
     },
     storage: {
       title: 'Хранилище',
       description: 'Настройте хранение документов и изображений. Здесь задаются параметры хранилищ; в базе знаний выбирается только тип хранилища.',
+      // Section / label keys for the redesigned drawer
+      basicSection: 'Основное',
+      modeSection: 'Режим развёртывания',
+      credentialsSection: 'Учётные данные',
+      bucketSection: 'Bucket',
+      useSslDesc: 'Подключаться к MinIO по HTTPS',
       loading: 'Загрузка...',
       retry: 'Повторить',
       defaultEngine: 'Хранилище по умолчанию',
@@ -827,6 +1272,10 @@ export default {
   webSearchSettings: {
     title: 'Настройки веб-поиска',
     description: 'Настройте веб-поиск, чтобы ответы могли включать актуальную информацию из интернета.',
+    // Section keys for the redesigned drawer
+    basicSection: 'Основное',
+    credentialsSection: 'Подключение',
+    optionsSection: 'Опции',
     providersTitle: 'Поисковые провайдеры',
     addProvider: 'Добавить провайдер',
     editProvider: 'Редактировать провайдер',
@@ -894,6 +1343,8 @@ export default {
   vectorStoreSettings: {
     title: 'Движок векторной базы данных',
     description: 'Регистрация и управление экземплярами векторных баз данных для поиска по базе знаний.',
+    // Section key for the redesigned drawer
+    basicSection: 'Основное',
     storesTitle: 'Векторные базы данных',
     addStore: 'Добавить базу данных',
     editStore: 'Редактировать базу данных',
@@ -914,6 +1365,7 @@ export default {
       use_tls: 'Использовать TLS',
       scheme: 'Схема',
       grpc_address: 'gRPC адрес',
+      database: 'Имя базы данных',
       use_default_connection: 'Использовать подключение по умолчанию',
       index_name: 'Имя индекса',
       number_of_shards: 'Шарды',
@@ -925,11 +1377,17 @@ export default {
       shards_num: 'Шарды',
       replica_number: 'Реплики в памяти',
       desired_shard_count: 'Количество шардов',
+      insecure_skip_verify: 'Пропустить проверку TLS',
+      hnsw_m: 'HNSW M (степень графа)',
+      hnsw_ef_construction: 'HNSW ef_construction',
+      hnsw_ef_search: 'HNSW ef_search',
+      knn_engine: 'Движок k-NN',
     },
     envTag: 'DEFAULT',
     testConnection: 'Тест подключения',
     testing: 'Тестирование...',
     immutableNotice: 'Тип движка, подключение и настройки индекса нельзя изменить после создания.\nДля изменения удалите и создайте заново.',
+    insecureSkipVerifyWarning: 'Отключение проверки сертификата TLS делает соединение уязвимым для атак «человек посередине». Используйте только для dev-кластеров с самоподписанными сертификатами — никогда в продакшене.',
     validation: {
       nameRequired: 'Название обязательно',
       engineTypeRequired: 'Тип движка обязателен',
@@ -1260,9 +1718,11 @@ export default {
     noAccount: 'Ещё нет аккаунта?',
     backToLogin: 'Вернуться ко входу',
     registerNow: 'Зарегистрироваться',
+    loginHint: 'Войдите, чтобы продолжить, или создайте аккаунт ниже, если вы впервые здесь.',
+    firstTime: 'Впервые в WeKnora?',
     registerSuccess: 'Регистрация успешна! Система создала для вас эксклюзивного арендатора, пожалуйста, войдите',
     registerFailed: 'Ошибка регистрации',
-    subtitle: 'Фреймворк понимания документов и семантического поиска на основе больших моделей',
+    subtitle: 'RAG, ReAct-агент и Wiki — корпоративный фреймворк знаний на основе больших моделей',
     registerSubtitle: 'После регистрации система создаст для вас эксклюзивного арендатора',
     emailPlaceholder: 'Введите адрес электронной почты',
     passwordPlaceholder: 'Введите пароль (8-32 символа, включая буквы и цифры)',
@@ -1568,6 +2028,14 @@ export default {
     buildTimeDescription: 'Время, когда система была собрана',
     goVersionLabel: 'Версия Go',
     goVersionDescription: 'Версия языка Go, используемая backend',
+    startedAtLabel: 'Время запуска сервиса',
+    startedAtDescription: 'Момент последнего запуска текущего процесса backend',
+    uptimeLabel: 'Время работы',
+    uptimeDescription: 'Непрерывное время работы с момента этого запуска',
+    uptimeDays: '{n} д',
+    uptimeHours: '{n} ч',
+    uptimeMinutes: '{n} мин',
+    uptimeSeconds: '{n} с',
     dbVersionLabel: 'Версия базы данных',
     dbVersionDescription: 'Текущая версия миграции базы данных',
     dbMigrationFailedTag: 'Миграция не удалась',
@@ -1585,6 +2053,162 @@ export default {
     messages: {
       fetchFailed: 'Не удалось получить информацию о системе',
       networkError: 'Ошибка сети, попробуйте позже'
+    },
+    globalSettings: {
+      title: 'Системные настройки',
+      description: 'Настройки платформы, применяемые в режиме реального времени. Изменения сразу действуют для всех тенантов. Доступны только системным администраторам.',
+      loading: 'Загрузка...',
+      empty: 'Нет доступных для настройки параметров',
+      badgeRequiresRestart: 'Нужен перезапуск',
+      badgeSecret: 'Конфиденциально',
+      badgeOverride: 'Переопределено',
+      badgeOverrideTooltip: 'Это значение сохранено администратором в БД и переопределяет переменную окружения и значение по умолчанию.',
+      modifiedAt: 'Последнее изменение: {value}',
+      tagInputPlaceholder: 'Нажмите Enter, чтобы добавить запись, например: example.com / *.foo.com / 10.0.0.0/8',
+      priorityHint: {
+        title: 'О приоритете',
+        tier1: 'Параметры, сохранённые на этой странице (с пометкой «Переопределено»), всегда имеют приоритет — переменная окружения для них игнорируется.',
+        tier2: 'Параметры, не сохранённые здесь, берутся из переменной окружения, а если её нет — из встроенного значения по умолчанию.',
+        tier3: 'Чтобы вернуть параметр под управление переменной окружения, нажмите кнопку «Сбросить» в его строке.',
+      },
+      keyLabels: {
+        auth: {
+          registration_mode: 'Режим самостоятельной регистрации',
+        },
+        ssrf: {
+          whitelist: 'Белый список SSRF-защиты',
+        },
+        tenant: {
+          max_owned_per_user: 'Максимум тенантов на пользователя',
+          default_storage_quota_gb: 'Квота хранилища для новых тенантов по умолчанию (ГБ)',
+        },
+        asynq: {
+          concurrency: 'Параллелизм воркеров асинхронных задач',
+        },
+      },
+      enumLabels: {
+        auth: {
+          registration_mode: {
+            self_serve: 'Самостоятельная (любой может зарегистрироваться)',
+            invite_only: 'Только по приглашению (открытая регистрация отключена)',
+          },
+        },
+      },
+      confirm: {
+        header: 'Подтверждение опасного действия',
+        confirmBtn: 'Подтвердить сохранение',
+        cancelBtn: 'Отмена',
+        emptyValue: '(пусто)',
+        defaultBody: 'Вы собираетесь изменить «{label}» на: {value}',
+        bodyAuthRegistrationMode: 'Вы собираетесь изменить «{label}» на: {value}\n\nЕсли переключить на self_serve, любой пользователь публичного интернета сможет создать аккаунт — убедитесь, что это ожидаемое поведение.',
+      },
+      listConfirm: {
+        ssrf: {
+          whitelist: {
+            add: {
+              header: 'Добавить запись в белый список SSRF',
+              body: 'Добавить {entry} в белый список SSRF? Соответствующие хосты / IP / подсети будут обходить защиту от SSRF и смогут обращаться к внутренним сервисам через агентов. Добавляйте только полностью доверенные записи.',
+              confirmBtn: 'Добавить',
+            },
+            remove: {
+              header: 'Удалить запись из белого списка SSRF',
+              body: 'Удалить {entry} из белого списка SSRF? После удаления запись снова будет блокироваться защитой от SSRF.',
+              confirmBtn: 'Удалить',
+            },
+          },
+        },
+      },
+      messages: {
+        loadFailed: 'Не удалось загрузить системные настройки',
+        saveSuccess: 'Сохранено',
+        saveFailed: 'Ошибка сохранения'
+      },
+      reset: {
+        label: 'Сбросить',
+        tooltip: 'Очистить переопределение из UI и вернуться к переменной окружения или встроенному значению по умолчанию',
+        confirmBtn: 'Подтвердить сброс',
+        confirmBody: 'Сбросить «{label}»? Это удалит запись переопределения в БД и вернёт значение из переменной окружения или встроенное по умолчанию.',
+        success: 'Сброшено к значению по умолчанию',
+        failed: 'Ошибка сброса'
+      },
+      admins: {
+        label: 'Системные администраторы',
+        description: 'Пользователи с правами уровня платформы. Введите email и нажмите Enter, чтобы повысить пользователя до администратора; нажмите × на теге, чтобы отозвать права. Вы (текущий пользователь) являетесь администратором и не отображаетесь в списке — отозвать собственные права нельзя.',
+        placeholder: 'Введите email пользователя и нажмите Enter',
+        loadFailed: 'Не удалось загрузить системных администраторов',
+        saveSuccess: 'Системные администраторы обновлены',
+        saveFailed: 'Ошибка обновления системных администраторов',
+        confirm: {
+          promote: {
+            header: 'Повысить до системного администратора',
+            body: 'Повысить пользователя {email} до системного администратора? Пользователь получит права уровня платформы: доступ ко всем тенантам, изменение системных настроек и управление списком администраторов.',
+            confirmBtn: 'Повысить',
+          },
+          revoke: {
+            header: 'Отозвать права администратора',
+            body: 'Отозвать права системного администратора у {email}? После отзыва пользователь потеряет доступ ко всем системным функциям.',
+            confirmBtn: 'Отозвать',
+          },
+        },
+      },
+      bulkApply: {
+        label: 'Применить ко всем существующим тенантам',
+        tooltip: 'По умолчанию сохранённое значение применяется только к новым тенантам. Нажмите, чтобы также перезаписать всех существующих.',
+        confirmBtn: 'Подтвердить применение',
+        confirmBody: 'Перезаписать квоту хранилища всех существующих тенантов значением {value} ГБ. Тенанты, чью квоту вручную правили эксплуатация, также будут перезаписаны. Продолжить?',
+        success: 'Обновлена квота хранилища у {count} тенантов: {gb} ГБ',
+        failed: 'Ошибка применения ко всем тенантам'
+      },
+      audit: {
+        tabLabel: 'Журнал аудита',
+        description:
+          'События уровня платформы: изменения системных настроек, выдача/отзыв роли системного администратора, массовая синхронизация квот. Сортировка от новых к старым.',
+        refresh: 'Обновить',
+        retry: 'Повторить',
+        loading: 'Загрузка…',
+        end: 'Конец списка.',
+        empty: 'Событий аудита платформы пока нет.',
+        forbidden: 'Нет прав на просмотр журнала аудита платформы.',
+        systemActor: 'Система',
+        errors: {
+          generic: 'Не удалось загрузить журнал аудита'
+        },
+        actorRole: {
+          system_admin: 'Системный администратор'
+        },
+        columns: {
+          time: 'Время',
+          actor: 'Кто',
+          action: 'Событие',
+          target: 'Цель',
+          path: 'Запрос',
+          outcome: 'Результат'
+        },
+        action: {
+          'system.setting_changed': 'Изменена системная настройка',
+          'system.admin_promoted': 'Выдан системный администратор',
+          'system.admin_revoked': 'Отозван системный администратор'
+        },
+        outcome: {
+          success: 'Успешно',
+          denied: 'Отказано'
+        },
+        target: {
+          bulkQuota: 'Массовая синхронизация: квота хранилища по умолчанию',
+          bulkQuotaDiff: 'Применено к {count} тенантам ({gb} ГБ)',
+          promoteIdempotent: 'Уже системный администратор (идемпотентно)',
+          revokeNoop: 'И так не был системным администратором (идемпотентно)',
+          requiredRole: 'Требуемая роль: {role}',
+          valueNull: '(не задано)'
+        },
+        expanded: {
+          actorId: 'ID инициатора',
+          targetUserId: 'ID целевого пользователя',
+          targetType: 'Тип цели',
+          targetId: 'ID цели',
+          details: 'Сырые детали'
+        }
+      }
     }
   },
   mcp: {
@@ -1675,9 +2299,12 @@ export default {
     editor: {
       addTitle: 'Добавить модель',
       editTitle: 'Редактировать модель',
+      sectionSource: 'Источник',
+      sectionProvider: 'Настройки провайдера',
+      sectionAdvanced: 'Дополнительные параметры',
       sourceLabel: 'Источник модели',
-      sourceLocal: 'Ollama (локальный)',
-      sourceRemote: 'Remote API (удалённый)',
+      sourceLocal: 'Ollama',
+      sourceRemote: 'API',
       description: {
         chat: 'Настройте языковую модель для диалогов',
         embedding: 'Настройте модель встраивания для текстовой векторизации',
@@ -1694,6 +2321,9 @@ export default {
         remoteAsr: 'например: whisper-1'
       },
       baseUrlLabel: 'Base URL',
+      displayNameLabel: 'Отображаемое имя (опционально)',
+      displayNamePlaceholder: 'например: модель поддержки',
+      displayNameDesc: 'Используется только в интерфейсе. Для вызовов по-прежнему используется имя модели выше.',
       baseUrlPlaceholder: 'например: https://api.openai.com/v1',
       baseUrlPlaceholderVllm: 'например: http://localhost:11434/v1',
       baseUrlPlaceholderAsr: 'например: https://api.openai.com/v1',
@@ -1718,6 +2348,27 @@ export default {
       remoteDimensionDetected: 'Обнаружена размерность: {value}',
       supportsVisionLabel: 'Поддержка визуального / мультимодального ввода',
       supportsVisionDesc: 'Поддерживает ли модель изображения и другой мультимодальный ввод',
+      thinkingControlLabel: 'Формат параметров режима размышления',
+      thinkingControlDesc:
+        'Определяет, как переключатель «Режим размышления» агента записывается в API. При возможности выбирается по поставщику/модели; при несоответствии измените по документации API. При выборе «Не отправлять» переключатель «Режим размышления» агента не действует.',
+      thinkingControl: {
+        none: {
+          label: 'Не отправлять параметры размышления',
+          hint: 'Переключатель «Режим размышления» агента не действует; параметры размышления не отправляются в запросе',
+        },
+        chatTemplateKwargs: {
+          label: 'chat_template_kwargs',
+          hint: 'Пользовательские OpenAI-совместимые шлюзы, NVIDIA NIM, vLLM / локальный Qwen',
+        },
+        enableThinking: {
+          label: 'enable_thinking',
+          hint: 'Alibaba DashScope: qwen3, qwen-plus, qwen-max, qwen-turbo',
+        },
+        thinkingType: {
+          label: 'thinking.type',
+          hint: 'Volcengine Ark; Tencent LKEAP (DeepSeek V3 и др.; по умолчанию для LKEAP; для R1 — «Не отправлять»)',
+        },
+      },
       dimensionHint: 'Модель выбрана. Нажмите «Определить размерность», чтобы автоматически получить значение.',
       loadModelListFailed: 'Не удалось загрузить список моделей',
       listRefreshed: 'Список обновлён',
@@ -1791,7 +2442,7 @@ export default {
         },
         minimax: {
           label: 'MiniMax',
-          description: 'MiniMax-M2.7, MiniMax-M2.7-highspeed, MiniMax-M2.5, etc.'
+          description: 'MiniMax-M3, MiniMax-M2.7, MiniMax-M2.7-highspeed, etc.'
         },
         mimo: {
           label: 'MiMo',
@@ -1827,7 +2478,7 @@ export default {
         },
         lkeap: {
           label: 'Tencent Cloud LKEAP',
-          description: 'DeepSeek-R1, DeepSeek-V3 с поддержкой цепочки рассуждений'
+          description: 'DeepSeek-R1, DeepSeek-V3, lke-reranker-base и др.'
         },
         nvidia: {
           label: "NVIDIA",
@@ -1963,6 +2614,7 @@ export default {
     sidebar: {
       basic: 'Основная информация',
       models: 'Конфигурация моделей',
+      vectorStore: 'Vector Store',
       chunking: 'Настройки разбиения',
       advanced: 'Дополнительные настройки',
       faq: 'FAQ настройки',
@@ -1975,9 +2627,17 @@ export default {
       share: 'Sharing',
       indexing: 'Стратегия индексации',
     },
+    errors: {
+      vectorStoreBindingInvalid:
+        'The selected vector store cannot be used. Choose a different store or use the system default.',
+      vectorStoreUnavailable:
+        'The selected vector store is currently unavailable. Check its connection configuration in Settings → Vector Stores.',
+    },
     basic: {
       title: 'Основная информация',
       description: 'Укажите название и описание базы знаний',
+      kbId: 'ID базы знаний',
+      kbIdDesc: 'Используйте этот ID для указания базы знаний в API-интеграциях',
       typeLabel: 'Тип базы знаний',
       typeDocument: 'Документальная',
       typeFAQ: 'FAQ (вопрос-ответ)',
@@ -2487,6 +3147,8 @@ export default {
     referenceIconAlt: 'Иконка ссылок на материалы',
     chunkIdLabel: 'ID фрагмента:',
     documentIdLabel: 'ID документа:',
+    chunkOrdinal: 'Фрагмент {index}',
+    previewContent: 'Предпросмотр содержимого',
     noPlanSteps: 'Подробные шаги не предоставлены',
     chunkIndexLabel: 'Фрагмент №{index}',
     chunkPositionLabel: '(позиция: {position})',
@@ -2653,22 +3315,26 @@ export default {
     },
   },
   platform: {
-    subtitle: 'Корпоративная платформа интеллектуального поиска документов',
-    description: 'Упрощение понимания сложных документов и точного поиска',
+    subtitle: 'Корпоративная платформа знаний на базе больших языковых моделей',
+    description: 'RAG-поиск, агентные рассуждения и Wiki-базы знаний — чтобы документы действительно понимались и приносили пользу',
     rag: 'RAG расширенная генерация',
+    agent: 'ReAct агент',
+    wiki: 'Wiki-база знаний',
     hybridSearch: 'Гибридный поиск',
     localDeploy: 'Локальное развертывание',
     multimodalParsing: 'Мультимодальный анализ документов',
-    hybridSearchEngine: 'Гибридная поисковая система',
-    ragQandA: 'RAG интеллектуальный вопрос-ответ',
+    hybridSearchEngine: 'Гибридный поиск + граф знаний',
+    ragQandA: 'Вопрос-ответ с ReAct агентом',
     independentTenant: 'Независимое пространство арендатора',
     fullApiAccess: 'Полный доступ к API',
     knowledgeBaseManagement: 'Управление базой знаний',
     carousel: {
       agenticRagTitle: 'Agentic RAG',
-      agenticRagDesc: 'Переформулировка запроса + умный отбор + повторная ранжировка',
+      agenticRagDesc: 'ReAct-рассуждения + вызов инструментов + многошаговое мышление',
       hybridSearchTitle: 'Гибридная стратегия поиска',
       hybridSearchDesc: 'BM25 + Вектор + Граф знаний',
+      wikiTitle: 'Wiki-база знаний',
+      wikiDesc: 'Дистилляция документов в структурированные связанные знания',
       smartDocRetrievalTitle: 'Интеллектуальный поиск документов',
       smartDocRetrievalDesc: 'Многоформатный разбор PDF/Word/изображений'
     }
@@ -2931,6 +3597,9 @@ export default {
   mcpSettings: {
     title: 'Сервисы MCP',
     description: 'Управление внешними сервисами MCP (Model Context Protocol) для использования инструментов и ресурсов в режиме Agent',
+    // Drawer subtitle chip
+    enabled: 'Включён',
+    disabled: 'Отключён',
     configuredServices: 'Настроенные сервисы',
     manageAndTest: 'Управляйте и тестируйте подключения MCP',
     addService: 'Добавить сервис',
@@ -2975,8 +3644,10 @@ export default {
     },
     source: {
       remote: 'Удалённая',
-      openaiCompatible: 'Совместимо с OpenAI'
+      openaiCompatible: 'Совместимо с OpenAI',
+      custom: 'Своё',
     },
+    rawModelName: 'Имя модели',
     embedding: {
       title: 'Модели встраивания',
       desc: 'Модели для векторизации текста',
@@ -3000,6 +3671,7 @@ export default {
     toasts: {
       nameRequired: 'Название модели не может быть пустым',
       nameTooLong: 'Название модели не может превышать 100 символов',
+      displayNameTooLong: 'Отображаемое имя не может превышать 100 символов',
       baseUrlRequired: 'Для удалённых API требуется Base URL',
       baseUrlInvalid: 'Некорректный Base URL, укажите правильный адрес',
       dimensionInvalid: 'Размерность встраивания должна быть 128–4096',
@@ -3073,6 +3745,13 @@ export default {
   mcpServiceDialog: {
     addTitle: 'Добавить сервис MCP',
     editTitle: 'Редактировать сервис MCP',
+    // Section + drawer-only keys
+    basicSection: 'Основное',
+    connectionSection: 'Подключение',
+    enableServiceDesc: 'При выключении сервис не будет вызываться',
+    testAfterSaveHint: 'Сохраните, чтобы протестировать подключение',
+    unitSecond: 'с',
+    unitTimes: '×',
     name: 'Название сервиса',
     namePlaceholder: 'Введите название сервиса',
     description: 'Описание',
@@ -3318,6 +3997,7 @@ export default {
       agents: 'Открыть агенты',
       organizations: 'Открыть общие пространства',
       settings: 'Открыть настройки',
+      productTour: 'Обучение',
     },
     empty: {
       noResults: 'Совпадений не найдено',
@@ -3375,7 +4055,30 @@ export default {
     think: 'Глубокое размышление',
     todoWrite: 'Составить план'
   },
+  vectorStoreBadge: {
+    systemDefault: 'System default',
+    sharedFromOrg: 'Shared from another organization',
+    unknownStore: 'Unknown store',
+    unavailable: 'Unavailable',
+  },
   kbSettings: {
+    vectorStore: {
+      title: 'Vector Store',
+      description:
+        'Choose which vector store this knowledge base writes to. The binding is permanent — to move an existing KB to a different store, create a new KB and re-index.',
+      loading: 'Loading vector stores...',
+      engineLabel: 'Vector store',
+      engineDesc:
+        'Pick a store from the global Vector Stores configuration, or leave as System default to use the tenant-wide RETRIEVE_DRIVER engine.',
+      boundLabel: 'Bound vector store',
+      systemDefault: 'System default',
+      immutableHint:
+        'Cannot be changed after creation. To migrate later, create a new KB bound to the desired store and re-index.',
+      immutableEdit: 'Vector store binding cannot be changed after creation.',
+      unavailableHint:
+        'The bound vector store is currently unavailable; check its connection configuration in Settings → Vector Stores.',
+      goGlobalSettings: 'Go to Vector Store Settings',
+    },
     storage: {
       title: 'Хранилище',
       description: 'Выберите хранилище файлов. Это влияет на способ хранения загруженных документов и изображений в документах. Параметры настраиваются в глобальных настройках.',
@@ -3440,9 +4143,25 @@ export default {
           name: 'MinerU Cloud',
           desc: 'MinerU Cloud API',
         },
+        paddleocr_vl: {
+          name: 'PaddleOCR-VL',
+          desc: 'Самостоятельно развёрнутый сервис PaddleOCR-VL',
+        },
+        paddleocr_vl_cloud: {
+          name: 'PaddleOCR-VL Cloud',
+          desc: 'PaddleOCR-VL Cloud API',
+        },
         weknoracloud: {
           name: 'WeKnora Cloud',
           desc: 'Парсинг документов через WeKnora Cloud',
+        },
+        markitdown: {
+          name: 'MarkItDown',
+          desc: 'Конвертер Microsoft MarkItDown (PDF/Office/HTML и др.)',
+        },
+        opendataloader: {
+          name: 'OpenDataLoader',
+          desc: 'Парсер OpenDataLoader PDF (анализ вёрстки; требуются Java 11+ и opendataloader-pdf)',
         },
       },
     },
@@ -3479,7 +4198,6 @@ export default {
       thinking: 'Размышление',
       imageAnalysis: 'Анализ изображения',
       queryKnowledgeGraph: 'Запрос графа знаний',
-      finalAnswer: 'Генерация ответа',
       readSkill: 'Чтение навыка',
       executeSkillScript: 'Выполнение скрипта навыка',
       dataAnalysis: 'Анализ данных',
@@ -3518,8 +4236,12 @@ export default {
       foundResultsFromFiles: 'Найдено {count} результат(ов) из {files} файл(ов)',
       foundResults: 'Найдено {count} результат(ов)',
       webResults: 'Найдено {count} результат(ов) веб-поиска',
-      foundMatches: 'Найдено {count} совпадений',
-      showingCount: '(показано {count})'
+      grepSummary: 'Найдено фрагментов: {chunks}, в документах: {docs}',
+    },
+    grepResults: {
+      chunkHits: '{count} фрагм.',
+      keywordHits: '{count} вх.',
+      titleMatch: 'заголовок',
     },
     toolStatus: {
       calling: 'Вызов {name}...',
@@ -3557,6 +4279,15 @@ export default {
       available: 'Доступные переменные: ',
       clickToInsert: '(нажмите для вставки)',
       hint: "(нажмите для вставки или введите {'{{'} для списка)"
+    },
+    intentPrompts: {
+      title: 'Промпты намерений',
+      sectionDesc: 'Настройте системные промпты для разных намерений запроса; по умолчанию используются шаблоны системы',
+      intentLabel: 'Намерение',
+      intentDescription: 'Выберите системный промпт для редактирования',
+      promptPlaceholder: 'Введите пользовательский системный промпт...',
+      customized: 'Настроено',
+      empty: 'Нет доступных шаблонов намерений',
     },
     selection: {
       all: 'Все',
@@ -3649,7 +4380,6 @@ export default {
       // Служебные (только предпросмотр)
       webSearch: 'Поиск в сети',
       webFetch: 'Загрузка веб-страницы',
-      finalAnswer: 'Отправить окончательный ответ',
       // Группы
       groupBase: 'Базовые',
       groupRag: 'Поиск в базе знаний (RAG)',
@@ -4386,6 +5116,8 @@ export default {
     saveFailed: 'Не удалось сохранить учётные данные',
     removedToast: 'Учётные данные удалены',
     removeFailed: 'Не удалось удалить учётные данные',
+    confirmRemovePrompt: 'Удалить учётные данные? Действие необратимо.',
+    confirmRemove: 'Подтвердить удаление',
     confirmRemoveTitle: 'Удалить {field}?',
     confirmRemoveBody:
       'Сохранённые учётные данные будут безвозвратно удалены. Интеграции, использующие их, перестанут работать до настройки нового значения.',
@@ -4501,6 +5233,13 @@ export default {
       outcome: {
         success: 'Успех',
         denied: 'Отказ',
+      },
+      expanded: {
+        actorId: 'ID инициатора',
+        targetUserId: 'ID целевого пользователя',
+        targetType: 'Тип цели',
+        targetId: 'ID цели',
+        details: 'Сырые детали',
       },
     },
   },

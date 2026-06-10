@@ -72,6 +72,12 @@ verification including failed-doc aggregation.`,
 		},
 	}
 	cmdutil.AddFormatFlag(cmd, kbCheckFields...)
+	cmdutil.SetAgentHelp(cmd, cmdutil.AgentHelp{
+		UsedFor:       "verify a knowledge base end-to-end: status plus failed-doc aggregation",
+		RequiredFlags: []string{"<kb-id> (positional)"},
+		Examples:      []string{"weknora kb check kb_abc"},
+		Output:        "envelope.data is {id, reachable, failed_count, ...}; deeper than `kb status`",
+	})
 	return cmd
 }
 
@@ -124,7 +130,7 @@ func aggregateFailedCount(ctx context.Context, svc CheckService, kbID string) (i
 func emitCheck(res *CheckResult, fopts *cmdutil.FormatOptions, w io.Writer) error {
 	switch fopts.Mode {
 	case cmdutil.FormatJSON, cmdutil.FormatNDJSON:
-		return fopts.Emit(w, res)
+		return fopts.Emit(w, res, nil)
 	case cmdutil.FormatText, "":
 		return writeCheckText(w, res)
 	default:

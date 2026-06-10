@@ -71,7 +71,7 @@ func ExampleUsage() {
 			"source": "local",
 			"type":   "document",
 		}
-		knowledge, err := apiClient.CreateKnowledgeFromFile(context.Background(), createdKB.ID, filePath, metadata, nil, "", "")
+		knowledge, err := apiClient.CreateKnowledgeFromFile(context.Background(), createdKB.ID, filePath, metadata, nil, "", "", nil)
 		if err != nil {
 			fmt.Printf("Failed to upload knowledge file: %v\n", err)
 		} else {
@@ -90,8 +90,8 @@ func ExampleUsage() {
 	fmt.Println("\n3. Creating model...")
 	modelRequest := &CreateModelRequest{
 		Name:        "Test Model",
-		Type:        ModelTypeChat,
-		Source:      ModelSourceInternal,
+		Type:        ModelTypeKnowledgeQA,
+		Source:      ModelSourceLocal,
 		Description: "This is a test model",
 		Parameters: ModelParameters{
 			"temperature": 0.7,

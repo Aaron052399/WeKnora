@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/types"
+	"github.com/sashabaranov/go-openai"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -177,7 +178,7 @@ func TestBuildChatCompletionRequest_GPT5MaxCompletionTokens(t *testing.T) {
 				FrequencyPenalty: 0.1,
 				PresencePenalty:  0.2,
 			}
-			req := c.BuildChatCompletionRequest(messages, opts, false)
+			req := c.shapedRequest(messages, opts, false)
 
 			if tc.shouldRewriteMaxT {
 				assert.Equal(t, 0, req.MaxTokens, "MaxTokens must NOT be sent for GPT-5/o-series")
@@ -200,7 +201,7 @@ func TestBuildChatCompletionRequest_GPT5MaxCompletionTokens(t *testing.T) {
 			MaxTokens:           128,
 			MaxCompletionTokens: 2048,
 		}
-		req := c.BuildChatCompletionRequest(messages, opts, false)
+		req := c.shapedRequest(messages, opts, false)
 		assert.Equal(t, 0, req.MaxTokens)
 		assert.Equal(t, 2048, req.MaxCompletionTokens)
 	})
@@ -267,6 +268,65 @@ func TestConvertMessages_ReasoningContentRoundTrip(t *testing.T) {
 		require.Len(t, out, 1)
 		assert.Empty(t, out[0].ReasoningContent)
 	})
+}
+
+func TestApplyCompletionToolCallMetadata(t *testing.T) {
+	c := newTestRemoteChat(t)
+	c.adapter = geminiProvider{}
+
+	resp := &types.ChatResponse{
+		ToolCalls: []types.LLMToolCall{{
+			ID:   "call_1",
+			Type: "function",
+			Function: types.FunctionCall{
+				Name:      "wiki_search",
+				Arguments: `{"query":"MACS"}`,
+			},
+		}},
+	}
+	body := []byte(`{
+		"choices":[{
+			"message":{
+				"tool_calls":[{
+					"id":"call_1",
+					"type":"function",
+					"function":{"name":"wiki_search","arguments":"{\"query\":\"MACS\"}"},
+					"extra_content":{"google":{"thought_signature":"sig-from-gemini"}}
+				}]
+			}
+		}]
+	}`)
+
+	c.applyCompletionToolCallMetadata(body, resp)
+	require.Len(t, resp.ToolCalls, 1)
+	assert.JSONEq(t, `{"thought_signature":"sig-from-gemini"}`,
+		string(resp.ToolCalls[0].ProviderMetadata["google"]))
+}
+
+func TestApplyStreamToolCallMetadata(t *testing.T) {
+	c := newTestRemoteChat(t)
+	c.adapter = geminiProvider{}
+	state := newStreamState()
+
+	body := []byte(`{
+		"choices":[{
+			"delta":{
+				"tool_calls":[{
+					"index":0,
+					"id":"call_1",
+					"type":"function",
+					"function":{"name":"wiki_search","arguments":"{\"query\":\"MACS\"}"},
+					"extra_content":{"google":{"thought_signature":"stream-sig-from-gemini"}}
+				}]
+			}
+		}]
+	}`)
+
+	c.applyStreamToolCallMetadata(body, state)
+	toolCalls := state.buildOrderedToolCalls()
+	require.Len(t, toolCalls, 1)
+	assert.JSONEq(t, `{"thought_signature":"stream-sig-from-gemini"}`,
+		string(toolCalls[0].ProviderMetadata["google"]))
 }
 
 // TestRemoteAPIChat 综合测试 Remote API Chat 的所有功能
@@ -382,4 +442,94 @@ func TestRemoteAPIChat(t *testing.T) {
 			})
 		})
 	}
+}
+
+// TestCachedTokensHelper covers the nil-safety contract of the cachedTokens
+// helper. Some providers omit PromptTokensDetails entirely; the helper must
+// return zero rather than panic.
+func TestCachedTokensHelper(t *testing.T) {
+	assert.Equal(t, 0, cachedTokens(nil), "nil details must return zero")
+	assert.Equal(t, 0, cachedTokens(&openai.PromptTokensDetails{}),
+		"empty details must return zero")
+	assert.Equal(t, 1234, cachedTokens(&openai.PromptTokensDetails{CachedTokens: 1234}),
+		"populated cached_tokens must round-trip")
+}
+
+// TestParseCompletionResponse_CachedTokens verifies that
+// prompt_tokens_details.cached_tokens from an OpenAI-compatible response is
+// propagated into TokenUsage.CachedTokens. This is the field Qwen explicit
+// caching populates on a cache hit.
+func TestParseCompletionResponse_CachedTokens(t *testing.T) {
+	c := newTestRemoteChat(t)
+
+	t.Run("cached_tokens populated from prompt_tokens_details", func(t *testing.T) {
+		resp := &openai.ChatCompletionResponse{
+			Choices: []openai.ChatCompletionChoice{
+				{
+					Message:      openai.ChatCompletionMessage{Role: "assistant", Content: "hi"},
+					FinishReason: openai.FinishReasonStop,
+				},
+			},
+			Usage: openai.Usage{
+				PromptTokens:     6929,
+				CompletionTokens: 42,
+				TotalTokens:      6971,
+				PromptTokensDetails: &openai.PromptTokensDetails{
+					CachedTokens: 6900,
+				},
+			},
+		}
+
+		got, err := c.parseCompletionResponse(resp)
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		assert.Equal(t, 6929, got.Usage.PromptTokens)
+		assert.Equal(t, 42, got.Usage.CompletionTokens)
+		assert.Equal(t, 6971, got.Usage.TotalTokens)
+		assert.Equal(t, 6900, got.Usage.CachedTokens,
+			"cached_tokens must mirror prompt_tokens_details.cached_tokens")
+	})
+
+	t.Run("missing prompt_tokens_details yields zero cached_tokens", func(t *testing.T) {
+		resp := &openai.ChatCompletionResponse{
+			Choices: []openai.ChatCompletionChoice{
+				{
+					Message:      openai.ChatCompletionMessage{Role: "assistant", Content: "hi"},
+					FinishReason: openai.FinishReasonStop,
+				},
+			},
+			Usage: openai.Usage{
+				PromptTokens:     100,
+				CompletionTokens: 10,
+				TotalTokens:      110,
+				// PromptTokensDetails intentionally nil — providers like Ollama
+				// and older OpenAI-compat backends omit this block entirely.
+			},
+		}
+
+		got, err := c.parseCompletionResponse(resp)
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		assert.Equal(t, 0, got.Usage.CachedTokens,
+			"missing details must surface as zero, not panic")
+	})
+}
+
+// TestTokenUsage_CachedTokensJSONOmitempty ensures the new CachedTokens field
+// stays out of serialized payloads when it is zero. This keeps logs and API
+// responses unchanged for providers that never report cache hits.
+func TestTokenUsage_CachedTokensJSONOmitempty(t *testing.T) {
+	t.Run("zero is omitted", func(t *testing.T) {
+		u := types.TokenUsage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15}
+		b, err := json.Marshal(u)
+		require.NoError(t, err)
+		assert.NotContains(t, string(b), "cached_tokens")
+	})
+
+	t.Run("non-zero is emitted", func(t *testing.T) {
+		u := types.TokenUsage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15, CachedTokens: 7}
+		b, err := json.Marshal(u)
+		require.NoError(t, err)
+		assert.Contains(t, string(b), `"cached_tokens":7`)
+	})
 }

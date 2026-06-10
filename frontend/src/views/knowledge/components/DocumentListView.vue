@@ -37,7 +37,7 @@ const emit = defineEmits<{
   (e: 'open', item: KnowledgeItem): void;
   (e: 'toggle-row', id: string, checked: boolean, shiftKey: boolean): void;
   (e: 'toggle-all', checked: boolean): void;
-  (e: 'action', action: 'edit' | 'reparse' | 'move' | 'delete', item: KnowledgeItem): void;
+  (e: 'action', action: 'edit' | 'reparse' | 'cancel-parse' | 'move' | 'delete', item: KnowledgeItem): void;
 }>();
 
 const { t } = useI18n();
@@ -89,12 +89,30 @@ const computeStatus = (item: KnowledgeItem): StatusInfo => {
   if (item.parse_status === 'pending' || item.parse_status === 'processing') {
     return { label: t('knowledgeBase.statusProcessing'), theme: 'primary', icon: 'loading', spin: true };
   }
+  // finalizing = primary parse done, enrichment subtasks still running.
+  // While in this phase, prefer the specific "summary generating" copy
+  // when summary is what's actually outstanding (preserves the old UX
+  // where this label was tied to completed+summary_pending). Otherwise
+  // fall back to the generic "finalizing" label — covers question gen
+  // and graph extract, which the user historically had no visibility on.
+  if (item.parse_status === 'finalizing') {
+    if (item.summary_status === 'pending' || item.summary_status === 'processing') {
+      return { label: t('knowledgeBase.generatingSummary'), theme: 'primary', icon: 'loading', spin: true };
+    }
+    return { label: t('knowledgeBase.statusFinalizing'), theme: 'primary', icon: 'loading', spin: true };
+  }
   if (item.parse_status === 'failed') {
     return { label: t('knowledgeBase.statusFailed'), theme: 'danger', icon: 'close-circle' };
+  }
+  if (item.parse_status === 'cancelled') {
+    return { label: t('knowledgeBase.statusCancelled'), theme: 'warning', icon: 'close-circle' };
   }
   if (item.parse_status === 'draft') {
     return { label: t('knowledgeBase.statusDraft'), theme: 'warning' };
   }
+  // Legacy completed+summary_pending path: kept as a defensive fallback
+  // for rows that bypassed finalizing (no enrichment configured, or
+  // upgraded mid-flight from a pre-finalizing build).
   if (
     item.parse_status === 'completed' &&
     (item.summary_status === 'pending' || item.summary_status === 'processing')
@@ -153,7 +171,16 @@ onBeforeUnmount(() => {
   stickyObserver = null;
 });
 
-const handleAction = (action: 'edit' | 'reparse' | 'move' | 'delete', item: KnowledgeItem) => {
+// Cancellable parse statuses mirror the backend CancelKnowledgeParse
+// gate: pending / processing / finalizing all surface the stop entry,
+// while completed / failed / cancelled / deleting hide it.
+const CANCELABLE_PARSE_STATUSES = new Set(['pending', 'processing', 'finalizing']);
+const canCancelParse = (item: KnowledgeItem) =>
+  CANCELABLE_PARSE_STATUSES.has(String(item.parse_status ?? ''));
+
+const isParseInFlight = (item: KnowledgeItem) => canCancelParse(item);
+
+const handleAction = (action: 'edit' | 'reparse' | 'cancel-parse' | 'move' | 'delete', item: KnowledgeItem) => {
   moreOpen.value = null;
   item.isMore = false;
   emit('action', action, item);
@@ -191,6 +218,7 @@ const handleAction = (action: 'edit' | 'reparse' | 'move' | 'delete', item: Know
         :key="item.id"
         class="doc-list-row"
         :class="{ selected: selectedIds.has(item.id), 'menu-open': moreOpen === item.id }"
+        :data-select-id="item.id"
         role="row"
         @click="emit('open', item)"
       >
@@ -280,18 +308,59 @@ const handleAction = (action: 'edit' | 'reparse' | 'move' | 'delete', item: Know
                   <t-icon class="icon" name="edit" />
                   <span>{{ t('knowledgeBase.editDocument') }}</span>
                 </div>
-                <div class="row-menu-item" @click.stop="handleAction('reparse', item)">
+                <div
+                  v-if="isParseInFlight(item)"
+                  class="row-menu-item"
+                  @click.stop="handleAction('reparse', item)"
+                >
                   <t-icon class="icon" name="refresh" />
                   <span>{{ t('knowledgeBase.rebuildDocument') }}</span>
                 </div>
+                <t-popconfirm
+                  v-else
+                  theme="warning"
+                  :content="t('knowledgeBase.rebuildConfirm', { fileName: item.file_name || '' })"
+                  :confirm-btn="{ content: t('common.confirm'), theme: 'primary' }"
+                  :cancel-btn="{ content: t('common.cancel') }"
+                  placement="left"
+                  @confirm="handleAction('reparse', item)"
+                >
+                  <div class="row-menu-item" @click.stop>
+                    <t-icon class="icon" name="refresh" />
+                    <span>{{ t('knowledgeBase.rebuildDocument') }}</span>
+                  </div>
+                </t-popconfirm>
+                <t-popconfirm
+                  v-if="canCancelParse(item)"
+                  theme="warning"
+                  :content="t('knowledgeBase.cancelParseConfirmBody', { title: item.file_name || item.id })"
+                  :confirm-btn="{ content: t('knowledgeBase.cancelParse'), theme: 'danger' }"
+                  :cancel-btn="{ content: t('common.cancel') }"
+                  placement="left"
+                  @confirm="handleAction('cancel-parse', item)"
+                >
+                  <div class="row-menu-item danger" @click.stop>
+                    <t-icon class="icon" name="close-circle" />
+                    <span>{{ t('knowledgeBase.cancelParse') }}</span>
+                  </div>
+                </t-popconfirm>
                 <div class="row-menu-item" @click.stop="handleAction('move', item)">
                   <t-icon class="icon" name="swap" />
                   <span>{{ t('knowledgeBase.moveDocument') }}</span>
                 </div>
-                <div class="row-menu-item danger" @click.stop="handleAction('delete', item)">
-                  <t-icon class="icon" name="delete" />
-                  <span>{{ t('knowledgeBase.deleteDocument') }}</span>
-                </div>
+                <t-popconfirm
+                  theme="warning"
+                  :content="t('knowledgeBase.confirmDeleteDocument', { fileName: item.file_name || '' })"
+                  :confirm-btn="{ content: t('knowledgeBase.confirmDelete'), theme: 'danger' }"
+                  :cancel-btn="{ content: t('common.cancel') }"
+                  placement="left"
+                  @confirm="handleAction('delete', item)"
+                >
+                  <div class="row-menu-item danger" @click.stop>
+                    <t-icon class="icon" name="delete" />
+                    <span>{{ t('knowledgeBase.deleteDocument') }}</span>
+                  </div>
+                </t-popconfirm>
               </div>
             </template>
           </t-popup>

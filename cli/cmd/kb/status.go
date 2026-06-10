@@ -69,6 +69,12 @@ For full metadata (config / pinned / tenant), use 'weknora kb view <id>'.`,
 		},
 	}
 	cmdutil.AddFormatFlag(cmd, kbStatusFields...)
+	cmdutil.SetAgentHelp(cmd, cmdutil.AgentHelp{
+		UsedFor:       "shallow health probe of a knowledge base (one HTTP call): reachability, no failed-doc aggregation",
+		RequiredFlags: []string{"<kb-id> (positional)"},
+		Examples:      []string{"weknora kb status kb_abc"},
+		Output:        "envelope.data is {id, reachable, ...}; use `kb check` for deep failed-doc aggregation",
+	})
 	return cmd
 }
 
@@ -95,7 +101,7 @@ func runStatus(ctx context.Context, svc StatusService, id string) (*StatusResult
 func emitStatus(res *StatusResult, fopts *cmdutil.FormatOptions, w io.Writer) error {
 	switch fopts.Mode {
 	case cmdutil.FormatJSON, cmdutil.FormatNDJSON:
-		return fopts.Emit(w, res)
+		return fopts.Emit(w, res, nil)
 	case cmdutil.FormatText, "":
 		return writeStatusText(w, res)
 	default:

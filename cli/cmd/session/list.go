@@ -12,6 +12,7 @@ import (
 
 	"github.com/Tencent/WeKnora/cli/internal/cmdutil"
 	"github.com/Tencent/WeKnora/cli/internal/iostreams"
+	"github.com/Tencent/WeKnora/cli/internal/output"
 	"github.com/Tencent/WeKnora/cli/internal/text"
 	sdk "github.com/Tencent/WeKnora/client"
 )
@@ -48,7 +49,7 @@ func NewCmdList(f *cmdutil.Factory) *cobra.Command {
 	opts := &ListOptions{PageSize: defaultPageSize}
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "List chat sessions for the active context",
+		Short: "List chat sessions for the active profile",
 		Args:  cobra.NoArgs,
 		RunE: func(c *cobra.Command, _ []string) error {
 			fopts, err := cmdutil.CheckFormatFlag(c)
@@ -64,10 +65,15 @@ func NewCmdList(f *cmdutil.Factory) *cobra.Command {
 		},
 	}
 	cmd.Flags().IntVar(&opts.PageSize, "page-size", defaultPageSize, "Items per server batch (1..1000)")
-	cmd.Flags().IntVarP(&opts.Limit, "limit", "L", 30, "Maximum results to return (0 = no cap, 1..10000 = explicit)")
+	cmd.Flags().IntVarP(&opts.Limit, "limit", "L", 30, "Maximum results to return (1..10000)")
 	cmd.Flags().BoolVar(&opts.AllPages, "all-pages", false, "Walk all server pages until exhausted (or --limit hit)")
 	cmd.Flags().StringVar(&opts.Since, "since", "", "Only show sessions updated within `duration` (e.g. 7d, 24h, 30m)")
 	cmdutil.AddFormatFlag(cmd, sessionListFields...)
+	cmdutil.SetAgentHelp(cmd, cmdutil.AgentHelp{
+		UsedFor:  "List chat sessions for the active profile. Results come with meta.count; use --limit to cap, --all-pages to walk every server page, --since to filter by recency (e.g. 7d).",
+		Examples: []string{"weknora session list --format json", "weknora session list --all-pages --since 7d --format json"},
+		Output:   "envelope.data is an array of Session objects with id, title, updated_at; meta.count is the total returned",
+	})
 	return cmd
 }
 
@@ -78,10 +84,10 @@ func runList(ctx context.Context, opts *ListOptions, fopts *cmdutil.FormatOption
 			Message: fmt.Sprintf("--page-size must be in 1..%d, got %d", maxPageSize, opts.PageSize),
 		}
 	}
-	if opts.Limit < 0 || opts.Limit > 10000 {
+	if opts.Limit < 1 || opts.Limit > 10000 {
 		return &cmdutil.Error{
 			Code:    cmdutil.CodeInputInvalidArgument,
-			Message: fmt.Sprintf("--limit must be in 0..10000 (0 = no cap), got %d", opts.Limit),
+			Message: fmt.Sprintf("--limit must be in 1..10000, got %d", opts.Limit),
 		}
 	}
 	var since time.Duration
@@ -136,12 +142,15 @@ func runList(ctx context.Context, opts *ListOptions, fopts *cmdutil.FormatOption
 		items = filtered
 	}
 	// --limit applies after --since so the cap reflects what the user sees.
+	truncated := false
 	if opts.Limit > 0 && len(items) > opts.Limit {
 		items = items[:opts.Limit]
+		truncated = true
 	}
 
 	if fopts.WantsJSON() {
-		return fopts.Emit(iostreams.IO.Out, items)
+		meta := &output.Meta{Count: len(items), HasMore: truncated}
+		return fopts.Emit(iostreams.IO.Out, items, meta)
 	}
 
 	if len(items) == 0 {

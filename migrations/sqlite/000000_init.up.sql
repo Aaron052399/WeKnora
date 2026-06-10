@@ -31,12 +31,14 @@ CREATE TABLE IF NOT EXISTS models (
     id VARCHAR(64) PRIMARY KEY,
     tenant_id INTEGER NOT NULL,
     name VARCHAR(255) NOT NULL,
+    display_name VARCHAR(255) NOT NULL DEFAULT '',
     type VARCHAR(50) NOT NULL,
     source VARCHAR(50) NOT NULL,
     description TEXT,
     parameters TEXT NOT NULL,
     is_default BOOLEAN NOT NULL DEFAULT 0,
     is_builtin BOOLEAN NOT NULL DEFAULT 0,
+    managed_by VARCHAR(32) NOT NULL DEFAULT '',
     status VARCHAR(50) NOT NULL DEFAULT 'active',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -46,6 +48,7 @@ CREATE TABLE IF NOT EXISTS models (
 CREATE INDEX IF NOT EXISTS idx_models_type ON models(type);
 CREATE INDEX IF NOT EXISTS idx_models_source ON models(source);
 CREATE INDEX IF NOT EXISTS idx_models_is_builtin ON models(is_builtin);
+CREATE INDEX IF NOT EXISTS idx_models_managed_by ON models(managed_by);
 
 CREATE TABLE IF NOT EXISTS knowledge_bases (
     id VARCHAR(36) PRIMARY KEY,
@@ -87,7 +90,7 @@ CREATE TABLE IF NOT EXISTS knowledges (
     type VARCHAR(50) NOT NULL,
     title VARCHAR(255) NOT NULL,
     description TEXT,
-    source VARCHAR(128) NOT NULL,
+    source VARCHAR(2048) NOT NULL,
     parse_status VARCHAR(50) NOT NULL DEFAULT 'unprocessed',
     enable_status VARCHAR(50) NOT NULL DEFAULT 'enabled',
     embedding_model_id VARCHAR(64),

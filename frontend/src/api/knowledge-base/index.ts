@@ -1,4 +1,5 @@
 import { get, post, put, del, postUpload, getDown } from "../../utils/request";
+import type { KnowledgeProcessOverrides } from '@/types/knowledgeProcess';
 
 // 知识库管理 API（列表、创建、获取、更新、删除、复制）
 export function listKnowledgeBases(params?: {
@@ -20,6 +21,38 @@ export function listKnowledgeBases(params?: {
   return get(qs ? `/api/v1/knowledge-bases?${qs}` : '/api/v1/knowledge-bases');
 }
 
+// Read-only vector-store binding metadata enriched onto every KB
+// response (list, create, get, update, pin). Source carries where the
+// binding points; status reports whether that target is currently
+// reachable by the server.
+//
+//   - source 'env'    → KB uses the tenant's env-configured store
+//                       (RETRIEVE_DRIVER). vector_store_id is null and
+//                       vector_store_name is the localized "System
+//                       default" label; vector_store_engine_type still
+//                       reports the underlying engine (e.g. "postgres").
+//   - source 'user'   → KB is bound to a tenant-owned VectorStore.
+//                       vector_store_id / name / engine_type are real.
+//   - source 'shared' → KB belongs to a different tenant and is
+//                       readable via cross-organization sharing. The
+//                       server strips vector_store_id and engine_type
+//                       to avoid leaking the owner tenant's store
+//                       inventory; only this source marker arrives.
+//   - status 'unavailable' → the binding cannot be reached right now
+//                       (deleted row, registry miss, transient infra
+//                       failure). Operators recover via the global
+//                       Vector Stores settings page.
+export type VectorStoreSource = 'env' | 'user' | 'shared' | 'unavailable';
+export type VectorStoreStatus = 'available' | 'unavailable';
+
+export interface KnowledgeBaseStoreView {
+  vector_store_id?: string | null;
+  vector_store_name?: string;
+  vector_store_engine_type?: string;
+  vector_store_source?: VectorStoreSource;
+  vector_store_status?: VectorStoreStatus;
+}
+
 export function createKnowledgeBase(data: {
   name: string;
   description?: string;
@@ -27,6 +60,11 @@ export function createKnowledgeBase(data: {
   chunking_config?: any;
   embedding_model_id?: string;
   summary_model_id?: string;
+  // Opt-in binding to a specific tenant-owned VectorStore. Omit (or
+  // send undefined / empty string) to fall back to the env-configured
+  // store. Immutable after creation — UpdateKnowledgeBase intentionally
+  // does not accept this field.
+  vector_store_id?: string;
   vlm_config?: {
     enabled: boolean;
     model_id?: string;
@@ -123,23 +161,51 @@ export function togglePinKnowledgeBase(id: string) {
 
 // 知识文件 API（基于具体知识库）
 // data.tag_id: 可选，指定知识所属的分类ID
-export function uploadKnowledgeFile(kbId: string, data: { file: File; tag_id?: string; [key: string]: any } = { file: new File([], '') }, onProgress?: (progressEvent: any) => void) {
+export function uploadKnowledgeFile(
+  kbId: string,
+  data: {
+    file: File
+    tag_id?: string
+    fileName?: string
+    process_config?: KnowledgeProcessOverrides | string
+    [key: string]: any
+  } = { file: new File([], '') },
+  onProgress?: (progressEvent: any) => void,
+) {
   const formData = new FormData();
   Object.keys(data).forEach(key => {
-    if (data[key] !== undefined) formData.append(key, data[key]);
+    const value = data[key];
+    if (value === undefined) return;
+    if (key === 'process_config' && value && typeof value !== 'string') {
+      formData.append(key, JSON.stringify(value));
+    } else {
+      formData.append(key, value);
+    }
   });
   return postUpload(`/api/v1/knowledge-bases/${kbId}/knowledge/file`, formData, onProgress);
 }
 
 // 从URL创建知识
 // data.tag_id: 可选，指定知识所属的分类ID
-export function createKnowledgeFromURL(kbId: string, data: { url: string; enable_multimodel?: boolean; tag_id?: string }) {
+export function createKnowledgeFromURL(
+  kbId: string,
+  data: { url: string; enable_multimodel?: boolean; tag_id?: string; process_config?: KnowledgeProcessOverrides },
+) {
   return post(`/api/v1/knowledge-bases/${kbId}/knowledge/url`, data);
 }
 
 // 手工创建知识
 // data.tag_id: 可选，指定知识所属的分类ID
-export function createManualKnowledge(kbId: string, data: { title: string; content: string; status: string; tag_id?: string }) {
+export function createManualKnowledge(
+  kbId: string,
+  data: {
+    title: string
+    content: string
+    status: string
+    tag_id?: string
+    process_config?: KnowledgeProcessOverrides
+  },
+) {
   return post(`/api/v1/knowledge-bases/${kbId}/knowledge/manual`, data);
 }
 
@@ -178,12 +244,24 @@ export function getKnowledgeDetails(id: string, options?: { agent_id?: string })
   return get(qs ? `/api/v1/knowledge/${id}?${qs}` : `/api/v1/knowledge/${id}`);
 }
 
-export function updateManualKnowledge(id: string, data: { title: string; content: string; status: string }) {
+export function updateManualKnowledge(
+  id: string,
+  data: { title: string; content: string; status: string; process_config?: KnowledgeProcessOverrides },
+) {
   return put(`/api/v1/knowledge/manual/${id}`, data);
 }
 
-export function reparseKnowledge(id: string) {
-  return post(`/api/v1/knowledge/${id}/reparse`);
+export function reparseKnowledge(id: string, data?: { process_config?: KnowledgeProcessOverrides }) {
+  return post(`/api/v1/knowledge/${id}/reparse`, data);
+}
+
+export function cancelKnowledgeParse(id: string) {
+  return post(`/api/v1/knowledge/${id}/cancel-parse`);
+}
+
+export function getKnowledgeSpans(id: string, attempt?: number) {
+  const qs = attempt ? `?attempt=${attempt}` : '';
+  return get(`/api/v1/knowledge/${id}/spans${qs}`);
 }
 
 export function delKnowledgeDetails(id: string) {

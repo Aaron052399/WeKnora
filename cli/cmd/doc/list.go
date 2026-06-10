@@ -13,6 +13,7 @@ import (
 
 	"github.com/Tencent/WeKnora/cli/internal/cmdutil"
 	"github.com/Tencent/WeKnora/cli/internal/iostreams"
+	"github.com/Tencent/WeKnora/cli/internal/output"
 	"github.com/Tencent/WeKnora/cli/internal/text"
 	sdk "github.com/Tencent/WeKnora/client"
 )
@@ -98,11 +99,9 @@ backend storage order is not guaranteed and varies between deployments.`,
 			return runList(c.Context(), opts, fopts, cli, kbID)
 		},
 	}
-	// --kb is read by Factory.ResolveKB; declare it here so cobra parses the
-	// value into the command's flag set.
-	cmd.Flags().String("kb", "", "Knowledge base UUID or name (overrides env / project link)")
+	cmdutil.AddKBFlag(cmd)
 	cmd.Flags().IntVar(&opts.PageSize, "page-size", 50, "Items per server batch (1..1000)")
-	cmd.Flags().IntVarP(&opts.Limit, "limit", "L", 30, "Maximum results to return (0 = no cap, 1..10000 = explicit)")
+	cmd.Flags().IntVarP(&opts.Limit, "limit", "L", 30, "Maximum results to return (1..10000)")
 	cmd.Flags().BoolVar(&opts.AllPages, "all-pages", false, "Walk all server pages until exhausted (or --limit hit)")
 	cmd.Flags().StringVar(&opts.Status, "status", "", "Filter by parse status: pending | processing | completed | failed")
 	cmd.Flags().StringVar(&opts.Keyword, "keyword", "", "Server-side substring match against title / file_name (case-sensitive)")
@@ -112,6 +111,11 @@ backend storage order is not guaranteed and varies between deployments.`,
 	cmd.Flags().StringVar(&opts.StartTime, "start-time", "", "Include docs with updated_at >= this RFC3339 timestamp (e.g. 2006-01-02T15:04:05Z)")
 	cmd.Flags().StringVar(&opts.EndTime, "end-time", "", "Include docs with updated_at <= this RFC3339 timestamp (e.g. 2006-01-02T15:04:05Z)")
 	cmdutil.AddFormatFlag(cmd, docListFields...)
+	cmdutil.SetAgentHelp(cmd, cmdutil.AgentHelp{
+		UsedFor:  "List documents in the resolved knowledge base. Results come with meta.count; use --limit to cap, --all-pages to walk every server page, --status/--keyword to filter server-side.",
+		Examples: []string{"weknora doc list --format json", "weknora doc list --all-pages --limit 200 --format json"},
+		Output:   "envelope.data is an array of Knowledge objects with id, title, file_name, parse_status; meta.count is the total returned",
+	})
 	return cmd
 }
 
@@ -122,10 +126,10 @@ func runList(ctx context.Context, opts *ListOptions, fopts *cmdutil.FormatOption
 			Message: fmt.Sprintf("--page-size must be in 1..1000, got %d", opts.PageSize),
 		}
 	}
-	if opts.Limit < 0 || opts.Limit > 10000 {
+	if opts.Limit < 1 || opts.Limit > 10000 {
 		return &cmdutil.Error{
 			Code:    cmdutil.CodeInputInvalidArgument,
-			Message: fmt.Sprintf("--limit must be in 0..10000 (0 = no cap), got %d", opts.Limit),
+			Message: fmt.Sprintf("--limit must be in 1..10000, got %d", opts.Limit),
 		}
 	}
 	if opts.Status != "" && !validDocListStatus(opts.Status) {
@@ -197,12 +201,15 @@ func runList(ctx context.Context, opts *ListOptions, fopts *cmdutil.FormatOption
 	})
 	// --limit applies after sort so users get the top-N most-recent items
 	// when combined with a single-page fetch where page_size > limit.
+	truncated := false
 	if opts.Limit > 0 && len(items) > opts.Limit {
 		items = items[:opts.Limit]
+		truncated = true
 	}
 
 	if fopts.WantsJSON() {
-		return fopts.Emit(iostreams.IO.Out, items)
+		meta := &output.Meta{Count: len(items), HasMore: truncated}
+		return fopts.Emit(iostreams.IO.Out, items, meta)
 	}
 
 	if len(items) == 0 {

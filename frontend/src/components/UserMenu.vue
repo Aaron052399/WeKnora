@@ -1,7 +1,7 @@
 <template>
   <div class="user-menu" :class="{ 'user-menu--collapsed': uiStore.sidebarCollapsed }" ref="menuRef">
     <!-- 用户按钮 -->
-    <div class="user-button" @click="toggleMenu">
+    <div class="user-button" data-guide="user-menu" @click="toggleMenu">
       <div class="user-avatar">
         <img v-if="userAvatar" :src="userAvatar" :alt="$t('common.avatar')" />
         <span v-else class="avatar-placeholder">{{ userInitial }}</span>
@@ -38,7 +38,15 @@
             <span v-else class="dropdown-user-avatar-placeholder">{{ userInitial }}</span>
           </div>
           <div class="dropdown-user-meta">
-            <div class="dropdown-user-name">{{ userName }}</div>
+            <div class="dropdown-user-name-row">
+              <span class="dropdown-user-name">{{ userName }}</span>
+              <t-tooltip :content="$t('newUserGuide.reopen')" placement="top">
+                <button type="button" class="dropdown-guide-btn" :aria-label="$t('newUserGuide.reopen')"
+                  @click.stop="reopenGuide">
+                  <t-icon name="help-circle" size="14px" />
+                </button>
+              </t-tooltip>
+            </div>
           </div>
         </div>
 
@@ -109,6 +117,16 @@
         <div class="menu-item" @click="handleSettings">
           <t-icon name="setting" class="menu-icon" />
           <span>{{ $t('general.allSettings') }}</span>
+        </div>
+        <!--
+          System administration entry — visible only to users with the
+          platform-wide is_system_admin flag. Hidden for everyone else,
+          including tenant Owners. Real authorisation lives server-side
+          (RequireSystemAdmin middleware); this is UI gating only.
+        -->
+        <div v-if="authStore.isSystemAdmin" class="menu-item" @click="handleSystemAdmin">
+          <t-icon name="server" class="menu-icon" />
+          <span>系统管理</span>
         </div>
         <!-- 切换租户入口在下拉「当前租户」区块 hover；此处仅为分隔线与菜单项。 -->
         <div class="menu-divider"></div>
@@ -231,7 +249,7 @@ import { useRouter } from 'vue-router'
 import { useUIStore } from '@/stores/ui'
 import { useAuthStore } from '@/stores/auth'
 import { MessagePlugin } from 'tdesign-vue-next'
-import { getCurrentUser, logout as logoutApi } from '@/api/auth'
+import { getCurrentUser, logout as logoutApi, userInfoFromApi } from '@/api/auth'
 import { useI18n } from 'vue-i18n'
 import IMChannelsOverviewPanel from '@/components/IMChannelsOverviewPanel.vue'
 import CreateTenantDialog from '@/components/CreateTenantDialog.vue'
@@ -243,6 +261,8 @@ import {
 } from '@/utils/tenantSwitch'
 import type { TenantInfo } from '@/api/tenant'
 import { useRoleLabel, useHomeTenant } from '@/composables/useRoleLabel'
+import { getRootZoom, rectToCssPx, cssViewportSize } from '@/utils/zoom'
+import { openNewUserGuide } from '@/config/contextualGuides'
 
 const { t } = useI18n()
 
@@ -340,6 +360,17 @@ const handleSettings = () => {
   menuVisible.value = false
   uiStore.openSettings()
   router.push('/platform/settings')
+}
+
+// Open the platform administration area inside the standard Settings
+// modal. The admin roster lives at the top of the global-settings
+// pane (as a tag-input row) so we route straight there; this is the
+// only system-admin section now. Gated by SYSTEM_ADMIN_SECTIONS in
+// Settings.vue.
+const handleSystemAdmin = () => {
+  menuVisible.value = false
+  uiStore.openSettings('system-global')
+  router.push({ path: '/platform/settings', query: { section: 'system-global' } })
 }
 
 // Hover-driven submenu controls. A small hide delay tolerates the pointer
@@ -440,16 +471,15 @@ const switchToTenant = (m: Membership) => {
     closeAll()
     return
   }
-  // Treat switching back to the user's home tenant as "clear the
-  // override" so request.ts stops attaching X-Tenant-ID. This mirrors
-  // what TenantSelector.vue does in selectTenant().
+  // 始终把激活租户写进 selectedTenantId，让 request.ts 永远附 X-Tenant-ID。
+  // 历史实现里「切回 home 就清 override」会让请求落回 JWT 编码的租户，
+  // 而 JWT 在 last_active != home 的会话里恰好是 peer 租户（见
+  // userService.resolveLoginTenantID），结果切回 home 反而原地不动。
+  // 服务端持久化偏好仍然按 home/peer 区分：home 时清空 last_active，
+  // 让下次干净重登能正确回到 home。
   const home = homeTenantId.value
   const switchingToHome = home !== null && home === m.tenant_id
-  if (switchingToHome) {
-    authStore.setSelectedTenant(null, null)
-  } else {
-    authStore.setSelectedTenant(m.tenant_id, tenantDisplayName(m))
-  }
+  authStore.setSelectedTenant(m.tenant_id, tenantDisplayName(m))
   closeAll()
   // Toast 在 reload 后由 App.vue 弹出（直接在这里弹会被 hard reload 干掉）。
   stashTenantSwitchToast({
@@ -497,13 +527,18 @@ const scheduleHideTenantSubmenu = () => {
 const positionTenantSubmenu = () => {
   const el = tenantMenuItemRef.value
   if (!el) return
-  const rect = el.getBoundingClientRect()
+  // Submenu is rendered with `position: fixed` under the root zoom — see
+  // `.tenant-submenu-floating` styles. Anchor coords come from a visual-pixel
+  // rect; normalize to CSS pixels before writing them back to CSS.
+  const zoom = getRootZoom()
+  const rect = rectToCssPx(el.getBoundingClientRect(), zoom)
+  const { width: vw } = cssViewportSize(zoom)
   const PANEL_WIDTH = 264
   const GAP = 8
   const MARGIN = 8
 
   let left = rect.right + GAP
-  if (left + PANEL_WIDTH + MARGIN > window.innerWidth) {
+  if (left + PANEL_WIDTH + MARGIN > vw) {
     left = Math.max(MARGIN, rect.left - PANEL_WIDTH - GAP)
   }
 
@@ -539,14 +574,18 @@ const onChannelsChanged = (channels: IMChannelOverview[]) => {
 const positionIMSubmenu = () => {
   const el = imMenuItemRef.value
   if (!el) return
-  const rect = el.getBoundingClientRect()
+  // Same rationale as `positionTenantSubmenu` — convert visual-pixel rect to
+  // CSS pixels before feeding the fixed submenu's CSS lengths.
+  const zoom = getRootZoom()
+  const rect = rectToCssPx(el.getBoundingClientRect(), zoom)
+  const { width: vw } = cssViewportSize(zoom)
   const PANEL_WIDTH = 300
   const GAP = 8
   const MARGIN = 8
 
   let left = rect.right + GAP
   // If the panel would overflow the right edge, flip to the left side.
-  if (left + PANEL_WIDTH + MARGIN > window.innerWidth) {
+  if (left + PANEL_WIDTH + MARGIN > vw) {
     left = Math.max(MARGIN, rect.left - PANEL_WIDTH - GAP)
   }
 
@@ -568,9 +607,13 @@ const clampFloatingToViewport = (selector: string, target: { value: Record<strin
     const panel = document.querySelector(selector) as HTMLElement | null
     if (!panel) return
     const MARGIN = 8
+    // `offsetHeight` and `target.value.top` are CSS pixels; `innerHeight` is
+    // visual pixels under root zoom. Normalize the latter to keep the
+    // comparison in one coordinate system.
+    const { height: vh } = cssViewportSize()
     const h = panel.offsetHeight
     const currentTop = parseFloat(target.value.top || '0') || 0
-    const maxTop = window.innerHeight - h - MARGIN
+    const maxTop = vh - h - MARGIN
     if (currentTop > maxTop) {
       target.value = { ...target.value, top: `${Math.max(MARGIN, maxTop)}px` }
     }
@@ -591,6 +634,11 @@ const openChromeExtension = () => {
 const openClawhubSkill = () => {
   menuVisible.value = false
   window.open(CLAWHUB_SKILL_URL, '_blank')
+}
+
+const reopenGuide = () => {
+  menuVisible.value = false
+  openNewUserGuide()
 }
 
 // 打开 GitHub
@@ -631,18 +679,14 @@ const loadUserInfo = async () => {
         email: user.email || 'user@example.com',
         avatar: user.avatar || ''
       }
-      // 同时更新 authStore 中的用户信息，确保包含 can_access_all_tenants 字段
-      authStore.setUser({
-        id: user.id,
-        username: user.username,
-        email: user.email,
-        avatar: user.avatar,
-        tenant_id: user.tenant_id,
-        can_access_all_tenants: user.can_access_all_tenants || false,
-        preferences: user.preferences,
-        created_at: user.created_at,
-        updated_at: user.updated_at
-      })
+      // 同时更新 authStore 中的用户信息，确保包含 can_access_all_tenants /
+      // is_system_admin 等所有字段。MUST 走 userInfoFromApi 工厂——历史
+      // 上这里手写字段白名单，每加一个 user 字段都要在 5 个 setUser 调用
+      // 点同步，is_system_admin 就因为漏了这一处导致进入 platform 后
+      // user.value 的字段被 mount 时的 loadUserInfo 静默覆盖回 undefined
+      // （同时污染 localStorage），系统管理入口在 hover 工作空间触发
+      // refreshFromAuthMe 后才出现。新增字段请只改 userInfoFromApi。
+      authStore.setUser(userInfoFromApi(user))
       // 如果返回了租户信息，也更新租户信息
       if (response.data.tenant) {
         authStore.setTenant({
@@ -895,7 +939,16 @@ onUnmounted(() => {
     justify-content: center;
   }
 
+  .dropdown-user-name-row {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    min-width: 0;
+  }
+
   .dropdown-user-name {
+    flex: 1;
+    min-width: 0;
     font-size: 14px;
     font-weight: 500;
     color: var(--td-text-color-primary);
@@ -903,6 +956,28 @@ onUnmounted(() => {
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+
+  .dropdown-guide-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    width: 20px;
+    height: 20px;
+    margin: 0;
+    padding: 0;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--td-text-color-placeholder);
+    cursor: pointer;
+    transition: background-color 0.2s ease, color 0.2s ease;
+
+    &:hover {
+      background: var(--td-bg-color-container-hover);
+      color: var(--td-text-color-secondary);
+    }
   }
 }
 

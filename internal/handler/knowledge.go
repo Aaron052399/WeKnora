@@ -34,6 +34,7 @@ type KnowledgeHandler struct {
 	kbShareService    interfaces.KBShareService
 	agentShareService interfaces.AgentShareService
 	asynqClient       interfaces.TaskEnqueuer
+	spanRepo          repository.KnowledgeSpanRepository
 }
 
 // NewKnowledgeHandler creates a new knowledge handler instance
@@ -43,6 +44,7 @@ func NewKnowledgeHandler(
 	kbShareService interfaces.KBShareService,
 	agentShareService interfaces.AgentShareService,
 	asynqClient interfaces.TaskEnqueuer,
+	spanRepo repository.KnowledgeSpanRepository,
 ) *KnowledgeHandler {
 	return &KnowledgeHandler{
 		kgService:         kgService,
@@ -50,6 +52,7 @@ func NewKnowledgeHandler(
 		kbShareService:    kbShareService,
 		agentShareService: agentShareService,
 		asynqClient:       asynqClient,
+		spanRepo:          spanRepo,
 	}
 }
 
@@ -234,6 +237,7 @@ func (h *KnowledgeHandler) enqueueKnowledgeListDelete(
 // @Param        fileName          formData  string  false  "自定义文件名"
 // @Param        metadata          formData  string  false  "元数据JSON"
 // @Param        enable_multimodel formData  bool    false  "启用多模态处理"
+// @Param        process_config    formData  string  false  "处理配置JSON（KnowledgeProcessOverrides）"
 // @Success      200               {object}  map[string]interface{}  "创建的知识"
 // @Failure      400               {object}  errors.AppError         "请求参数错误"
 // @Failure      409               {object}  map[string]interface{}  "文件重复"
@@ -266,11 +270,15 @@ func (h *KnowledgeHandler) CreateKnowledgeFromFile(c *gin.Context) {
 		return
 	}
 
-	// Validate file size (configurable via MAX_FILE_SIZE_MB)
-	maxSize := secutils.GetMaxFileSize()
+	// Validate file size — read MAX_FILE_SIZE_MB env (50MB default).
+	// Deliberately not a runtime system_setting; see filesize.go for the
+	// rationale (nginx / docreader / browser bundle all cache this at
+	// container startup, so a UI knob would silently mismatch).
+	maxSizeMB := utils.GetMaxFileSizeMB()
+	maxSize := maxSizeMB * 1024 * 1024
 	if file.Size > maxSize {
 		logger.Error(ctx, "File size too large")
-		c.Error(errors.NewBadRequestError(fmt.Sprintf("文件大小不能超过%dMB", secutils.GetMaxFileSizeMB())))
+		c.Error(errors.NewBadRequestError(fmt.Sprintf("文件大小不能超过%dMB", maxSizeMB)))
 		return
 	}
 
@@ -311,6 +319,23 @@ func (h *KnowledgeHandler) CreateKnowledgeFromFile(c *gin.Context) {
 		enableMultimodel = &parseBool
 	}
 
+	var processOverrides *types.KnowledgeProcessOverrides
+	if raw := c.PostForm("process_config"); raw != "" {
+		processOverrides = &types.KnowledgeProcessOverrides{}
+		if err := json.Unmarshal([]byte(raw), processOverrides); err != nil {
+			logger.Error(ctx, "Failed to parse process_config", err)
+			c.Error(errors.NewBadRequestError("Invalid process_config format").WithDetails(err.Error()))
+			return
+		}
+	}
+	if enableMultimodel != nil && (processOverrides == nil || processOverrides.EnableMultimodel == nil) {
+		if processOverrides == nil {
+			processOverrides = &types.KnowledgeProcessOverrides{EnableMultimodel: enableMultimodel}
+		} else {
+			processOverrides.EnableMultimodel = enableMultimodel
+		}
+	}
+
 	// 获取分类ID（如果提供），用于知识分类管理
 	tagID := c.PostForm("tag_id")
 	// 过滤特殊值，空字符串或 "__untagged__" 表示未分类
@@ -321,7 +346,7 @@ func (h *KnowledgeHandler) CreateKnowledgeFromFile(c *gin.Context) {
 	channel := c.PostForm("channel")
 
 	// Create knowledge entry from the file
-	knowledge, err := h.kgService.CreateKnowledgeFromFile(ctx, kbID, file, metadata, enableMultimodel, customFileName, tagID, channel)
+	knowledge, err := h.kgService.CreateKnowledgeFromFile(ctx, kbID, file, metadata, enableMultimodel, customFileName, tagID, channel, processOverrides)
 	// Check for duplicate knowledge error
 	if err != nil {
 		if h.handleDuplicateKnowledgeError(c, err, knowledge, "file") {
@@ -382,13 +407,14 @@ func (h *KnowledgeHandler) CreateKnowledgeFromURL(c *gin.Context) {
 
 	// Parse URL from request body
 	var req struct {
-		URL              string `json:"url" binding:"required"`
-		FileName         string `json:"file_name"`
-		FileType         string `json:"file_type"`
-		EnableMultimodel *bool  `json:"enable_multimodel"`
-		Title            string `json:"title"`
-		TagID            string `json:"tag_id"`
-		Channel          string `json:"channel"`
+		URL              string                           `json:"url" binding:"required"`
+		FileName         string                           `json:"file_name"`
+		FileType         string                           `json:"file_type"`
+		EnableMultimodel *bool                            `json:"enable_multimodel"`
+		Title            string                           `json:"title"`
+		TagID            string                           `json:"tag_id"`
+		Channel          string                           `json:"channel"`
+		ProcessConfig    *types.KnowledgeProcessOverrides `json:"process_config"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		logger.Error(ctx, "Failed to parse URL request", err)
@@ -416,7 +442,9 @@ func (h *KnowledgeHandler) CreateKnowledgeFromURL(c *gin.Context) {
 	)
 
 	// Create knowledge entry from the URL
-	knowledge, err := h.kgService.CreateKnowledgeFromURL(ctx, kbID, req.URL, req.FileName, req.FileType, req.EnableMultimodel, req.Title, req.TagID, req.Channel)
+	knowledge, err := h.kgService.CreateKnowledgeFromURL(
+		ctx, kbID, req.URL, req.FileName, req.FileType, req.EnableMultimodel, req.Title, req.TagID, req.Channel, req.ProcessConfig,
+	)
 	// Check for duplicate knowledge error
 	if err != nil {
 		if h.handleDuplicateKnowledgeError(c, err, knowledge, "url") {
@@ -542,6 +570,228 @@ func (h *KnowledgeHandler) GetKnowledge(c *gin.Context) {
 	})
 }
 
+// GetKnowledgeSpans godoc
+// @Summary      获取知识文档解析的 Span 树（含历史尝试）
+// @Description  返回该知识在解析流水线的 trace tree（root → stage → subspan）：每段状态、耗时、input/output、错误码、langfuse_trace_id。支持 ?attempt=N 查看历史尝试；不传则返回最新尝试。前端用于渲染时间线 + 多模态/embedding 子节点 + 一键跳转 Langfuse。
+// @Tags         知识管理
+// @Accept       json
+// @Produce      json
+// @Param        id        path   string  true   "知识ID"
+// @Param        attempt   query  int     false  "指定尝试号；省略=最新"
+// @Success      200       {object}  map[string]interface{}
+// @Router       /api/v1/knowledge/{id}/spans [get]
+//
+// Always returns the canonical 5-stage timeline; missing stage rows are
+// synthesized as "pending" so the frontend timeline always renders five
+// segments. Subspans (multimodal.image[i], generation.*) ride along under
+// each stage as children when present.
+func (h *KnowledgeHandler) GetKnowledgeSpans(c *gin.Context) {
+	ctx := c.Request.Context()
+
+	id := secutils.SanitizeForLog(c.Param("id"))
+	if id == "" {
+		c.Error(errors.NewBadRequestError("Knowledge ID cannot be empty"))
+		return
+	}
+
+	knowledge, _, err := h.resolveKnowledgeAndValidateKBAccess(c, id, types.OrgRoleViewer)
+	if err != nil {
+		c.Error(err)
+		return
+	}
+
+	// Pick attempt: explicit ?attempt=N wins; otherwise pull the
+	// latest attempt from the spans table. Lite-mode / fresh installs
+	// with zero rows fall through to attempt=0, in which case we
+	// return a placeholder tree (5 pending stages, no root, no
+	// children) so the UI still renders.
+	requestedAttempt := 0
+	if v := strings.TrimSpace(c.Query("attempt")); v != "" {
+		if n, perr := strconv.Atoi(v); perr == nil && n > 0 {
+			requestedAttempt = n
+		}
+	}
+
+	rows := []types.KnowledgeProcessingSpan{}
+	currentAttempt := 0
+	if h.spanRepo != nil {
+		if requestedAttempt == 0 {
+			latest, lerr := h.spanRepo.LatestAttempt(ctx, knowledge.ID)
+			if lerr != nil {
+				logger.Warnf(ctx, "spans LatestAttempt failed for %s: %v", knowledge.ID, lerr)
+			} else {
+				currentAttempt = latest
+			}
+		} else {
+			currentAttempt = requestedAttempt
+		}
+		if currentAttempt > 0 {
+			rows, err = h.spanRepo.ListByAttempt(ctx, knowledge.ID, currentAttempt)
+			if err != nil {
+				logger.Warnf(ctx, "spans ListByAttempt failed kid=%s attempt=%d: %v",
+					knowledge.ID, currentAttempt, err)
+				rows = nil
+			}
+		}
+	}
+
+	// Build tree: index by SpanID, then attach to parents. Stages
+	// missing from the DB are synthesized as "pending" placeholders
+	// under a synthetic (or real, if present) root so the timeline
+	// always renders five segments. parse_status threads through so
+	// pre-tracker historical knowledge (no rows but parse_status is
+	// already terminal) renders as done/failed instead of pending —
+	// otherwise legacy completed documents would forever look like
+	// they're still waiting in the queue.
+	tree, currentStageName, lastErr := buildSpanTree(knowledge.ID, currentAttempt, rows, knowledge.ParseStatus)
+
+	resp := gin.H{
+		"knowledge_id":    knowledge.ID,
+		"parse_status":    knowledge.ParseStatus,
+		"current_attempt": currentAttempt,
+		"current_stage":   currentStageName,
+		"trace":           tree,
+	}
+	if lastErr != nil {
+		resp["last_error"] = gin.H{
+			"stage":       lastErr.Name,
+			"code":        lastErr.ErrorCode,
+			"message":     lastErr.ErrorMessage,
+			"finished_at": lastErr.FinishedAt,
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data":    resp,
+	})
+}
+
+// buildSpanTree assembles a flat list of span rows into a parent-child
+// tree rooted at the (knowledge, attempt)'s root span. Missing canonical
+// stages are filled in with pending placeholders so the UI always renders
+// the five timeline segments. Returns the root, the current_stage name
+// (the running stage if any), and the most recent failed span if one
+// exists.
+//
+// parseStatus is the knowledge.parse_status string. When the spans table
+// has zero rows for this attempt (legacy data parsed before tracking, or
+// a fresh knowledge before the pipeline starts), the placeholder status
+// is inferred from parseStatus: completed → done, failed → failed,
+// otherwise pending. Without this, every historical knowledge would
+// render as "all 5 stages pending" forever despite having actually
+// completed parsing.
+func buildSpanTree(knowledgeID string, attempt int, rows []types.KnowledgeProcessingSpan, parseStatus string) (
+	root *types.SpanTreeNode, currentStage string, lastFailure *types.KnowledgeProcessingSpan,
+) {
+	now := time.Now()
+	// Build node lookup, identify root.
+	nodes := make(map[string]*types.SpanTreeNode, len(rows))
+	var rootRow *types.KnowledgeProcessingSpan
+	stageRowByName := map[string]*types.KnowledgeProcessingSpan{}
+	for i := range rows {
+		r := rows[i]
+		nodes[r.SpanID] = &types.SpanTreeNode{KnowledgeProcessingSpan: r}
+		if r.Kind == types.SpanKindRoot && rootRow == nil {
+			cp := r
+			rootRow = &cp
+		}
+		if r.Kind == types.SpanKindStage {
+			cp := r
+			stageRowByName[r.Name] = &cp
+		}
+		if r.Status == types.SpanStatusRunning && r.Kind == types.SpanKindStage && currentStage == "" {
+			currentStage = r.Name
+		}
+		if r.Status == types.SpanStatusFailed {
+			cp := r
+			lastFailure = &cp
+		}
+	}
+
+	// Pick the synthesized stage status from parse_status. Without this,
+	// historical knowledge that completed before span tracking was wired
+	// would render as "5 pending stages" forever — the rows simply
+	// weren't recorded, but parse_status correctly reads "completed".
+	// The synthesized stages don't carry duration/timing data; they
+	// just communicate the inferred terminal state.
+	syntheticStatus := types.SpanStatusPending
+	switch parseStatus {
+	case types.ParseStatusCompleted:
+		syntheticStatus = types.SpanStatusDone
+	case types.ParseStatusFailed:
+		syntheticStatus = types.SpanStatusFailed
+	}
+
+	// Synthesize root if no rows came back so the API contract stays
+	// stable (frontend always expects a `trace` object).
+	if rootRow == nil {
+		root = &types.SpanTreeNode{KnowledgeProcessingSpan: types.KnowledgeProcessingSpan{
+			KnowledgeID: knowledgeID,
+			Attempt:     attempt,
+			SpanID:      "",
+			Name:        "knowledge_processing",
+			Kind:        types.SpanKindRoot,
+			Status:      syntheticStatus,
+			CreatedAt:   now,
+			UpdatedAt:   now,
+		}}
+	} else {
+		root = nodes[rootRow.SpanID]
+	}
+
+	// Link real children to their parents. Walk `rows` (not the
+	// `nodes` map!) so the append order matches the repo's stable
+	// `ORDER BY id ASC`. Iterating the map directly would give
+	// callers a different child ordering on every request — Go map
+	// iteration is intentionally randomised — and the UI would
+	// flicker subspans into a different order on each refresh.
+	for i := range rows {
+		r := &rows[i]
+		n := nodes[r.SpanID]
+		if n == nil || n == root {
+			continue
+		}
+		if r.ParentSpanID == "" {
+			// Real top-level row with no parent and not the root
+			// itself — attach to root so it doesn't dangle.
+			root.Children = append(root.Children, n)
+			continue
+		}
+		parent, ok := nodes[r.ParentSpanID]
+		if !ok {
+			// Unknown parent (orphan); attach to root.
+			root.Children = append(root.Children, n)
+			continue
+		}
+		parent.Children = append(parent.Children, n)
+	}
+
+	// Synthesize missing stage rows as children of root so the timeline
+	// always shows 5 segments. Status mirrors the synthesized root —
+	// pending while the pipeline is still running, done/failed for
+	// historical knowledge whose terminal state we know but whose
+	// per-stage timing was never recorded. Appended in AllStages order
+	// so the canonical stage layout is deterministic regardless of
+	// which rows are missing.
+	for _, name := range types.AllStages {
+		if _, ok := stageRowByName[name]; ok {
+			continue
+		}
+		placeholder := types.KnowledgeProcessingSpan{
+			KnowledgeID: knowledgeID,
+			Attempt:     attempt,
+			Name:        name,
+			Kind:        types.SpanKindStage,
+			Status:      syntheticStatus,
+			CreatedAt:   now,
+			UpdatedAt:   now,
+		}
+		root.Children = append(root.Children, &types.SpanTreeNode{KnowledgeProcessingSpan: placeholder})
+	}
+
+	return root, currentStage, lastFailure
+}
+
 // ListKnowledge godoc
 // @Summary      获取知识列表
 // @Description  获取知识库下的知识列表，支持分页和筛选
@@ -651,12 +901,13 @@ func (h *KnowledgeHandler) ListKnowledge(c *gin.Context) {
 
 // DeleteKnowledge godoc
 // @Summary      删除知识
-// @Description  根据ID删除知识条目
+// @Description  根据ID异步删除知识条目。请求会被入队到与批量删除相同的异步管道（asynq）；
+// @Description  接口返回 200 仅表示任务已提交（响应 data.task_id 为任务 ID），实际删除由后台 worker 完成。
 // @Tags         知识管理
 // @Accept       json
 // @Produce      json
 // @Param        id   path      string  true  "知识ID"
-// @Success      200  {object}  map[string]interface{}  "删除成功"
+// @Success      200  {object}  map[string]interface{}  "任务已提交，返回 task_id"
 // @Failure      400  {object}  errors.AppError         "请求参数错误"
 // @Security     Bearer
 // @Security     ApiKeyAuth
@@ -678,18 +929,32 @@ func (h *KnowledgeHandler) DeleteKnowledge(c *gin.Context) {
 		c.Error(err)
 		return
 	}
-	logger.Infof(ctx, "Deleting knowledge, ID: %s", secutils.SanitizeForLog(id))
-	err = h.kgService.DeleteKnowledge(effCtx, id)
-	if err != nil {
-		logger.ErrorWithFields(ctx, err, nil)
-		c.Error(errors.NewInternalServerError(err.Error()))
+
+	// Reuse the batch async pipeline so single-item delete shares the same
+	// hardening (asynq retries, business-aware queue routing, marking-as-deleting
+	// inside the worker) as BatchDeleteKnowledge / ClearKnowledgeBaseContents.
+	effectiveTenantID, _ := effCtx.Value(types.TenantIDContextKey).(uint64)
+	if effectiveTenantID == 0 {
+		logger.Error(ctx, "Effective tenant ID missing after access validation")
+		c.Error(errors.NewInternalServerError("tenant context unavailable"))
 		return
 	}
 
-	logger.Infof(ctx, "Knowledge deleted successfully, ID: %s", secutils.SanitizeForLog(id))
+	logger.Infof(ctx, "Enqueuing knowledge delete, ID: %s", secutils.SanitizeForLog(id))
+	taskID, err := h.enqueueKnowledgeListDelete(effCtx, effectiveTenantID, []string{id})
+	if err != nil {
+		logger.Errorf(ctx, "Failed to enqueue knowledge delete task: %v", err)
+		c.Error(errors.NewInternalServerError("Failed to enqueue delete task"))
+		return
+	}
+
+	logger.Infof(ctx, "Knowledge delete task enqueued: %s, knowledge_id: %s", taskID, secutils.SanitizeForLog(id))
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
-		"message": "Deleted successfully",
+		"message": "Delete task submitted",
+		"data": gin.H{
+			"task_id": taskID,
+		},
 	})
 }
 
@@ -1292,6 +1557,7 @@ func (h *KnowledgeHandler) UpdateManualKnowledge(c *gin.Context) {
 // @Accept       json
 // @Produce      json
 // @Param        id   path      string  true  "知识ID"
+// @Param        body body      object  false  "可选的处理配置覆盖：{\"process_config\": KnowledgeProcessOverrides}"
 // @Success      200  {object}  map[string]interface{}  "重新解析任务已提交"
 // @Failure      400  {object}  errors.AppError         "请求参数错误"
 // @Failure      403  {object}  errors.AppError         "权限不足"
@@ -1316,8 +1582,23 @@ func (h *KnowledgeHandler) ReparseKnowledge(c *gin.Context) {
 		return
 	}
 
+	// Optional per-reparse parse config override. Empty body keeps the
+	// overrides stored at upload time.
+	var processOverrides *types.KnowledgeProcessOverrides
+	if c.Request.ContentLength != 0 {
+		var req struct {
+			ProcessConfig *types.KnowledgeProcessOverrides `json:"process_config"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			logger.Error(ctx, "Failed to parse reparse request body", err)
+			c.Error(errors.NewBadRequestError("Invalid reparse request body").WithDetails(err.Error()))
+			return
+		}
+		processOverrides = req.ProcessConfig
+	}
+
 	// Call service to reparse knowledge
-	knowledge, err := h.kgService.ReparseKnowledge(effCtx, id)
+	knowledge, err := h.kgService.ReparseKnowledge(effCtx, id, processOverrides)
 	if err != nil {
 		if appErr, ok := errors.IsAppError(err); ok {
 			c.Error(appErr)
@@ -1334,6 +1615,59 @@ func (h *KnowledgeHandler) ReparseKnowledge(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "Knowledge reparse task submitted",
+		"data":    knowledge,
+	})
+}
+
+// CancelKnowledgeParse godoc
+// @Summary      取消知识解析
+// @Description  取消进行中的知识解析任务。当前已写入的 chunk / 索引保留，可通过 reparse 接口重新触发解析。已完成 / 已失败 / 删除中的知识不支持取消。
+// @Tags         知识管理
+// @Accept       json
+// @Produce      json
+// @Param        id   path      string  true  "知识ID"
+// @Success      200  {object}  map[string]interface{}  "取消已提交"
+// @Failure      400  {object}  errors.AppError         "状态不支持取消"
+// @Failure      403  {object}  errors.AppError         "权限不足"
+// @Failure      404  {object}  errors.AppError         "知识不存在"
+// @Security     Bearer
+// @Security     ApiKeyAuth
+// @Router       /knowledge/{id}/cancel-parse [post]
+func (h *KnowledgeHandler) CancelKnowledgeParse(c *gin.Context) {
+	ctx := c.Request.Context()
+	logger.Info(ctx, "Start cancelling knowledge parse")
+
+	id := secutils.SanitizeForLog(c.Param("id"))
+	if id == "" {
+		logger.Error(ctx, "Knowledge ID is empty")
+		c.Error(errors.NewBadRequestError("Knowledge ID cannot be empty"))
+		return
+	}
+
+	// Editor permission — same gate as ReparseKnowledge / DeleteKnowledge.
+	_, effCtx, err := h.resolveKnowledgeAndValidateKBAccess(c, id, types.OrgRoleEditor)
+	if err != nil {
+		c.Error(err)
+		return
+	}
+
+	knowledge, err := h.kgService.CancelKnowledgeParse(effCtx, id)
+	if err != nil {
+		if appErr, ok := errors.IsAppError(err); ok {
+			c.Error(appErr)
+			return
+		}
+		logger.ErrorWithFields(ctx, err, map[string]interface{}{
+			"knowledge_id": id,
+		})
+		c.Error(errors.NewInternalServerError(err.Error()))
+		return
+	}
+
+	logger.Infof(ctx, "Knowledge parse cancelled successfully, knowledge ID: %s", id)
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "Knowledge parse cancelled",
 		"data":    knowledge,
 	})
 }
@@ -1496,7 +1830,19 @@ func (h *KnowledgeHandler) SearchKnowledge(c *gin.Context) {
 	if userID, ok := c.Get(types.UserIDContextKey.String()); ok {
 		ctx = context.WithValue(ctx, types.UserIDContextKey, userID)
 	}
+	// Accept both ?keyword= (legacy / upstream name) and ?query= (what most
+	// MCP / agent integrations send). Falling silently back to an unsorted
+	// listing when both are empty caused the "all queries return the same 5
+	// newest cards" footgun — return 400 instead so the caller gets a clear
+	// signal that the search wasn't query-driven.
 	keyword := c.Query("keyword")
+	if keyword == "" {
+		keyword = c.Query("query")
+	}
+	if strings.TrimSpace(keyword) == "" {
+		c.Error(errors.NewBadRequestError("missing search keyword: pass ?keyword=... or ?query=..."))
+		return
+	}
 	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
 
@@ -1703,6 +2049,18 @@ func (h *KnowledgeHandler) MoveKnowledge(c *gin.Context) {
 	// Validate embedding model match
 	if sourceKB.EmbeddingModelID != targetKB.EmbeddingModelID {
 		c.Error(errors.NewBadRequestError("Source and target must use the same embedding model"))
+		return
+	}
+
+	// reuse_vectors copies index entries directly between KBs, which only works
+	// inside the same VectorStore backend. A cross-store reuse_vectors move would
+	// route CopyIndices through the SOURCE store and then delete the source
+	// indices, corrupting the vector data. Reject it and point the caller at
+	// reparse mode, which re-indexes into the target store safely.
+	if req.Mode == "reuse_vectors" && !sourceKB.SharesStoreWith(targetKB) {
+		c.Error(errors.NewBadRequestError(
+			"reuse_vectors move across different vector stores is not supported; " +
+				"use reparse mode to move into a different store"))
 		return
 	}
 

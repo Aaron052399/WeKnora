@@ -16,17 +16,14 @@ import (
 
 	filesvc "github.com/Tencent/WeKnora/internal/application/service/file"
 	"github.com/Tencent/WeKnora/internal/config"
+	apperrors "github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/models/chat"
-	"github.com/Tencent/WeKnora/internal/tracing"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/trace"
 	"gorm.io/gorm"
 )
 
@@ -80,15 +77,37 @@ var storageSchemeRe = regexp.MustCompile(`\b(local|minio|s3|cos|tos|oss)://[^\s)
 // rewriteStorageURLs replaces all provider:// URLs in content with HTTP URLs
 // obtained from fileService.GetFileURL. URLs that are already HTTP or cannot
 // be resolved are left unchanged.
-func rewriteStorageURLs(ctx context.Context, content string, fileSvc interfaces.FileService) string {
-	if fileSvc == nil {
+//
+// Logging policy:
+//   - Successful rewrite logs at INFO with the full signed URL so operators
+//     can copy it out of logs and verify public reachability directly. The
+//     trade-off: anyone with log access can use a signed URL until it
+//     expires (WeKnora 2h, MinIO 24h). Acceptable for diagnosability.
+//   - Failure or no-op rewrite logs at WARN. The no-op case typically means
+//     APP_EXTERNAL_URL is not configured for the local backend, which is
+//     the most common cause of "image broken in IM" reports.
+func rewriteStorageURLs(ctx context.Context, content string, resolver *imFileServiceResolver) string {
+	if resolver == nil {
 		return content
 	}
 	return storageSchemeRe.ReplaceAllStringFunc(content, func(match string) string {
-		httpURL, err := fileSvc.GetFileURL(ctx, match)
-		if err != nil || httpURL == match {
+		fileSvc := resolver.resolve(match)
+		if fileSvc == nil {
+			logger.Warnf(ctx, "[IM] rewriteStorageURLs: no file service for src=%s", match)
 			return match
 		}
+		httpURL, err := fileSvc.GetFileURL(ctx, match)
+		if err != nil {
+			logger.Warnf(ctx, "[IM] rewriteStorageURLs failed: src=%s err=%v", match, err)
+			return match
+		}
+		if httpURL == match {
+			logger.Warnf(ctx,
+				"[IM] rewriteStorageURLs no-op (URL unchanged; for local storage set APP_EXTERNAL_URL): src=%s",
+				match)
+			return match
+		}
+		logger.Infof(ctx, "[IM] rewriteStorageURLs: src=%s dst=%s", match, httpURL)
 		return httpURL
 	})
 }
@@ -115,6 +134,31 @@ func findIncompleteStorageURL(s string) int {
 	return loc[0]
 }
 
+// incompleteMarkdownImageSuffixRe matches a Markdown image whose destination URL
+// (the parenthesized part) is not yet closed — e.g. "![alt](minio://part" or "![alt](".
+// Holding back only from "minio://" would flush "![alt](" to the IM client and break
+// the image once the URL arrives in the next chunk.
+var incompleteMarkdownImageSuffixRe = regexp.MustCompile(`!\[[^\]]*\]\([^)]*$`)
+
+// findIncompleteMarkdownImage returns the byte offset of an unclosed ![alt](url
+// suffix at the end of s, or -1 if none.
+func findIncompleteMarkdownImage(s string) int {
+	// Prefer pairing a trailing provider:// fragment with the nearest preceding ![…](
+	// so alt text may contain ']' (e.g. ![a[b]](minio://part).
+	if urlIdx := findIncompleteStorageURL(s); urlIdx >= 0 {
+		if imgIdx := strings.LastIndex(s[:urlIdx], "!["); imgIdx >= 0 {
+			if strings.Contains(s[imgIdx:urlIdx], "](") {
+				return imgIdx
+			}
+		}
+	}
+	loc := incompleteMarkdownImageSuffixRe.FindStringIndex(s)
+	if loc == nil {
+		return -1
+	}
+	return loc[0]
+}
+
 // incompleteXMLTagRe matches the opening of an <image…>, <kb…>, or <web…> tag
 // that reaches the end of the string without a closing '>'.
 var incompleteXMLTagRe = regexp.MustCompile(
@@ -135,7 +179,9 @@ func findIncompleteXMLTag(s string) int {
 // chunk, or len(chunk) if the chunk is safe to flush entirely.
 func holdbackCutoff(chunk string) int {
 	cutoff := len(chunk)
-	if idx := findIncompleteStorageURL(chunk); idx >= 0 && idx < cutoff {
+	if idx := findIncompleteMarkdownImage(chunk); idx >= 0 && idx < cutoff {
+		cutoff = idx
+	} else if idx := findIncompleteStorageURL(chunk); idx >= 0 && idx < cutoff {
 		cutoff = idx
 	}
 	if idx := findIncompleteXMLTag(chunk); idx >= 0 && idx < cutoff {
@@ -147,29 +193,92 @@ func holdbackCutoff(chunk string) int {
 // cleanIMContent applies all IM-specific content transformations:
 //  1. Collapse <image> XML blocks back to plain markdown
 //  2. Strip <kb/> and <web/> citation tags
-//  3. Rewrite provider:// URLs to HTTP URLs (if fileSvc is available)
-func cleanIMContent(ctx context.Context, content string, fileSvc interfaces.FileService) string {
+//  3. Rewrite provider:// URLs to HTTP URLs (scheme-aware per tenant config)
+func cleanIMContent(ctx context.Context, content string, tenant *types.Tenant, defaultFileSvc interfaces.FileService) string {
 	content = stripImageXMLTags(content)
 	content = stripIMCitationTags(content)
-	content = rewriteStorageURLs(ctx, content, fileSvc)
+	resolver := newIMFileServiceResolver(tenant, defaultFileSvc)
+	content = rewriteStorageURLs(ctx, content, resolver)
 	return content
 }
 
-// buildTenantFileService creates a FileService for the given tenant's storage config.
-// Returns nil if the tenant has no storage config or if creation fails.
-func buildTenantFileService(tenant *types.Tenant) interfaces.FileService {
-	if tenant == nil {
-		return nil
-	}
-	baseDir := os.Getenv("LOCAL_STORAGE_BASE_DIR")
+func imLocalStorageBaseDir() string {
+	baseDir := strings.TrimSpace(os.Getenv("LOCAL_STORAGE_BASE_DIR"))
 	if baseDir == "" {
 		baseDir = "/data/files"
 	}
-	fileSvc, _, err := filesvc.NewFileServiceFromStorageConfig("", tenant.StorageEngineConfig, baseDir)
-	if err != nil {
-		return nil
+	return baseDir
+}
+
+// imFileServiceResolver resolves and caches FileService instances per storage provider
+// for the lifetime of one cleanIMContent / outbound message (avoids re-creating SDK clients
+// for every URL in a long answer).
+type imFileServiceResolver struct {
+	tenant     *types.Tenant
+	defaultSvc interfaces.FileService
+	cache      map[string]interfaces.FileService
+}
+
+func newIMFileServiceResolver(tenant *types.Tenant, defaultSvc interfaces.FileService) *imFileServiceResolver {
+	return &imFileServiceResolver{
+		tenant:     tenant,
+		defaultSvc: defaultSvc,
+		cache:      make(map[string]interfaces.FileService),
 	}
-	return fileSvc
+}
+
+func (r *imFileServiceResolver) resolve(filePath string) interfaces.FileService {
+	provider := types.ParseProviderScheme(filePath)
+	if provider == "" {
+		if r.tenant != nil && r.tenant.StorageEngineConfig != nil {
+			provider = strings.ToLower(strings.TrimSpace(r.tenant.StorageEngineConfig.DefaultProvider))
+		}
+		if provider == "" {
+			return nil
+		}
+	}
+	if svc, ok := r.cache[provider]; ok {
+		return svc
+	}
+	svc := buildIMFileServiceForProvider(r.tenant, provider, r.defaultSvc)
+	if svc != nil {
+		r.cache[provider] = svc
+	}
+	return svc
+}
+
+// buildIMFileServiceForProvider selects the FileService for a storage provider.
+// filePath scheme wins over tenant DefaultProvider. Falls back to the process-wide
+// default FileService (STORAGE_TYPE / env) when tenant config is missing — mirrors
+// ImageMultimodalService.resolveFileServiceForPayload (issue #1282).
+func buildIMFileServiceForProvider(
+	tenant *types.Tenant,
+	provider string,
+	defaultSvc interfaces.FileService,
+) interfaces.FileService {
+	baseDir := imLocalStorageBaseDir()
+	var sec *types.StorageEngineConfig
+	if tenant != nil {
+		sec = tenant.StorageEngineConfig
+	}
+
+	svc, _, err := filesvc.NewFileServiceFromStorageConfig(provider, sec, baseDir)
+	if err == nil {
+		return svc
+	}
+	if provider == "local" {
+		externalURL := strings.TrimSpace(os.Getenv("APP_EXTERNAL_URL"))
+		return filesvc.NewLocalFileService(baseDir, externalURL)
+	}
+	if defaultSvc != nil {
+		return defaultSvc
+	}
+	return nil
+}
+
+// resolveIMFileServiceForPath is a test/helper entry point without caching.
+func resolveIMFileServiceForPath(tenant *types.Tenant, filePath string, defaultSvc interfaces.FileService) interfaces.FileService {
+	return newIMFileServiceResolver(tenant, defaultSvc).resolve(filePath)
 }
 
 const (
@@ -243,6 +352,10 @@ type Service struct {
 	// consistent with the web StopSession mechanism. May be nil in Lite mode
 	// (but NewStreamManager always returns at least a memory implementation).
 	streamManager interfaces.StreamManager
+
+	// defaultFileSvc is the process-wide storage backend (STORAGE_TYPE / env).
+	// Used when tenant StorageEngineConfig cannot build a service for the URL scheme.
+	defaultFileSvc interfaces.FileService
 
 	// cmdRegistry holds all registered slash-commands.
 	cmdRegistry *CommandRegistry
@@ -333,6 +446,21 @@ func formatQuotedContext(quote *QuotedMessage) string {
 	return label + "\n<quoted_message>\n" + content + "\n</quoted_message>"
 }
 
+// withIMIdentity injects a synthetic caller identity into the context for IM
+// callbacks. IM platforms verify their own signatures and bypass the auth
+// middleware, so the downstream QA pipeline would otherwise see an empty
+// UserID/TenantRole. Mirroring the API-key path's "system-<tenantID>" synthetic
+// user (recognised by types.IsSyntheticUserID) lets Organization-shared
+// knowledge bases be merged and resolved correctly, since the shared-KB code
+// gates on a non-empty UserID. Viewer is the least privilege sufficient to
+// retrieve shared KBs.
+func withIMIdentity(ctx context.Context, tenantID uint64) context.Context {
+	ctx = context.WithValue(ctx, types.TenantIDContextKey, tenantID)
+	ctx = context.WithValue(ctx, types.UserIDContextKey, fmt.Sprintf("system-%d", tenantID))
+	ctx = context.WithValue(ctx, types.TenantRoleContextKey, types.TenantRoleViewer)
+	return ctx
+}
+
 func buildIMQARequest(
 	session *types.Session,
 	query string,
@@ -407,6 +535,7 @@ func NewService(
 	kbService interfaces.KnowledgeBaseService,
 	modelService interfaces.ModelService,
 	streamManager interfaces.StreamManager,
+	defaultFileSvc interfaces.FileService,
 	redisClient *redis.Client,
 	appCfg *config.Config,
 ) *Service {
@@ -432,6 +561,7 @@ func NewService(
 		kbService:        kbService,
 		modelService:     modelService,
 		streamManager:    streamManager,
+		defaultFileSvc:   defaultFileSvc,
 		cmdRegistry:      registry,
 		channels:         make(map[string]*channelState),
 		adapterFactories: make(map[string]AdapterFactory),
@@ -533,14 +663,6 @@ func (s *Service) LoadAndStartChannels() error {
 // the leader lock and opens the connection; other instances periodically
 // retry so they can take over if the leader dies.
 func (s *Service) StartChannel(channel *IMChannel) error {
-	_, span := tracing.ContextWithSpan(context.Background(), "im.StartChannel")
-	defer span.End()
-	span.SetAttributes(
-		attribute.String("im.channel_id", channel.ID),
-		attribute.String("im.platform", channel.Platform),
-		attribute.String("im.mode", channel.Mode),
-	)
-
 	s.mu.Lock()
 	factory, ok := s.adapterFactories[channel.Platform]
 	if !ok {
@@ -902,18 +1024,6 @@ func (s *Service) isDuplicate(ctx context.Context, messageID string) bool {
 
 // HandleMessage processes an incoming IM message end-to-end using channel config.
 func (s *Service) HandleMessage(ctx context.Context, msg *IncomingMessage, channelID string) error {
-	ctx, span := tracing.ContextWithSpan(ctx, "im.HandleMessage")
-	defer span.End()
-	span.SetAttributes(
-		attribute.String("im.channel_id", channelID),
-		attribute.String("im.platform", string(msg.Platform)),
-		attribute.String("im.user_id", msg.UserID),
-		attribute.String("im.chat_id", msg.ChatID),
-		attribute.String("im.thread_id", msg.ThreadID),
-		attribute.String("im.message_type", string(msg.MessageType)),
-		attribute.Bool("im.has_quote", msg.Quote != nil),
-	)
-
 	// Dedup: skip if this message was already processed (IM platforms may retry)
 	if msg.MessageID != "" {
 		if s.isDuplicate(ctx, msg.MessageID) {
@@ -946,8 +1056,6 @@ func (s *Service) HandleMessage(ctx context.Context, msg *IncomingMessage, chann
 			return fmt.Errorf("channel adapter not available after start: %s", channelID)
 		}
 	}
-
-	span.SetAttributes(attribute.String("im.session_mode", channel.SessionMode))
 
 	// Resolve threadID for key building — only include in thread mode to avoid
 	// leaking thread scope into user-mode rate limit / inflight keys.
@@ -1007,8 +1115,8 @@ func (s *Service) HandleMessage(ctx context.Context, msg *IncomingMessage, chann
 	if err != nil {
 		return fmt.Errorf("get tenant: %w", err)
 	}
-	sessionCtx := context.WithValue(ctx, types.TenantIDContextKey, tenantID)
-	sessionCtx = context.WithValue(sessionCtx, types.TenantInfoContextKey, tenant)
+	sessionCtx := context.WithValue(ctx, types.TenantInfoContextKey, tenant)
+	sessionCtx = withIMIdentity(sessionCtx, tenantID)
 
 	// 2. Resolve or create a WeKnora session
 	channelSession, err := s.resolveSession(sessionCtx, msg, tenantID, agentID, channelID, channel.SessionMode)
@@ -1048,8 +1156,8 @@ func (s *Service) HandleMessage(ctx context.Context, msg *IncomingMessage, chann
 		// ChannelSession mapping still exists (GORM soft-delete does not trigger
 		// SQL ON DELETE CASCADE). Recover by soft-deleting the stale mapping and
 		// re-creating a fresh session so the IM bot doesn't become permanently
-		// unresponsive. (fixes #1046)
-		if errors.Is(err, gorm.ErrRecordNotFound) {
+		// unresponsive. (fixes #1046, #1499)
+		if isSessionNotFound(err) {
 			logger.Warnf(ctx, "[IM] Session %s not found (deleted?), recycling stale channel session %s",
 				channelSession.SessionID, channelSession.ID)
 			if delErr := s.db.Delete(&ChannelSession{}, "id = ?", channelSession.ID).Error; delErr != nil {
@@ -1082,14 +1190,13 @@ func (s *Service) HandleMessage(ctx context.Context, msg *IncomingMessage, chann
 		adapter:   adapter,
 		channel:   channel,
 		channelID: channelID,
-		fileSvc:   buildTenantFileService(tenant),
+		tenant:    tenant,
 		userKey:   userKey,
 	}
 
 	pos, enqueueErr := s.qaQueue.Enqueue(req)
 	if enqueueErr != nil {
 		qaCancel()
-		span.AddEvent("queue rejected", trace.WithAttributes(attribute.String("reason", enqueueErr.Error())))
 		logger.Warnf(ctx, "[IM] Queue rejected: user=%s reason=%v", msg.UserID, enqueueErr)
 		_ = adapter.SendReply(ctx, msg, &ReplyMessage{
 			Content: "当前排队人数较多，请稍后再试。",
@@ -1120,13 +1227,7 @@ func (s *Service) HandleMessage(ctx context.Context, msg *IncomingMessage, chann
 // executeQARequest is the worker handler that runs the QA pipeline for a queued request.
 // It is called by qaQueue workers and must not block indefinitely.
 func (s *Service) executeQARequest(req *qaRequest) {
-	ctx, span := tracing.ContextWithSpan(req.ctx, "im.ExecuteQA")
-	defer span.End()
-	span.SetAttributes(
-		attribute.String("im.channel_id", req.channelID),
-		attribute.String("im.user_key", req.userKey),
-		attribute.String("im.user_id", req.msg.UserID),
-	)
+	ctx := req.ctx
 	defer req.cancel()
 
 	// Track in-flight request so /stop can cancel it.
@@ -1136,7 +1237,6 @@ func (s *Service) executeQARequest(req *qaRequest) {
 
 	// Check if a pre-execution /stop was issued while this request was queued.
 	if s.checkAndClearStopMarker(ctx, req.userKey) {
-		span.AddEvent("cancelled by remote /stop before execution")
 		logger.Infof(ctx, "[IM] Request cancelled by remote /stop before execution: %s", req.userKey)
 		return
 	}
@@ -1154,8 +1254,7 @@ func (s *Service) executeQARequest(req *qaRequest) {
 	// If the adapter supports streaming and output is not "full", use streaming.
 	if !streamDisabled {
 		if streamer, ok := req.adapter.(StreamSender); ok {
-			if err := s.handleMessageStream(ctx, req.msg, req.session, req.agent, kbIDs, streamer, req.adapter, req.userKey, req.fileSvc); err != nil {
-				span.SetStatus(codes.Error, err.Error())
+			if err := s.handleMessageStream(ctx, req.msg, req.session, req.agent, kbIDs, streamer, req.adapter, req.userKey, req.tenant); err != nil {
 				logger.Errorf(ctx, "[IM] Stream QA failed: %v", err)
 			}
 			return
@@ -1165,13 +1264,12 @@ func (s *Service) executeQARequest(req *qaRequest) {
 	// Non-streaming fallback: collect full answer then send.
 	answer, err := s.runQA(ctx, req.session, req.msg.Content, req.agent, kbIDs, req.userKey, req.msg.Quote)
 	if err != nil {
-		span.SetStatus(codes.Error, err.Error())
 		logger.Errorf(ctx, "[IM] QA failed: %v, sending fallback reply", err)
 		answer = "抱歉，处理您的问题时出现了异常，请稍后再试。"
 	}
 
 	reply := &ReplyMessage{
-		Content: cleanIMContent(ctx, answer, req.fileSvc),
+		Content: cleanIMContent(ctx, answer, req.tenant, s.defaultFileSvc),
 		IsFinal: true,
 	}
 	if err := req.adapter.SendReply(ctx, req.msg, reply); err != nil {
@@ -1195,14 +1293,6 @@ func (s *Service) handleCommand(
 	channelSession *ChannelSession,
 	customAgent *types.CustomAgent,
 ) error {
-	ctx, span := tracing.ContextWithSpan(ctx, "im.HandleCommand")
-	defer span.End()
-	span.SetAttributes(
-		attribute.String("im.command", cmd.Name()),
-		attribute.String("im.channel_id", channel.ID),
-		attribute.String("im.user_id", msg.UserID),
-	)
-
 	agentName := ""
 	if customAgent != nil {
 		agentName = customAgent.Name
@@ -1322,6 +1412,15 @@ func (s *Service) sendStreamReply(ctx context.Context, msg *IncomingMessage, str
 		return fmt.Errorf("end stream: %w", err)
 	}
 	return nil
+}
+
+// isSessionNotFound reports whether err indicates the underlying WeKnora
+// session no longer exists. The session repository translates GORM's
+// ErrRecordNotFound into apperrors.ErrSessionNotFound, so the application
+// sentinel is what GetSession returns today; the GORM check is kept as a
+// safety net in case a future repository revert bypasses the translation.
+func isSessionNotFound(err error) bool {
+	return errors.Is(err, apperrors.ErrSessionNotFound) || errors.Is(err, gorm.ErrRecordNotFound)
 }
 
 // resolveSession dispatches to the appropriate session resolution strategy
@@ -1536,7 +1635,6 @@ var toolDisplayNames = map[string]string{
 	"web_fetch":             "网页阅读",
 	"read_skill":            "读取技能",
 	"execute_skill_script":  "执行技能脚本",
-	"final_answer":          "生成回答",
 }
 
 // internalToolNames lists tools whose execution should NOT be displayed in IM
@@ -1556,12 +1654,9 @@ func friendlyToolName(toolName string) string {
 }
 
 // isToolVisibleToUser returns true if the tool's execution progress should be
-// displayed to the IM user. Internal reasoning tools (thinking, planning) and
-// the final_answer pseudo-tool are hidden.
+// displayed to the IM user. Internal reasoning tools (thinking, planning) are
+// hidden.
 func isToolVisibleToUser(toolName string) bool {
-	if toolName == "final_answer" {
-		return false
-	}
 	return !internalToolNames[toolName]
 }
 
@@ -1614,12 +1709,12 @@ func briefToolSummary(output string) string {
 // handleMessageStream runs the QA pipeline and streams answer chunks to the IM platform
 // in real-time via the StreamSender interface. Chunks are batched at streamFlushInterval
 // to avoid API rate-limiting.
-func (s *Service) handleMessageStream(ctx context.Context, msg *IncomingMessage, session *types.Session, customAgent *types.CustomAgent, kbIDs []string, streamer StreamSender, adapter Adapter, userKey string, fileSvc interfaces.FileService) error {
+func (s *Service) handleMessageStream(ctx context.Context, msg *IncomingMessage, session *types.Session, customAgent *types.CustomAgent, kbIDs []string, streamer StreamSender, adapter Adapter, userKey string, tenant *types.Tenant) error {
 	// Start the stream on the IM platform (e.g., create Feishu streaming card)
 	streamID, err := streamer.StartStream(ctx, msg)
 	if err != nil {
 		logger.Warnf(ctx, "[IM] StartStream failed, falling back to non-streaming: %v", err)
-		return s.fallbackNonStream(ctx, msg, session, customAgent, kbIDs, adapter, userKey, fileSvc)
+		return s.fallbackNonStream(ctx, msg, session, customAgent, kbIDs, adapter, userKey, tenant)
 	}
 
 	// Prepare the QA pipeline
@@ -1864,7 +1959,7 @@ func (s *Service) handleMessageStream(ctx context.Context, msg *IncomingMessage,
 		}
 
 		if chunk != "" {
-			if err := streamer.SendStreamChunk(ctx, msg, streamID, cleanIMContent(ctx, chunk, fileSvc)); err != nil {
+			if err := streamer.SendStreamChunk(ctx, msg, streamID, cleanIMContent(ctx, chunk, tenant, s.defaultFileSvc)); err != nil {
 				logger.Warnf(ctx, "[IM] SendStreamChunk failed: %v", err)
 			}
 		}
@@ -1927,14 +2022,14 @@ loop:
 }
 
 // fallbackNonStream is used when streaming initialization fails.
-func (s *Service) fallbackNonStream(ctx context.Context, msg *IncomingMessage, session *types.Session, customAgent *types.CustomAgent, kbIDs []string, adapter Adapter, userKey string, fileSvc interfaces.FileService) error {
+func (s *Service) fallbackNonStream(ctx context.Context, msg *IncomingMessage, session *types.Session, customAgent *types.CustomAgent, kbIDs []string, adapter Adapter, userKey string, tenant *types.Tenant) error {
 	answer, err := s.runQA(ctx, session, msg.Content, customAgent, kbIDs, userKey, msg.Quote)
 	if err != nil {
 		logger.Errorf(ctx, "[IM] QA fallback failed: %v", err)
 		answer = "抱歉，处理您的问题时出现了异常，请稍后再试。"
 	}
 
-	return adapter.SendReply(ctx, msg, &ReplyMessage{Content: cleanIMContent(ctx, answer, fileSvc), IsFinal: true})
+	return adapter.SendReply(ctx, msg, &ReplyMessage{Content: cleanIMContent(ctx, answer, tenant, s.defaultFileSvc), IsFinal: true})
 }
 
 // runQA executes the WeKnora QA pipeline and returns the full answer text.
@@ -2335,7 +2430,7 @@ func (s *Service) processFileToKnowledgeBase(ctx context.Context, msg *IncomingM
 	fh := newInMemoryFileHeader(fileName, content)
 
 	// Create knowledge entry via the knowledge service
-	knowledge, err := s.knowledgeService.CreateKnowledgeFromFile(kbCtx, kbID, fh, nil, nil, "", "", imPlatformToChannel(channel.Platform))
+	knowledge, err := s.knowledgeService.CreateKnowledgeFromFile(kbCtx, kbID, fh, nil, nil, "", "", imPlatformToChannel(channel.Platform), nil)
 	if err != nil {
 		errMsg := err.Error()
 		// Check for duplicate file

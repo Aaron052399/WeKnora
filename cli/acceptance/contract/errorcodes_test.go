@@ -165,6 +165,10 @@ func identToErrorCode(name string) (cmdutil.ErrorCode, bool) {
 		return cmdutil.CodeInputInvalidArgument, true
 	case "CodeInputMissingFlag":
 		return cmdutil.CodeInputMissingFlag, true
+	case "CodeInputConfirmationRequired":
+		return cmdutil.CodeInputConfirmationRequired, true
+	case "CodeInputUnknownSubcommand":
+		return cmdutil.CodeInputUnknownSubcommand, true
 	case "CodeServerError":
 		return cmdutil.CodeServerError, true
 	case "CodeServerTimeout":
@@ -183,8 +187,8 @@ func identToErrorCode(name string) (cmdutil.ErrorCode, bool) {
 		return cmdutil.CodeLocalFileIO, true
 	case "CodeLocalUnimplemented":
 		return cmdutil.CodeLocalUnimplemented, true
-	case "CodeLocalContextNotFound":
-		return cmdutil.CodeLocalContextNotFound, true
+	case "CodeLocalProfileNotFound":
+		return cmdutil.CodeLocalProfileNotFound, true
 	case "CodeKBIDRequired":
 		return cmdutil.CodeKBIDRequired, true
 	case "CodeKBNotFound":
@@ -199,12 +203,6 @@ func identToErrorCode(name string) (cmdutil.ErrorCode, bool) {
 		return cmdutil.CodeSSEStreamAborted, true
 	case "CodeSessionCreateFailed":
 		return cmdutil.CodeSessionCreateFailed, true
-	case "CodeMCPReadonlyMode":
-		return cmdutil.CodeMCPReadonlyMode, true
-	case "CodeMCPToolNotAllowed":
-		return cmdutil.CodeMCPToolNotAllowed, true
-	case "CodeMCPSchemaUnknown":
-		return cmdutil.CodeMCPSchemaUnknown, true
 	case "CodeOperationTimeout":
 		return cmdutil.CodeOperationTimeout, true
 	case "CodeOperationFailed":

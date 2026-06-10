@@ -10,7 +10,7 @@
             <h2 style="--wails-draggable: drag">{{ $t('agent.title') }}</h2>
             <t-tooltip v-if="authStore.hasRole('contributor')" :content="$t('agent.createAgent')" placement="bottom">
               <t-button variant="text" theme="default" size="small" class="header-action-btn"
-                style="--wails-draggable: no-drag" @click="handleCreateAgent">
+                data-guide="agent-list-create" style="--wails-draggable: no-drag" @click="handleCreateAgent">
                 <template #icon>
                   <span class="btn-icon-wrapper">
                     <svg class="sparkles-icon" width="19" height="19" viewBox="0 0 20 20" fill="none"
@@ -647,7 +647,7 @@
           <span class="empty-txt">{{ $t('agent.empty.title') }}</span>
           <span class="empty-desc">{{ $t('agent.empty.description') }}</span>
           <t-button v-if="authStore.hasRole('contributor')" class="agent-create-btn empty-state-btn"
-            @click="handleCreateAgent">
+            data-guide="agent-list-create" @click="handleCreateAgent">
             <template #icon>
               <span class="btn-icon-wrapper">
                 <svg class="sparkles-icon" width="18" height="18" viewBox="0 0 20 20" fill="none"
@@ -809,6 +809,9 @@
       :initialSection="editorInitialSection"
       :readOnly="editorMode === 'edit' && editingAgent != null && !canManageAgent(editingAgent as AgentWithUI)"
       @update:visible="editorVisible = $event" @success="handleEditorSuccess" />
+
+    <TenantModelsGuide :when="showAgentTenantModelsGuide" variant="agent" />
+    <ContextualGuide tour="agentList" :when="showAgentListContextualGuide" />
   </div>
 </template>
 
@@ -816,7 +819,8 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { MessagePlugin, Icon as TIcon } from 'tdesign-vue-next'
-import { listAgents, deleteAgent, copyAgent, type CustomAgent } from '@/api/agent'
+import { deleteAgent, copyAgent, type CustomAgent } from '@/api/agent'
+import { useChatResourcesStore } from '@/stores/chatResources'
 import { formatStringDate } from '@/utils/index'
 import { useI18n } from 'vue-i18n'
 import { createSessions } from '@/api/chat/index'
@@ -826,6 +830,11 @@ import { useSettingsStore } from '@/stores/settings'
 import { useMenuStore } from '@/stores/menu'
 import type { SharedAgentInfo, OrganizationSharedAgentItem } from '@/api/organization'
 import AgentEditorModal from './AgentEditorModal.vue'
+import ContextualGuide from '@/components/ContextualGuide.vue'
+import TenantModelsGuide from '@/components/TenantModelsGuide.vue'
+import { markContextualGuideDone } from '@/config/contextualGuides'
+import { useTenantModelReadiness } from '@/composables/useTenantModelReadiness'
+import { useUIStore } from '@/stores/ui'
 import AgentAvatar from '@/components/AgentAvatar.vue'
 import ListSpaceSidebar from '@/components/ListSpaceSidebar.vue'
 import ResourceOriginBadge from '@/components/ResourceOriginBadge.vue'
@@ -837,7 +846,10 @@ const { t } = useI18n()
 const route = useRoute()
 const router = useRouter()
 const authStore = useAuthStore()
+const uiStore = useUIStore()
 const orgStore = useOrganizationStore()
+const chatResources = useChatResourcesStore()
+const { loaded: modelsReadyLoaded, isReadyForAgent } = useTenantModelReadiness()
 
 interface AgentWithUI extends CustomAgent {
   showMore?: boolean
@@ -1074,21 +1086,37 @@ const editorInitialSection = ref<string>('basic')
 /** 当前打开三点菜单的卡片 agent.id（用于受控弹出层，避免 computed 项无持久引用导致菜单不响应） */
 const openMoreAgentId = ref<string | null>(null)
 
-const fetchList = () => {
+const showAgentListEmpty = computed(() => {
+  if (loading.value) return false
+  if (!authStore.hasRole('contributor')) return false
+  if (spaceSelection.value === 'all' && filteredAgents.value.length === 0) return true
+  if (spaceSelection.value === 'mine' && agents.value.length === 0) return true
+  return false
+})
+
+const showAgentTenantModelsGuide = computed(
+  () => modelsReadyLoaded.value && showAgentListEmpty.value && !isReadyForAgent.value,
+)
+
+const showAgentListContextualGuide = computed(
+  () => showAgentListEmpty.value && isReadyForAgent.value && !editorVisible.value,
+)
+
+const applyAgentListData = (res: { data: CustomAgent[]; disabled_own_agent_ids: string[] }) => {
+  const disabledOwnIds = res.disabled_own_agent_ids || []
+  agents.value = (res.data || []).map((agent: CustomAgent) => ({
+    ...agent,
+    showMore: false,
+    disabled_by_me: disabledOwnIds.includes(agent.id)
+  }))
+  checkAndOpenEditModal()
+}
+
+const fetchList = (force = false) => {
   loading.value = true
   return Promise.all([
-    listAgents({ creator: creatorFilter.value }).then((res: any) => {
-      const data = res.data || []
-      const disabledOwnIds = res.disabled_own_agent_ids || []
-      agents.value = data.map((agent: CustomAgent) => ({
-        ...agent,
-        showMore: false,
-        disabled_by_me: disabledOwnIds.includes(agent.id)
-      }))
-      checkAndOpenEditModal()
-    }),
-    orgStore.fetchSharedAgents(),
-    orgStore.fetchOrganizations()
+    chatResources.fetchAgentsForList({ creator: creatorFilter.value }, force).then(applyAgentListData),
+    orgStore.fetchOrganizations({ force }),
   ]).finally(() => { loading.value = false }).then(() => {
     // 各空间智能体数量已由 GET /organizations 的 resource_counts 带回，存于 orgStore.resourceCounts
     const counts = orgStore.resourceCounts?.agents?.by_organization
@@ -1158,7 +1186,7 @@ watch(spaceSelection, (val) => {
 // predicate uniformly (also keeps built-in agents always present, see
 // the matching block in custom_agent.go).
 watch(creatorFilter, () => {
-  fetchList()
+  fetchList(true)
 })
 
 onMounted(() => {
@@ -1399,7 +1427,7 @@ const handleCopy = (agent: AgentWithUI) => {
   copyAgent(agent.id).then((res: any) => {
     if (res.data) {
       MessagePlugin.success(t('agent.messages.copied'))
-      fetchList()
+      fetchList(true)
     } else {
       MessagePlugin.error(res.message || t('agent.messages.copyFailed'))
     }
@@ -1415,7 +1443,7 @@ const handleToggleDisabled = (agent: AgentWithUI) => {
   setSharedAgentDisabledByMe(agent.id, nextDisabled).then((res: any) => {
     if (res.success) {
       MessagePlugin.success(nextDisabled ? t('agent.messages.disabled') : t('agent.messages.enabled'))
-      fetchList()
+      fetchList(true)
     } else {
       MessagePlugin.error(res.message || t('agent.messages.saveFailed'))
     }
@@ -1432,7 +1460,7 @@ const handleToggleSharedDisabled = (agent: DisplayAgent) => {
   setSharedAgentDisabledByMe(agent.id, nextDisabled).then((res: any) => {
     if (res.success) {
       MessagePlugin.success(nextDisabled ? t('agent.messages.disabled') : t('agent.messages.enabled'))
-      orgStore.fetchSharedAgents()
+      orgStore.fetchSharedAgents({ force: true })
     } else {
       MessagePlugin.error(res.message || t('agent.messages.saveFailed'))
     }
@@ -1448,7 +1476,7 @@ const handleToggleSharedDisabledFromShared = (shared: SharedAgentInfo) => {
   setSharedAgentDisabledByMe(shared.agent.id, nextDisabled).then((res: any) => {
     if (res.success) {
       MessagePlugin.success(nextDisabled ? t('agent.messages.disabled') : t('agent.messages.enabled'))
-      orgStore.fetchSharedAgents()
+      orgStore.fetchSharedAgents({ force: true })
     } else {
       MessagePlugin.error(res.message || t('agent.messages.saveFailed'))
     }
@@ -1465,7 +1493,7 @@ const confirmDelete = () => {
       MessagePlugin.success(t('agent.messages.deleted'))
       deleteVisible.value = false
       deletingAgent.value = null
-      fetchList()
+      fetchList(true)
     } else {
       MessagePlugin.error(res.message || t('agent.messages.deleteFailed'))
     }
@@ -1477,7 +1505,7 @@ const confirmDelete = () => {
 const handleEditorSuccess = () => {
   editorVisible.value = false
   editingAgent.value = null
-  fetchList()
+  fetchList(true)
 }
 
 const formatDate = (dateStr: string) => {
@@ -1494,6 +1522,12 @@ const openCreateModal = () => {
 
 // 创建智能体
 const handleCreateAgent = () => {
+  if (!isReadyForAgent.value) {
+    MessagePlugin.warning(t('contextualGuide.tenantModels.needChatModelFirst'))
+    uiStore.openSettings('models')
+    return
+  }
+  markContextualGuideDone('agentList')
   openCreateModal()
 }
 

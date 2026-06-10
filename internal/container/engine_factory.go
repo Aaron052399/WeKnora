@@ -23,6 +23,7 @@ import (
 	elasticsearchRepoV7 "github.com/Tencent/WeKnora/internal/application/repository/retriever/elasticsearch/v7"
 	elasticsearchRepoV8 "github.com/Tencent/WeKnora/internal/application/repository/retriever/elasticsearch/v8"
 	milvusRepo "github.com/Tencent/WeKnora/internal/application/repository/retriever/milvus"
+	openSearchRepo "github.com/Tencent/WeKnora/internal/application/repository/retriever/opensearch"
 	postgresRepo "github.com/Tencent/WeKnora/internal/application/repository/retriever/postgres"
 	qdrantRepo "github.com/Tencent/WeKnora/internal/application/repository/retriever/qdrant"
 	sqliteRetrieverRepo "github.com/Tencent/WeKnora/internal/application/repository/retriever/sqlite"
@@ -35,21 +36,27 @@ import (
 	"github.com/tencent/vectordatabase-sdk-go/tcvectordb"
 )
 
-// NewEngineFactory returns an EngineFactory function closed over db and cfg.
-// Registered in dig and injected into VectorStoreService for dynamic registry updates.
-func NewEngineFactory(db *gorm.DB, cfg *config.Config) interfaces.EngineFactory {
+// NewEngineFactory returns an EngineFactory function closed over db, cfg, and
+// an audit sink (built from the AuditLogService). Registered in dig and
+// injected into VectorStoreService for dynamic registry updates. The
+// EngineFactory type itself is unchanged — the audit sink is captured in the
+// closure rather than added to the signature.
+func NewEngineFactory(db *gorm.DB, cfg *config.Config, auditSvc interfaces.AuditLogService) interfaces.EngineFactory {
+	sink := newAuditSinkAdapter(auditSvc)
 	return func(ctx context.Context, store types.VectorStore) (interfaces.RetrieveEngineService, error) {
-		return createEngineServiceFromStore(ctx, store, db, cfg)
+		return createEngineServiceFromStore(ctx, store, db, cfg, sink)
 	}
 }
 
 // createEngineServiceFromStore creates a RetrieveEngineService from a VectorStore's config.
 // This is the DB store counterpart of the env-based initialization in initRetrieveEngineRegistry.
+// auditSink may be nil (audit becomes a no-op).
 func createEngineServiceFromStore(
 	ctx context.Context,
 	store types.VectorStore,
 	db *gorm.DB,
 	cfg *config.Config,
+	auditSink openSearchRepo.AuditSink,
 ) (interfaces.RetrieveEngineService, error) {
 	switch store.EngineType {
 	case types.PostgresRetrieverEngineType:
@@ -68,9 +75,38 @@ func createEngineServiceFromStore(
 		return createSQLiteEngine(store, db)
 	case types.TencentVectorDBRetrieverEngineType:
 		return createTencentVectorDBEngine(store)
+	case types.OpenSearchRetrieverEngineType:
+		return createOpenSearchEngine(ctx, store, auditSink)
 	default:
 		return nil, fmt.Errorf("unsupported engine type: %s", store.EngineType)
 	}
+}
+
+// createOpenSearchEngine builds an OpenSearch k-NN retrieve engine. Mirrors
+// createElasticsearchV8Engine but uses the driver's TLS-hardened client
+// constructor and injects the audit sink. NewRepository probes the cluster
+// (version + k-NN plugin), so an unreachable cluster fails here at
+// registration rather than on first query.
+func createOpenSearchEngine(
+	ctx context.Context, store types.VectorStore, auditSink openSearchRepo.AuditSink,
+) (interfaces.RetrieveEngineService, error) {
+	client, err := openSearchRepo.NewOpenSearchClient(&store.ConnectionConfig)
+	if err != nil {
+		return nil, fmt.Errorf("create opensearch client: %w", err)
+	}
+	// Env stores share the cluster without a per-store index prefix; DB stores
+	// fold their (>=16-char) ID into the index name. NewRepository enforces the
+	// length rule, so map env-store IDs to "".
+	storeID := store.ID
+	if types.IsEnvStoreID(storeID) {
+		storeID = ""
+	}
+	repo, err := openSearchRepo.NewRepository(ctx, client, storeID, &store.IndexConfig,
+		openSearchRepo.WithAuditSink(auditSink))
+	if err != nil {
+		return nil, fmt.Errorf("create opensearch repository: %w", err)
+	}
+	return retriever.NewKVHybridRetrieveEngine(repo, types.OpenSearchRetrieverEngineType), nil
 }
 
 func createPostgresEngine(store types.VectorStore, db *gorm.DB) (interfaces.RetrieveEngineService, error) {
@@ -153,7 +189,16 @@ func createQdrantEngine(store types.VectorStore) (interfaces.RetrieveEngineServi
 }
 
 func createMilvusEngine(ctx context.Context, store types.VectorStore) (interfaces.RetrieveEngineService, error) {
-	cc := store.ConnectionConfig
+	milvusCfg := buildMilvusClientConfig(store.ConnectionConfig)
+	client, err := milvusclient.New(ctx, &milvusCfg)
+	if err != nil {
+		return nil, fmt.Errorf("create milvus client: %w", err)
+	}
+	repo := milvusRepo.NewMilvusRetrieveEngineRepository(client, &store.IndexConfig)
+	return retriever.NewKVHybridRetrieveEngine(repo, types.MilvusRetrieverEngineType), nil
+}
+
+func buildMilvusClientConfig(cc types.ConnectionConfig) milvusclient.ClientConfig {
 	addr := cc.Addr
 	if addr == "" {
 		addr = "localhost:19530"
@@ -169,15 +214,10 @@ func createMilvusEngine(ctx context.Context, store types.VectorStore) (interface
 	if cc.Password != "" {
 		milvusCfg.Password = cc.Password
 	}
-	// NOTE: Milvus DBName is not yet in ConnectionConfig.
-	// Phase 1 limitation — only the default database is used.
-
-	client, err := milvusclient.New(ctx, &milvusCfg)
-	if err != nil {
-		return nil, fmt.Errorf("create milvus client: %w", err)
+	if cc.Database != "" {
+		milvusCfg.DBName = cc.Database
 	}
-	repo := milvusRepo.NewMilvusRetrieveEngineRepository(client, &store.IndexConfig)
-	return retriever.NewKVHybridRetrieveEngine(repo, types.MilvusRetrieverEngineType), nil
+	return milvusCfg
 }
 
 func createWeaviateEngine(store types.VectorStore) (interfaces.RetrieveEngineService, error) {

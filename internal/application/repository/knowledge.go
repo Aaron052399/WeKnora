@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -21,8 +22,21 @@ func escapeLikeKeyword(keyword string) string {
 	return keyword
 }
 
-// omitFieldsOnUpdate defines fields to omit when updating knowledge
-var omitFieldsOnUpdate = []string{"DeletedAt"}
+// omitFieldsOnUpdate defines fields to omit when updating knowledge.
+//
+// PendingSubtasksCount is deliberately omitted from every full-row Save:
+// it is an orchestration counter owned exclusively by the atomic helpers
+// SetFinalizing (seed), FinalizeSubtask (decrement+promote) and the
+// explicit UpdateKnowledgeColumns resets (cancel/reparse). A generic
+// UpdateKnowledge call persists the WHOLE in-memory struct, so any
+// concurrent enrichment subtask that loaded the row, did slow work
+// (e.g. an LLM call), then saved an unrelated field would otherwise
+// write back the STALE counter it read at load time — clobbering the
+// decrements other subtasks performed in the meantime. That made the
+// counter jump back up and never reach zero (the "stuck
+// pending_subtasks_count / never promoted to completed" bug). Omitting
+// the column here means Save can never touch it.
+var omitFieldsOnUpdate = []string{"DeletedAt", "PendingSubtasksCount"}
 
 // knowledgeRepository implements knowledge base and knowledge repository interface
 type knowledgeRepository struct {
@@ -291,6 +305,121 @@ func (r *knowledgeRepository) UpdateKnowledgeColumn(
 ) error {
 	err := r.db.WithContext(ctx).Model(&types.Knowledge{}).Where("id = ?", id).Update(column, value).Error
 	return err
+}
+
+// UpdateKnowledgeColumns writes multiple columns in a single UPDATE so callers
+// that flip related fields together (parse_status + error_message after
+// dead-letter, for example) cannot leave the row half-updated when the second
+// write fails.
+func (r *knowledgeRepository) UpdateKnowledgeColumns(
+	ctx context.Context,
+	id string,
+	values map[string]interface{},
+) error {
+	if len(values) == 0 {
+		return nil
+	}
+	return r.db.WithContext(ctx).Model(&types.Knowledge{}).Where("id = ?", id).Updates(values).Error
+}
+
+// FinalizeSubtask atomically decrements pending_subtasks_count and, when
+// the counter reaches zero while parse_status is still 'finalizing',
+// flips the row to 'completed' in the same statement so concurrent
+// subtask completions can't race the promotion.
+//
+// Returns (newCount, promoted, error). promoted is true iff this caller
+// was the one whose UPDATE flipped 'finalizing'→'completed'.
+//
+// The implementation is two statements (atomic decrement, then a guarded
+// promote UPDATE) because GORM does not expose a portable RETURNING
+// across PostgreSQL and SQLite. The promote UPDATE's WHERE clause
+// (parse_status='finalizing' AND pending_subtasks_count=0) makes it
+// safe to run from any number of concurrent callers — at most one wins.
+func (r *knowledgeRepository) FinalizeSubtask(
+	ctx context.Context, id string,
+) (int, bool, error) {
+	now := time.Now()
+	// 1) Atomic decrement, clamped at zero. The `pending_subtasks_count > 0`
+	//    guard is purely a safety net for accounting bugs — under normal
+	//    operation each subtask handler decrements at most once per task,
+	//    so the counter cannot go negative.
+	res := r.db.WithContext(ctx).Model(&types.Knowledge{}).
+		Where("id = ? AND pending_subtasks_count > 0", id).
+		Updates(map[string]interface{}{
+			"pending_subtasks_count": gorm.Expr("pending_subtasks_count - 1"),
+			"updated_at":             now,
+		})
+	if res.Error != nil {
+		return 0, false, res.Error
+	}
+
+	// 2) Guarded promote. EVERY caller unconditionally attempts this after
+	//    decrementing — we must NOT gate it on a separate SELECT of the
+	//    counter. That read can be served by a lagging read-replica (or a
+	//    stale connection snapshot) and return a non-zero value even after
+	//    the counter has truly reached zero on the primary; if every caller
+	//    trusts that stale read, NONE of them runs the promote and the row
+	//    is stranded in `finalizing` forever (the observed "stuck
+	//    pending_subtasks_count" bug). The promote is a WRITE, so it executes
+	//    on the primary and its `pending_subtasks_count = 0` WHERE clause is
+	//    the single authoritative, atomic check on the live row: only the
+	//    caller whose decrement actually brought the counter to zero matches,
+	//    and cancel/delete cannot be clobbered by a late promote.
+	promoteRes := r.db.WithContext(ctx).Model(&types.Knowledge{}).
+		Where("id = ? AND parse_status = ? AND pending_subtasks_count = 0",
+			id, types.ParseStatusFinalizing).
+		Updates(map[string]interface{}{
+			"parse_status": types.ParseStatusCompleted,
+			"processed_at": now,
+			"updated_at":   now,
+		})
+	if promoteRes.Error != nil {
+		return 0, false, promoteRes.Error
+	}
+	promoted := promoteRes.RowsAffected > 0
+
+	// 3) Best-effort re-read of the new count for diagnostics/return value
+	//    only. This read may be replica-stale and is intentionally NOT used
+	//    to decide whether to promote (see above). A read failure here does
+	//    not affect correctness, so we don't propagate it as an error.
+	var snap struct {
+		PendingSubtasksCount int `gorm:"column:pending_subtasks_count"`
+	}
+	if err := r.db.WithContext(ctx).Model(&types.Knowledge{}).
+		Select("pending_subtasks_count").
+		Where("id = ?", id).Take(&snap).Error; err != nil {
+		return 0, promoted, nil
+	}
+	return snap.PendingSubtasksCount, promoted, nil
+}
+
+// SetFinalizing atomically transitions a row from 'processing' to
+// 'finalizing' and seeds pending_subtasks_count. Used by
+// KnowledgePostProcess.Handle as the single durable handoff between
+// the synchronous parse stage and the asynchronous enrichment fan-out.
+//
+// The transition is conditional on parse_status='processing' so a row
+// that the user cancelled / deleted between ProcessDocument finishing
+// and post-process starting will NOT get hijacked into finalizing.
+// Returns whether the transition happened.
+func (r *knowledgeRepository) SetFinalizing(
+	ctx context.Context, id string, expectedSubtasks int,
+) (bool, error) {
+	if expectedSubtasks < 0 {
+		expectedSubtasks = 0
+	}
+	now := time.Now()
+	res := r.db.WithContext(ctx).Model(&types.Knowledge{}).
+		Where("id = ? AND parse_status = ?", id, types.ParseStatusProcessing).
+		Updates(map[string]interface{}{
+			"parse_status":           types.ParseStatusFinalizing,
+			"pending_subtasks_count": expectedSubtasks,
+			"updated_at":             now,
+		})
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected > 0, nil
 }
 
 // CountKnowledgeByKnowledgeBaseID counts the number of knowledge items in a knowledge base

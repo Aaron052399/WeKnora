@@ -52,6 +52,12 @@ func NewCmdView(f *cmdutil.Factory) *cobra.Command {
 		},
 	}
 	cmdutil.AddFormatFlag(cmd, docViewFields...)
+	cmdutil.SetAgentHelp(cmd, cmdutil.AgentHelp{
+		UsedFor:       "fetch one document's metadata by id",
+		RequiredFlags: []string{"<doc-id> (positional)"},
+		Examples:      []string{"weknora doc view doc_abc", "weknora doc view doc_abc --jq .data.parse_status"},
+		Output:        "envelope.data is the document object (id, file_name, parse_status, ...)",
+	})
 	return cmd
 }
 
@@ -61,7 +67,7 @@ func runView(ctx context.Context, opts *ViewOptions, fopts *cmdutil.FormatOption
 		return cmdutil.WrapHTTP(err, "get document %q", id)
 	}
 	if fopts.WantsJSON() {
-		return fopts.Emit(iostreams.IO.Out, doc)
+		return fopts.Emit(iostreams.IO.Out, doc, nil)
 	}
 	w := iostreams.IO.Out
 	fmt.Fprintf(w, "ID:        %s\n", doc.ID)

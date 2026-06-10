@@ -35,22 +35,22 @@ const (
 type ModelSource string
 
 const (
-	ModelSourceLocal       ModelSource = "local"       // Local model
-	ModelSourceRemote      ModelSource = "remote"      // Remote model
-	ModelSourceAliyun      ModelSource = "aliyun"      // Aliyun DashScope model
-	ModelSourceZhipu       ModelSource = "zhipu"       // Zhipu model
-	ModelSourceVolcengine  ModelSource = "volcengine"  // Volcengine model
-	ModelSourceDeepseek    ModelSource = "deepseek"    // Deepseek model
-	ModelSourceHunyuan     ModelSource = "hunyuan"     // Hunyuan model
-	ModelSourceMinimax     ModelSource = "minimax"     // Minimax mode
-	ModelSourceOpenAI      ModelSource = "openai"      // OpenAI model
-	ModelSourceGemini      ModelSource = "gemini"      // Gemini model
-	ModelSourceMimo        ModelSource = "mimo"        // Mimo model
-	ModelSourceSiliconFlow ModelSource = "siliconflow" // SiliconFlow model
-	ModelSourceJina        ModelSource = "jina"        // Jina AI model
-	ModelSourceOpenRouter  ModelSource = "openrouter"  // OpenRouter model
-	ModelSourceNvidia      ModelSource = "nvidia"      // NVIDIA model
-	ModelSourceNovita      ModelSource = "novita"      // Novita AI model
+	ModelSourceLocal       ModelSource = "local"        // Local model
+	ModelSourceRemote      ModelSource = "remote"       // Remote model
+	ModelSourceAliyun      ModelSource = "aliyun"       // Aliyun DashScope model
+	ModelSourceZhipu       ModelSource = "zhipu"        // Zhipu model
+	ModelSourceVolcengine  ModelSource = "volcengine"   // Volcengine model
+	ModelSourceDeepseek    ModelSource = "deepseek"     // Deepseek model
+	ModelSourceHunyuan     ModelSource = "hunyuan"      // Hunyuan model
+	ModelSourceMinimax     ModelSource = "minimax"      // Minimax mode
+	ModelSourceOpenAI      ModelSource = "openai"       // OpenAI model
+	ModelSourceGemini      ModelSource = "gemini"       // Gemini model
+	ModelSourceMimo        ModelSource = "mimo"         // Mimo model
+	ModelSourceSiliconFlow ModelSource = "siliconflow"  // SiliconFlow model
+	ModelSourceJina        ModelSource = "jina"         // Jina AI model
+	ModelSourceOpenRouter  ModelSource = "openrouter"   // OpenRouter model
+	ModelSourceNvidia      ModelSource = "nvidia"       // NVIDIA model
+	ModelSourceNovita      ModelSource = "novita"       // Novita AI model
 	ModelSourceAzureOpenAI ModelSource = "azure_openai" // Azure OpenAI model
 )
 
@@ -65,9 +65,9 @@ type ModelParameters struct {
 	APIKey              string              `yaml:"api_key"              json:"api_key"`
 	InterfaceType       string              `yaml:"interface_type"       json:"interface_type"`
 	EmbeddingParameters EmbeddingParameters `yaml:"embedding_parameters" json:"embedding_parameters"`
-	ParameterSize       string              `yaml:"parameter_size"       json:"parameter_size"`  // Ollama model parameter size (e.g., "7B", "13B", "70B")
-	Provider            string              `yaml:"provider"             json:"provider"`        // Provider identifier: openai, aliyun, zhipu, generic
-	ExtraConfig         map[string]string   `yaml:"extra_config"         json:"extra_config"`    // Provider-specific configuration
+	ParameterSize       string              `yaml:"parameter_size"       json:"parameter_size"` // Ollama model parameter size (e.g., "7B", "13B", "70B")
+	Provider            string              `yaml:"provider"             json:"provider"`       // Provider identifier: openai, aliyun, zhipu, generic
+	ExtraConfig         map[string]string   `yaml:"extra_config"         json:"extra_config"`   // Provider-specific configuration
 	// CustomHeaders 允许在调用远程模型 API 时附加自定义 HTTP 请求头，
 	// 用途类似 Python OpenAI SDK 的 extra_headers 参数，
 	// 常见场景包括透传企业网关鉴权信息、追踪 ID、路由标识等。
@@ -85,14 +85,34 @@ type ModelParameters struct {
 // exist; a runtime mutator on the entity is both redundant and a footgun
 // (mutates an entity that other code may still be using).
 
+// ModelIDMaxLen is the upper bound on `models.id`. Matches the actual
+// schema width on both PostgreSQL (varchar(64) in migrations/versioned/
+// 000000_init.up.sql) and SQLite (varchar(64) in migrations/sqlite/
+// 000000_init.up.sql). Loaders that accept user-provided ids (e.g. the
+// built-in models YAML loader) must reject anything longer to avoid a
+// "value too long for type" failure at INSERT time.
+const ModelIDMaxLen = 64
+
+// DefaultBuiltinModelTenantID is the tenant id that built-in models are
+// assigned to when YAML does not specify one. Kept in sync with the seed
+// value of tenants_id_seq in migrations/versioned/000000_init.up.sql
+// (and the equivalent SQLite init); changing one without the other will
+// break visibility of built-in models for the default tenant.
+const DefaultBuiltinModelTenantID uint64 = 10000
+
 // Model represents the AI model
 type Model struct {
-	// Unique identifier of the model
-	ID string `yaml:"id"          json:"id"          gorm:"type:varchar(36);primaryKey"`
+	// Unique identifier of the model. The actual DB schema width is
+	// varchar(64) on both PostgreSQL and SQLite (see ModelIDMaxLen);
+	// GORM's struct tag is documented to match so AutoMigrate paths
+	// produce the same shape.
+	ID string `yaml:"id"          json:"id"          gorm:"type:varchar(64);primaryKey"`
 	// Tenant ID
 	TenantID uint64 `yaml:"tenant_id"   json:"tenant_id"`
 	// Name of the model
 	Name string `yaml:"name"        json:"name"`
+	// Optional user-facing display name. Runtime calls still use Name.
+	DisplayName string `yaml:"display_name" json:"display_name" gorm:"type:varchar(255);default:''"`
 	// Type of the model
 	Type ModelType `yaml:"type"        json:"type"`
 	// Source of the model
@@ -105,6 +125,14 @@ type Model struct {
 	IsDefault bool `yaml:"is_default"  json:"is_default"`
 	// Whether the model is a builtin model (visible to all tenants)
 	IsBuiltin bool `yaml:"is_builtin"  json:"is_builtin"  gorm:"default:false"`
+	// ManagedBy identifies which subsystem owns this row's lifecycle.
+	// Empty / "" = manually created (UI / API / hand-written SQL); the YAML
+	// builtin-models loader leaves these untouched.
+	// "yaml" = declared in config/builtin_models.yaml; on every startup the
+	// loader UPSERTs the YAML set and soft-deletes YAML-managed rows whose
+	// id is no longer present in the file. Future origins (e.g. "helm",
+	// "operator") can claim their own slice without interfering.
+	ManagedBy string `yaml:"managed_by"  json:"managed_by,omitempty"  gorm:"type:varchar(32);default:''"`
 	// Model status, default: active, possible: downloading, download_failed
 	Status ModelStatus `yaml:"status"      json:"status"`
 	// Creation time of the model
@@ -164,14 +192,13 @@ func (c *ModelParameters) Scan(value interface{}) error {
 	return nil
 }
 
-// BeforeCreate is a GORM hook that runs before creating a new model record
-// Automatically generates a UUID for new models
-// Parameters:
-//   - tx: GORM database transaction
-//
-// Returns:
-//   - error: Any error encountered during the hook execution
+// BeforeCreate is a GORM hook that runs before creating a new model record.
+// Generates a UUID only when the caller has not supplied an ID — preserves
+// stable IDs declared in built-in model YAML config while keeping the
+// existing UUID behaviour for API-driven model creation.
 func (m *Model) BeforeCreate(tx *gorm.DB) (err error) {
-	m.ID = uuid.New().String()
+	if m.ID == "" {
+		m.ID = uuid.New().String()
+	}
 	return nil
 }

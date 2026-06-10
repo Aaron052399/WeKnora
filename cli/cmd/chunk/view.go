@@ -35,7 +35,7 @@ type ViewOptions struct {
 
 const chunkViewLong = `Show a single chunk with all SDK fields.
 
-Human output is a key-value block; pass --format json for the bare 23-field SDK
+Text output is a key-value block; pass --format json for the bare 23-field SDK
 Chunk object. Content renders verbatim regardless of size — pipe to
 less or use --format json for large chunks. WeKnora chunks are typically bounded
 by the ingest pipeline (~1000 tokens / a few KB), so unconditional full
@@ -81,6 +81,12 @@ func NewCmdView(f *cmdutil.Factory) *cobra.Command {
 		},
 	}
 	cmdutil.AddFormatFlag(cmd, chunkViewFields...)
+	cmdutil.SetAgentHelp(cmd, cmdutil.AgentHelp{
+		UsedFor:       "fetch one chunk's fields and content by id (scope-less; no --doc needed)",
+		RequiredFlags: []string{"<chunk-id> (positional)"},
+		Examples:      []string{"weknora chunk view chunk_abc"},
+		Output:        "envelope.data is the chunk object (id, content, knowledge_id, ...)",
+	})
 	return cmd
 }
 
@@ -90,7 +96,7 @@ func runView(ctx context.Context, opts *ViewOptions, fopts *cmdutil.FormatOption
 		return cmdutil.WrapHTTP(err, "fetch chunk %s", opts.ChunkID)
 	}
 	if fopts.WantsJSON() {
-		return fopts.Emit(iostreams.IO.Out, ch)
+		return fopts.Emit(iostreams.IO.Out, ch, nil)
 	}
 	renderChunk(iostreams.IO.Out, ch)
 	return nil

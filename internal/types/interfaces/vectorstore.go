@@ -36,7 +36,15 @@ type VectorStoreService interface {
 	DeleteStore(ctx context.Context, tenantID uint64, id string) error
 	// TestConnection tests connectivity to a vector database.
 	// Returns the detected server version on success (e.g., "7.10.1"), empty string if unknown.
+	//
+	// Validation-free: intended for trusted configs (env stores, stored
+	// configs already validated at create time). Handlers receiving raw
+	// user input MUST use TestRawConnection instead.
 	TestConnection(ctx context.Context, engineType types.RetrieverEngineType, config types.ConnectionConfig) (string, error)
+	// TestRawConnection validates raw user-supplied connection config
+	// (engine-type allowlist, required fields, SSRF policy) and then delegates
+	// to TestConnection. This is the entry point for unpersisted user input.
+	TestRawConnection(ctx context.Context, engineType types.RetrieverEngineType, config types.ConnectionConfig) (string, error)
 	// SaveDetectedVersion updates the connection_config.version for a stored vector store.
 	SaveDetectedVersion(ctx context.Context, store *types.VectorStore, version string) error
 
@@ -57,6 +65,15 @@ type VectorStoreService interface {
 	// Intended for list endpoints that need store metadata for many KBs at
 	// once without incurring N+1 ResolveStoreView calls.
 	BatchResolveStoreView(ctx context.Context, tenantID uint64, storeIDs []string) (map[string]types.StoreDisplay, error)
+
+	// EnvDefaultStoreView returns the display payload for KBs that fall
+	// back to the env-configured store. Unlike DefaultStoreDisplay() in
+	// the types package, this method also fills the engine type
+	// (e.g. "postgres") so UIs can render the same badge shape for
+	// env-bound and user-bound KBs. Independent of ResolveStoreView so
+	// list paths can use it without violating the "no per-KB
+	// ResolveStoreView" invariant.
+	EnvDefaultStoreView(ctx context.Context) types.StoreDisplay
 }
 
 // VectorStoreRepository defines the repository interface for VectorStore CRUD.

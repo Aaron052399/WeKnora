@@ -128,7 +128,7 @@ func (f *fakeSvc) AgentQAStreamWithRequest(_ context.Context, sess string, req *
 	}
 	return f.agentStreamErr
 }
-func (f *fakeSvc) ListKnowledgeChunks(_ context.Context, docID string, page, pageSize int) ([]sdk.Chunk, int64, error) {
+func (f *fakeSvc) ListKnowledgeChunks(_ context.Context, docID string, page, pageSize int, _ ...string) ([]sdk.Chunk, int64, error) {
 	f.calls.chunkDocID = docID
 	f.calls.chunkPage = page
 	f.calls.chunkPageSize = pageSize
@@ -196,7 +196,7 @@ func TestTool_ListsRegistered(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTools: %v", err)
 	}
-	want := []string{"kb_list", "kb_view", "doc_list", "doc_view", "doc_download", "search_chunks", "chat", "agent_list", "agent_invoke", "chunk_list"}
+	want := []string{"kb_list", "kb_view", "doc_list", "doc_view", "doc_download", "search_chunks", "chat", "agent_list", "session_ask", "chunk_list"}
 	got := map[string]bool{}
 	for _, tool := range res.Tools {
 		got[tool.Name] = true
@@ -208,6 +208,29 @@ func TestTool_ListsRegistered(t *testing.T) {
 	}
 	if len(res.Tools) != len(want) {
 		t.Errorf("registered %d tools, want exactly %d (no scope creep)", len(res.Tools), len(want))
+	}
+}
+
+// TestTool_SessionAsk_NotAgentInvoke asserts the MCP rename landed: the
+// registered set must contain "session_ask" and must NOT contain the
+// stale "agent_invoke" name (clean break, no deprecation alias).
+func TestTool_SessionAsk_NotAgentInvoke(t *testing.T) {
+	c, _ := newTestServer(t, &fakeSvc{})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	res, err := c.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+	names := map[string]bool{}
+	for _, tool := range res.Tools {
+		names[tool.Name] = true
+	}
+	if !names["session_ask"] {
+		t.Error("expected tool 'session_ask' to be registered")
+	}
+	if names["agent_invoke"] {
+		t.Error("stale tool 'agent_invoke' must NOT be registered (clean break, no alias)")
 	}
 }
 
@@ -448,7 +471,7 @@ func TestMCP_ChatToolReturnsThinking(t *testing.T) {
 	}
 }
 
-func TestMCP_AgentInvokeToolReturnsToolCalls(t *testing.T) {
+func TestMCP_SessionAskToolReturnsToolCalls(t *testing.T) {
 	svc := &fakeSvc{
 		agentEvents: []*sdk.AgentStreamResponse{
 			{ResponseType: sdk.AgentResponseTypeThinking, Content: "agent thinks"},
@@ -458,8 +481,8 @@ func TestMCP_AgentInvokeToolReturnsToolCalls(t *testing.T) {
 		},
 	}
 	c, _ := newTestServer(t, svc)
-	var out agentInvokeOutput
-	callTool(t, c, "agent_invoke", map[string]any{"agent_id": "ag1", "query": "tool question"}, &out)
+	var out sessionAskOutput
+	callTool(t, c, "session_ask", map[string]any{"agent_id": "ag1", "query": "tool question"}, &out)
 	if out.Thinking != "agent thinks" {
 		t.Errorf("thinking = %q, want %q", out.Thinking, "agent thinks")
 	}
@@ -495,7 +518,7 @@ func TestTool_AgentList(t *testing.T) {
 	}
 }
 
-func TestTool_AgentInvoke(t *testing.T) {
+func TestTool_SessionAsk(t *testing.T) {
 	svc := &fakeSvc{
 		agentEvents: []*sdk.AgentStreamResponse{
 			{ResponseType: sdk.AgentResponseTypeAnswer, Content: "result"},
@@ -504,8 +527,8 @@ func TestTool_AgentInvoke(t *testing.T) {
 		},
 	}
 	c, _ := newTestServer(t, svc)
-	var out agentInvokeOutput
-	callTool(t, c, "agent_invoke", map[string]any{"agent_id": "ag1", "query": "x"}, &out)
+	var out sessionAskOutput
+	callTool(t, c, "session_ask", map[string]any{"agent_id": "ag1", "query": "x"}, &out)
 	if out.Answer != "result" {
 		t.Errorf("answer = %q", out.Answer)
 	}
@@ -517,7 +540,7 @@ func TestTool_AgentInvoke(t *testing.T) {
 	}
 }
 
-func TestTool_AgentInvoke_StreamAbort(t *testing.T) {
+func TestTool_SessionAsk_StreamAbort(t *testing.T) {
 	svc := &fakeSvc{
 		agentEvents:    []*sdk.AgentStreamResponse{{ResponseType: sdk.AgentResponseTypeAnswer, Content: "partial"}},
 		agentStreamErr: errors.New("connection reset"),
@@ -525,7 +548,7 @@ func TestTool_AgentInvoke_StreamAbort(t *testing.T) {
 	c, _ := newTestServer(t, svc)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	res, err := c.CallTool(ctx, &mcpsdk.CallToolParams{Name: "agent_invoke", Arguments: map[string]any{"agent_id": "ag1", "query": "x"}})
+	res, err := c.CallTool(ctx, &mcpsdk.CallToolParams{Name: "session_ask", Arguments: map[string]any{"agent_id": "ag1", "query": "x"}})
 	if err != nil {
 		t.Fatalf("unexpected transport error: %v", err)
 	}
@@ -583,4 +606,74 @@ func TestTool_ChunkList_NonNumericLimit(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.True(t, res.IsError, "expected IsError=true when limit is a string")
+}
+
+// derefBool is the test-side counterpart to bptr: ToolAnnotations uses
+// *bool for DestructiveHint/OpenWorldHint to distinguish "unset" from
+// "false", but assertions here treat unset as false (a nil pointer means
+// the field was omitted from the JSON wire envelope, which clients should
+// read as the documented default).
+func derefBool(p *bool) bool {
+	if p == nil {
+		return false
+	}
+	return *p
+}
+
+// TestToolAnnotations_AllToolsHaveExpectedHints locks the per-tool hint
+// table. Each of the 10 registered tools must surface the exact
+// DestructiveHint / ReadOnlyHint / IdempotentHint / OpenWorldHint + Title
+// values shown below. This guards against silent drift during future
+// refactors (e.g. someone marking chat as readOnly, or an invoke tool as
+// closed-world).
+//
+// Note on plain-bool fields: ReadOnlyHint and IdempotentHint are bool
+// (not *bool) with `omitempty`. For invoke-class tools that explicitly set
+// them to false in the builder, the JSON envelope omits the field and the
+// client-side decode surfaces the zero value (false), which matches the
+// table.
+func TestToolAnnotations_AllToolsHaveExpectedHints(t *testing.T) {
+	expected := map[string]struct {
+		destructive bool
+		readOnly    bool
+		idempotent  bool
+		openWorld   bool
+		title       string
+	}{
+		"kb_list":       {destructive: false, readOnly: true, idempotent: true, openWorld: false, title: "List Knowledge Bases"},
+		"kb_view":       {destructive: false, readOnly: true, idempotent: true, openWorld: false, title: "View Knowledge Base"},
+		"doc_list":      {destructive: false, readOnly: true, idempotent: true, openWorld: false, title: "List Documents"},
+		"doc_view":      {destructive: false, readOnly: true, idempotent: true, openWorld: false, title: "View Document"},
+		"doc_download":  {destructive: false, readOnly: true, idempotent: true, openWorld: false, title: "Download Document"},
+		"search_chunks": {destructive: false, readOnly: true, idempotent: true, openWorld: false, title: "Search Knowledge Chunks"},
+		"chat":          {destructive: false, readOnly: false, idempotent: false, openWorld: true, title: "Chat with KB (Streaming RAG)"},
+		"agent_list":    {destructive: false, readOnly: true, idempotent: true, openWorld: false, title: "List Custom Agents"},
+		"session_ask":   {destructive: false, readOnly: false, idempotent: false, openWorld: true, title: "Ask a Custom Agent (session ask --agent)"},
+		"chunk_list":    {destructive: false, readOnly: true, idempotent: true, openWorld: false, title: "List Knowledge Chunks"},
+	}
+
+	c, _ := newTestServer(t, &fakeSvc{})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	res, err := c.ListTools(ctx, nil)
+	require.NoError(t, err, "ListTools must succeed")
+
+	got := map[string]*mcpsdk.Tool{}
+	for _, tool := range res.Tools {
+		got[tool.Name] = tool
+	}
+
+	for name, want := range expected {
+		t.Run(name, func(t *testing.T) {
+			tool, ok := got[name]
+			require.True(t, ok, "tool %q not registered", name)
+			require.NotNil(t, tool.Annotations, "tool %q must set Annotations", name)
+			a := tool.Annotations
+			assert.Equal(t, want.title, a.Title, "Title")
+			assert.Equal(t, want.destructive, derefBool(a.DestructiveHint), "DestructiveHint")
+			assert.Equal(t, want.readOnly, a.ReadOnlyHint, "ReadOnlyHint")
+			assert.Equal(t, want.idempotent, a.IdempotentHint, "IdempotentHint")
+			assert.Equal(t, want.openWorld, derefBool(a.OpenWorldHint), "OpenWorldHint")
+		})
+	}
 }

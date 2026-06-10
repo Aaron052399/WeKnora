@@ -50,6 +50,7 @@ help:
 	@echo ""
 	@echo "开发模式（推荐）:"
 	@echo "  dev-start         启动开发环境基础设施（仅启动依赖服务）"
+	@echo "                    可选: make dev-start DEV_ARGS=--odl-hybrid"
 	@echo "  dev-stop          停止开发环境"
 	@echo "  dev-restart       重启开发环境"
 	@echo "  dev-logs          查看开发环境日志"
@@ -123,7 +124,12 @@ docker-build-frontend:
 docker-build-all: docker-build-app docker-build-docreader docker-build-frontend
 
 # Run Docker container (传统方式)
+# Touch .env if missing — docker-compose.yml's `env_file: [.env]` is required
+# for ${ENV} interpolation in builtin_models.yaml and would otherwise refuse
+# to parse on fresh clones. `start-all` handles this via check_env_file; this
+# direct path needs its own guard.
 docker-run:
+	@[ -f .env ] || ([ -f .env.example ] && cp .env.example .env || touch .env)
 	docker-compose up
 
 # 使用新脚本启动所有服务
@@ -164,6 +170,7 @@ clean-images:
 
 # Restart Docker container (stop, start)
 docker-restart:
+	@[ -f .env ] || ([ -f .env.example ] && cp .env.example .env || touch .env)
 	docker-compose stop -t 60
 	docker-compose up
 
@@ -304,7 +311,7 @@ show-platform:
 
 # Development mode commands
 dev-start:
-	./scripts/dev.sh start
+	./scripts/dev.sh start $(DEV_ARGS)
 
 dev-stop:
 	./scripts/dev.sh stop

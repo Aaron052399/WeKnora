@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/application/service/retriever"
@@ -105,6 +107,7 @@ func (s *knowledgeBaseService) CreateKnowledgeBase(ctx context.Context,
 		kb.CreatorID = uid
 	}
 	kb.EnsureDefaults()
+	applyTenantDefaultStorageProvider(ctx, kb)
 
 	// Fold empty-string vector_store_id into nil so this path and the
 	// retrieve-engine factory's pre-condition share a single representation.
@@ -134,6 +137,23 @@ func (s *knowledgeBaseService) CreateKnowledgeBase(ctx context.Context,
 
 	logger.Infof(ctx, "Knowledge base created successfully, ID: %s, name: %s", kb.ID, kb.Name)
 	return kb, nil
+}
+
+// applyTenantDefaultStorageProvider fills an empty KB storage provider from the
+// tenant's global default (Settings → Storage engine). Frontend should send the
+// same value; this keeps API clients and legacy UIs consistent.
+func applyTenantDefaultStorageProvider(ctx context.Context, kb *types.KnowledgeBase) {
+	if kb == nil || strings.TrimSpace(kb.GetStorageProvider()) != "" {
+		return
+	}
+	tenant, _ := ctx.Value(types.TenantInfoContextKey).(*types.Tenant)
+	provider := "local"
+	if tenant != nil && tenant.StorageEngineConfig != nil {
+		if p := strings.ToLower(strings.TrimSpace(tenant.StorageEngineConfig.DefaultProvider)); p != "" {
+			provider = p
+		}
+	}
+	kb.SetStorageProvider(provider)
 }
 
 // validateVectorStoreBinding routes through retriever.VerifyBinding so the
@@ -901,6 +921,25 @@ func (s *knowledgeBaseService) CopyKnowledgeBase(ctx context.Context,
 			return nil, nil, apperrors.NewBadRequestError(
 				"source and target knowledge bases are bound to different vector stores; " +
 					"cross-store cloning is not yet supported")
+		}
+
+		// Defense 3: storage backend must match — only meaningful when the
+		// tenant has a StorageEngineConfig. Without it, resolveFileService
+		// ignores per-KB provider pins and routes ALL KBs to the global
+		// storage service, so a clone can never span two real backends and
+		// the pins must NOT be used to reject (that would be a false positive).
+		// When a tenant config exists, pins are honored, so compare effective
+		// providers and reject a genuine cross-backend clone up front (it would
+		// otherwise fail mid-clone with ErrCrossBackendCopy).
+		if tenant, _ := ctx.Value(types.TenantInfoContextKey).(*types.Tenant); tenant != nil && tenant.StorageEngineConfig != nil {
+			tenantDefault := tenant.StorageEngineConfig.DefaultProvider
+			srcProvider := sourceKB.EffectiveStorageProvider(tenantDefault)
+			dstProvider := targetKB.EffectiveStorageProvider(tenantDefault)
+			if srcProvider != "" && dstProvider != "" && srcProvider != dstProvider {
+				return nil, nil, apperrors.NewBadRequestError(fmt.Sprintf(
+					"source and target knowledge bases use different storage backends (%s vs %s); "+
+						"cross-storage-backend cloning is not supported", srcProvider, dstProvider))
+			}
 		}
 	} else {
 		var faqConfig *types.FAQConfig

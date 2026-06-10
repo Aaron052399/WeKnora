@@ -5,6 +5,7 @@ services:
       context: ./frontend
       args:
         - MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-50}
+        - COMMIT_ID_ARG=${COMMIT_ID:-unknown}
     container_name: WeKnora-frontend
     ports:
       - "${FRONTEND_PORT:-80}:80"
@@ -41,12 +42,28 @@ services:
       - ./config/config.yaml:/app/config/config.yaml
       # Optional: mount custom skills directory (allows adding skills without rebuilding image)
       - ./skills/preloaded:/app/skills/preloaded
+      # Optional: declarative built-in models. Copy config/builtin_models.yaml.example
+      # to config/builtin_models.yaml, edit it for your deployment, then
+      # uncomment the line below. See docs/BUILTIN_MODELS.md.
+      # - ./config/builtin_models.yaml:/app/config/builtin_models.yaml:ro
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 60s
+    # Source .env so deployment-specific variables (e.g. those referenced by
+    # config/builtin_models.yaml via ${ENV}, or any future feature) reach the
+    # app container without having to be enumerated under `environment:`.
+    #
+    # NOTE: the array form below is used instead of the map form
+    # (env_file: - path: .env, required: false) because the map syntax
+    # requires Docker Compose v2.24+ (Jan 2024) and would break parsing on
+    # older deploys. The trade-off is that Compose errors out if .env is
+    # absent — see scripts/start_all.sh for the pre-flight touch that keeps
+    # fresh clones working.
+    env_file:
+      - .env
     environment:
       - LOG_LEVEL=${LOG_LEVEL:-}
       - COS_SECRET_ID=${COS_SECRET_ID:-}
@@ -66,12 +83,6 @@ services:
       - DB_NAME=${DB_NAME:-}
       - TZ=${TZ:-Asia/Shanghai}
       - WEKNORA_LANGUAGE=${WEKNORA_LANGUAGE:-zh-CN}
-      - OTEL_EXPORTER_OTLP_ENDPOINT=jaeger:4317
-      - OTEL_SERVICE_NAME=WeKnora
-      - OTEL_TRACES_EXPORTER=otlp
-      - OTEL_METRICS_EXPORTER=none
-      - OTEL_LOGS_EXPORTER=none
-      - OTEL_PROPAGATORS=tracecontext,baggage
       # ========== Langfuse (optional observability) ==========
       # Enabled automatically when LANGFUSE_PUBLIC_KEY + LANGFUSE_SECRET_KEY are set.
       # See docs/Langfuse集成.md for the full list of tuning knobs.
@@ -152,9 +163,15 @@ services:
       - SSRF_WHITELIST=${SSRF_WHITELIST:-}
       # 保留原始 URL 的图片域名白名单（逗号分隔，不替换为 provider://）
       - IMAGE_HOST_KEEP_URL=${IMAGE_HOST_KEEP_URL:-}
-      # Always allow the optional searxng sidecar (compose service hostname);
-      # merged on top of SSRF_WHITELIST so user overrides don't clobber it.
-      - SSRF_WHITELIST_EXTRA=${SSRF_WHITELIST_EXTRA:-searxng}
+      # Always allow the optional searxng sidecar and the bundled vector-store
+      # service hostnames (compose service names). Vector-store create/test now
+      # runs SSRF validation on user-supplied addresses, which would otherwise
+      # reject these private docker-network hosts; whitelisting them keeps the
+      # out-of-box experience. Merged on top of SSRF_WHITELIST so user
+      # overrides don't clobber it. (postgres is intentionally NOT listed: it
+      # is not a user-registerable vector store, and whitelisting the app's own
+      # DB host would skip the 5432 port block.)
+      - SSRF_WHITELIST_EXTRA=${SSRF_WHITELIST_EXTRA:-searxng,qdrant,milvus,weaviate,doris-fe}
       - CONCURRENCY_POOL_SIZE=${CONCURRENCY_POOL_SIZE:-5}
       - JWT_SECRET=${JWT_SECRET:-}
       # Crypto: 主密钥和盐值，用于 AppSecret 等敏感字段的 AES-256 加密
@@ -177,7 +194,9 @@ services:
       #   >0 强制限额；=0 走 handler 默认；<0 关闭限额（不建议共享部署使用）
       - WEKNORA_TENANT_ENABLE_RBAC=${WEKNORA_TENANT_ENABLE_RBAC:-}
       - WEKNORA_TENANT_MAX_OWNED_PER_USER=${WEKNORA_TENANT_MAX_OWNED_PER_USER:-}
+      - WEKNORA_ASYNQ_CONCURRENCY=${WEKNORA_ASYNQ_CONCURRENCY:-32}
       - APK_MIRROR_ARG=${APK_MIRROR_ARG:-}
+      - WEKNORA_BOOTSTRAP_SYSTEM_ADMIN_EMAIL=${WEKNORA_BOOTSTRAP_SYSTEM_ADMIN_EMAIL:-}
     depends_on:
       redis:
         condition: service_started
@@ -224,6 +243,12 @@ services:
     environment:
       - DOCREADER_IMAGE_OUTPUT_DIR=/tmp/docreader
       - MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-}
+      - DOCREADER_ODL_MAX_WORKERS=${DOCREADER_ODL_MAX_WORKERS:-1}
+      - DOCREADER_ODL_HYBRID=${DOCREADER_ODL_HYBRID:-off}
+      - DOCREADER_ODL_HYBRID_URL=${DOCREADER_ODL_HYBRID_URL:-http://odl-hybrid:5002}
+      - DOCREADER_ODL_HYBRID_MODE=${DOCREADER_ODL_HYBRID_MODE:-auto}
+      - DOCREADER_ODL_HYBRID_FALLBACK=${DOCREADER_ODL_HYBRID_FALLBACK:-false}
+      - DOCREADER_ODL_MARKDOWN_WITH_HTML=${DOCREADER_ODL_MARKDOWN_WITH_HTML:-false}
       - DOCREADER_MARKITDOWN_MAX_WORKERS=${DOCREADER_MARKITDOWN_MAX_WORKERS:-1}
       - DOCREADER_PDF_RENDER_MAX_WORKERS=${DOCREADER_PDF_RENDER_MAX_WORKERS:-1}
       - DOCREADER_PDF_RENDER_DPI=${DOCREADER_PDF_RENDER_DPI:-200}
@@ -233,13 +258,6 @@ services:
       - GRPC_TLS_KEY=${GRPC_TLS_KEY:-}
       - GRPC_TLS_CA=${GRPC_TLS_CA:-}
       - GRPC_AUTH_TOKEN=${GRPC_AUTH_TOKEN:-}
-      - OBS_ENDPOINT=${OBS_ENDPOINT:-}
-      - OBS_REGION=${OBS_REGION:-}
-      - OBS_ACCESS_KEY=${OBS_ACCESS_KEY:-}
-      - OBS_SECRET_KEY=${OBS_SECRET_KEY:-}
-      - OBS_BUCKET_NAME=${OBS_BUCKET_NAME:-}
-      - OBS_PATH_PREFIX=${OBS_PATH_PREFIX:-}
-      - OBS_PROXY_DOMAIN=${OBS_PROXY_DOMAIN:-}
     healthcheck:
       test: ["CMD", "grpc_health_probe", "-addr=localhost:50051"]
       interval: 30s
@@ -251,6 +269,24 @@ services:
     restart: unless-stopped
     extra_hosts:
       - "host.docker.internal:host-gateway"
+
+  # OpenDataLoader hybrid backend (optional). Default --no-ocr (no EasyOCR/libGL).
+  # Local build only — not published to Docker Hub; use --profile odl-hybrid --build.
+  odl-hybrid:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.odl-hybrid
+    image: weknora-odl-hybrid:local
+    container_name: WeKnora-odl-hybrid
+    profiles:
+      - odl-hybrid
+    expose:
+      - "5002"
+    environment:
+      - ODL_HYBRID_EXTRA_ARGS=${ODL_HYBRID_EXTRA_ARGS:---no-ocr}
+    networks:
+      - WeKnora-network
+    restart: unless-stopped
 
   # 修改的PostgreSQL配置
   postgres:
@@ -355,31 +391,6 @@ services:
       - WeKnora-network
     profiles:
       - minio
-      - full
-
-  jaeger:
-    image: jaegertracing/all-in-one:1.76.0
-    container_name: WeKnora-jaeger
-    ports:
-      - "6831:6831/udp" # Jaeger Thrift接收器
-      - "6832:6832/udp" # Jaeger Thrift接收器(Compact)
-      - "5778:5778" # 配置端口
-      - "16686:16686" # Web UI
-      - "4317:4317" # OTLP gRPC接收器
-      - "4318:4318" # OTLP HTTP接收器
-      - "14250:14250" # 接收模型端口
-      - "14268:14268" # Jaeger HTTP接收器
-      - "9411:9411" # Zipkin兼容性端口
-    environment:
-      - COLLECTOR_OTLP_ENABLED=true
-      - COLLECTOR_ZIPKIN_HOST_PORT=:9411
-    volumes:
-      - jaeger_data:/var/lib/jaeger # 持久化 Jaeger 数据
-    networks:
-      - WeKnora-network
-    restart: unless-stopped
-    profiles:
-      - jaeger
       - full
 
   neo4j:
@@ -755,6 +766,24 @@ services:
       - langfuse
       - full
 
+  mcp:
+    build:
+      context: ./mcp-server
+    container_name: WeKnora-mcp
+    ports:
+      - "${MCP_PORT:-8082}:8000"
+    environment:
+      - WEKNORA_BASE_URL=http://app:8080/api/v1
+      - WEKNORA_API_KEY=${WEKNORA_API_KEY:-}
+    depends_on:
+      app:
+        condition: service_healthy
+    networks:
+      - WeKnora-network
+    restart: unless-stopped
+    profiles:
+      - full
+
 networks:
   WeKnora-network:
     driver: bridge
@@ -763,7 +792,6 @@ volumes:
   postgres-data:
   data-files:
   docreader-tmp:
-  jaeger_data:
   minio_data:
   neo4j-data:
   qdrant_data:

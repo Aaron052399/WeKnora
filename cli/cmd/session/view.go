@@ -78,8 +78,14 @@ Pass --full to also load the chat history (LoadMessages SDK call). Use
 		},
 	}
 	cmd.Flags().BoolVar(&opts.Full, "full", false, "Also load chat history via LoadMessages")
-	cmd.Flags().IntVar(&opts.Limit, "limit", defaultFullLimit, "Max messages to load when --full is set (1..1000)")
+	cmd.Flags().IntVarP(&opts.Limit, "limit", "L", defaultFullLimit, "Max messages to load when --full is set (1..1000)")
 	cmdutil.AddFormatFlag(cmd, sessionViewFields...)
+	cmdutil.SetAgentHelp(cmd, cmdutil.AgentHelp{
+		UsedFor:       "fetch one chat session by id; --full also loads its message history",
+		RequiredFlags: []string{"<session-id> (positional)"},
+		Examples:      []string{"weknora session view sess_abc", "weknora session view sess_abc --full --limit 50"},
+		Output:        "envelope.data is the session object; with --full it also carries the loaded messages",
+	})
 	return cmd
 }
 
@@ -117,7 +123,7 @@ func runView(ctx context.Context, opts *ViewOptions, fopts *cmdutil.FormatOption
 
 	if fopts.WantsJSON() {
 		if !opts.Full {
-			return fopts.Emit(iostreams.IO.Out, s)
+			return fopts.Emit(iostreams.IO.Out, s, nil)
 		}
 		// Project session + messages into a single bare object. Use the
 		// SDK json tags via an embedded *Session so existing keys stay
@@ -126,7 +132,7 @@ func runView(ctx context.Context, opts *ViewOptions, fopts *cmdutil.FormatOption
 			*sdk.Session
 			Messages []sdk.Message `json:"messages"`
 		}{Session: s, Messages: msgs}
-		return fopts.Emit(iostreams.IO.Out, payload)
+		return fopts.Emit(iostreams.IO.Out, payload, nil)
 	}
 
 	w := iostreams.IO.Out

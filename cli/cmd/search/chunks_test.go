@@ -2,8 +2,8 @@ package search
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -27,7 +27,7 @@ func (f *fakeChunksSvc) HybridSearch(_ context.Context, kbID string, p *sdk.Sear
 	return f.results, f.err
 }
 
-func TestRunSearch_HumanOutput(t *testing.T) {
+func TestRunSearch_TextOutput(t *testing.T) {
 	out, _ := iostreams.SetForTest(t)
 	svc := &fakeChunksSvc{results: []*sdk.SearchResult{
 		{Score: 0.92, Content: "first chunk", KnowledgeID: "doc-1", MatchType: sdk.MatchTypeVector},
@@ -46,7 +46,7 @@ func TestRunSearch_HumanOutput(t *testing.T) {
 
 // JSON output must surface match_type so machine consumers / agents can
 // reason about retrieval channels without re-implementing the wire format.
-// (Human renderer keeps default minimal - diagnostic info opt-in via --format json.)
+// (Text renderer keeps default minimal - diagnostic info opt-in via --format json.)
 func TestRunSearch_JSONIncludesMatchType(t *testing.T) {
 	out, _ := iostreams.SetForTest(t)
 	svc := &fakeChunksSvc{results: []*sdk.SearchResult{
@@ -62,8 +62,12 @@ func TestRunSearch_JSONOutput(t *testing.T) {
 	opts := &ChunksOptions{Query: "q", KBID: "kb1", Limit: 1}
 	require.NoError(t, runChunks(context.Background(), opts, &cmdutil.FormatOptions{Mode: cmdutil.FormatJSON}, svc))
 	got := out.String()
-	assert.True(t, strings.HasPrefix(strings.TrimSpace(got), "["), "expected bare JSON array, got: %q", got)
-	assert.NotContains(t, got, `"ok":`)
+	var env struct {
+		OK   bool                `json:"ok"`
+		Data []*sdk.SearchResult `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(got), &env), "expected valid JSON envelope, got: %q", got)
+	assert.True(t, env.OK, "envelope.ok must be true")
 	assert.Contains(t, got, `"score":0.9`)
 }
 
@@ -131,6 +135,55 @@ func TestRunSearch_NilService(t *testing.T) {
 	err := runChunks(context.Background(), &ChunksOptions{Query: "q", KBID: "kb1"}, &cmdutil.FormatOptions{Mode: cmdutil.FormatText}, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "server.error")
+}
+
+// TestNewCmdChunks_NoKBUsesResolver asserts that `search chunks "<query>"`
+// without --kb no longer fails with cobra's `required flag(s) "kb"`. The
+// command now resolves the KB through the shared flag→env→project-link chain
+// (cmdutil.Factory.ResolveKB), matching `doc list` / `chat`; when nothing
+// resolves it reports the typed local.kb_id_required (exit 1), not a cobra
+// usage error. This is the inverse of the old lock test, which deliberately
+// blocked the link fallback for this read path — the asymmetry with `doc
+// list` was not worth keeping (a non-destructive search is the same risk
+// profile as a list). The destructive `doc delete --all` keeps its explicit
+// --kb rule; that safety guard is unrelated to this path.
+func TestNewCmdChunks_NoKBUsesResolver(t *testing.T) {
+	iostreams.SetForTest(t)
+	t.Setenv("WEKNORA_KB_ID", "") // no ambient KB from env
+	t.Chdir(t.TempDir())          // no .weknora project link discoverable
+	cmd := NewCmdChunks(&cmdutil.Factory{
+		// Resolution reaches local.kb_id_required before any client is built,
+		// so this must never be invoked; make it loud if it is.
+		Client: func() (*sdk.Client, error) { return nil, errors.New("client should not be built") },
+	})
+	cmd.SetArgs([]string{"some query"}) // query but no --kb
+	cmd.SilenceErrors = true
+	cmd.SilenceUsage = true
+	err := cmd.Execute()
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), `required flag(s) "kb"`)
+	typed := cmdutil.AsError(err)
+	require.NotNil(t, typed)
+	assert.Equal(t, cmdutil.CodeKBIDRequired, typed.Code)
+}
+
+// TestNewCmdChunks_HonorsKBEnv proves the env fallback is wired: with
+// WEKNORA_KB_ID set and no --kb, KB resolution succeeds (no kb-required
+// error) and the command proceeds to the client step — which here errors,
+// confirming we got past resolution using the env value alone.
+func TestNewCmdChunks_HonorsKBEnv(t *testing.T) {
+	iostreams.SetForTest(t)
+	t.Setenv("WEKNORA_KB_ID", "kb_from_env")
+	cmd := NewCmdChunks(&cmdutil.Factory{
+		Client: func() (*sdk.Client, error) { return nil, errors.New("client boom") },
+	})
+	cmd.SetArgs([]string{"some query"}) // no --kb; env supplies it
+	cmd.SilenceErrors = true
+	cmd.SilenceUsage = true
+	err := cmd.Execute()
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "kb is required")
+	assert.Contains(t, err.Error(), "client boom")
 }
 
 func TestNewCmdChunks_RequiresQuery(t *testing.T) {

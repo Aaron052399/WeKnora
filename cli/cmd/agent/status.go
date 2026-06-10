@@ -65,6 +65,12 @@ For downstream KB reachability verification use 'weknora agent check <id>'
 		},
 	}
 	cmdutil.AddFormatFlag(cmd, agentStatusFields...)
+	cmdutil.SetAgentHelp(cmd, cmdutil.AgentHelp{
+		UsedFor:       "shallow health probe of a custom agent: reachability without kb_scope verification",
+		RequiredFlags: []string{"<agent-id> (positional)"},
+		Examples:      []string{"weknora agent status agent_abc"},
+		Output:        "envelope.data is {id, reachable, ...}; use `agent check` for deep kb_scope verification",
+	})
 	return cmd
 }
 
@@ -87,7 +93,7 @@ func runAgentStatus(ctx context.Context, svc AgentStatusService, id string) (*Ag
 func emitAgentStatus(res *AgentStatusResult, fopts *cmdutil.FormatOptions, w io.Writer) error {
 	switch fopts.Mode {
 	case cmdutil.FormatJSON, cmdutil.FormatNDJSON:
-		return fopts.Emit(w, res)
+		return fopts.Emit(w, res, nil)
 	case cmdutil.FormatText, "":
 		return writeAgentStatusText(w, res)
 	default:

@@ -8,6 +8,7 @@ export interface ModelConfig {
   id?: string;
   tenant_id?: number;
   name: string;
+  display_name?: string;
   type: 'KnowledgeQA' | 'Embedding' | 'Rerank' | 'VLLM' | 'ASR';
   source: 'local' | 'remote';
   description?: string;
@@ -79,7 +80,9 @@ export function listModels(type?: string): Promise<ModelConfig[]> {
       })
       .catch((error: any) => {
         console.error('Failed to list models:', error);
-        resolve([]);
+        // 抛出而非吞掉：调用方（含缓存层）才能区分「真失败」与「成功但无模型」，
+        // 避免把一次瞬时失败的空结果缓存下来。各 UI 调用点均已 try/catch 兜底。
+        reject(error);
       });
   });
 }
@@ -211,4 +214,3 @@ export function getWeKnoraCloudStatus(): Promise<WeKnoraCloudStatusResult> {
       })
   })
 }
-

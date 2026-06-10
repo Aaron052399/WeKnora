@@ -11,6 +11,7 @@ import (
 
 	"github.com/Tencent/WeKnora/cli/internal/cmdutil"
 	"github.com/Tencent/WeKnora/cli/internal/iostreams"
+	"github.com/Tencent/WeKnora/cli/internal/output"
 	"github.com/Tencent/WeKnora/cli/internal/text"
 	sdk "github.com/Tencent/WeKnora/client"
 )
@@ -45,8 +46,8 @@ type DocsSearchOptions struct {
 	// network can shorten the batch.
 	PageSize int
 	// AllPages walks server pages internally until total exhausted or
-	// --limit accumulated. Default true preserves v0.4 behavior; setting
-	// false stops after the first page (useful for cheap previews).
+	// --limit accumulated. Default true; setting false stops after the
+	// first page (useful for cheap previews).
 	AllPages bool
 }
 
@@ -78,8 +79,7 @@ matching, lower-case the query yourself, e.g.
 fall back to ` + "`weknora api`" + ` with a custom filter.
 
 By default, --all-pages=true walks every server page until --limit is
-reached or the KB is exhausted (matching v0.4 behavior). Pass
---all-pages=false to stop after one page.`,
+reached or the KB is exhausted. Pass --all-pages=false to stop after one page.`,
 		Example: `  weknora search docs "Q3 forecast" --kb finance
   weknora search docs "spec" --kb engineering --limit 5
   weknora search docs "spec" --kb engineering --all-pages=false`,
@@ -97,24 +97,34 @@ reached or the KB is exhausted (matching v0.4 behavior). Pass
 				return err
 			}
 			fopts.ResolveDefault(iostreams.IO.IsStdoutTTY())
-			cli, err := f.Client()
-			if err != nil {
-				return err
-			}
-			kbID, err := cmdutil.ResolveKBFlag(c.Context(), cli, opts.KB)
+			// Resolve KB via the shared flag→env→project-link chain (same as
+			// `doc list` / `chat`), so a linked directory or WEKNORA_KB_ID
+			// works without an explicit --kb. Resolve before building the
+			// client so an unresolved KB short-circuits to local.kb_id_required
+			// without a client round-trip.
+			kbID, err := f.ResolveKB(c)
 			if err != nil {
 				return err
 			}
 			opts.KBID = kbID
+			cli, err := f.Client()
+			if err != nil {
+				return err
+			}
 			return runDocsSearch(c.Context(), opts, fopts, cli)
 		},
 	}
-	cmd.Flags().StringVar(&opts.KB, "kb", "", "Knowledge base UUID or name (required)")
+	cmd.Flags().StringVar(&opts.KB, "kb", "", "Knowledge base UUID or name (overrides env / project link)")
 	cmd.Flags().IntVarP(&opts.Limit, "limit", "L", 30, "Maximum results to return")
 	cmd.Flags().IntVar(&opts.PageSize, "page-size", docsPageSize, "Items per server batch (1..1000)")
 	cmd.Flags().BoolVar(&opts.AllPages, "all-pages", true, "Walk every server page until exhausted or --limit hit")
 	cmdutil.AddFormatFlag(cmd, docsFields...)
-	_ = cmd.MarkFlagRequired("kb")
+	cmdutil.SetAgentHelp(cmd, cmdutil.AgentHelp{
+		UsedFor:       "Find documents in a knowledge base by keyword (server-side LIKE filter on title/file_name). The KB comes from --kb (id or name), else WEKNORA_KB_ID, else the linked directory. Results come with meta.count; use --limit to cap and --all-pages=false to stop after one page.",
+		RequiredFlags: []string{"<query> (positional)", "--kb (or WEKNORA_KB_ID / linked directory)"},
+		Examples:      []string{`weknora search docs "spec" --kb engineering --format json`},
+		Output:        "envelope.data is an array of Knowledge objects with id, title, file_name, parse_status; meta.count is the returned count; meta.has_more=true if more matched than --limit",
+	})
 	return cmd
 }
 
@@ -139,7 +149,8 @@ func runDocsSearch(ctx context.Context, opts *DocsSearchOptions, fopts *cmdutil.
 		}
 		for _, k := range items {
 			matches = append(matches, k)
-			if opts.Limit > 0 && len(matches) >= opts.Limit {
+			// Collect one past --limit so has_more is accurate; trimmed below.
+			if opts.Limit > 0 && len(matches) > opts.Limit {
 				goto done
 			}
 		}
@@ -152,12 +163,17 @@ func runDocsSearch(ctx context.Context, opts *DocsSearchOptions, fopts *cmdutil.
 	}
 done:
 	sortKnowledgeByRecency(matches)
+	truncated := opts.Limit > 0 && len(matches) > opts.Limit
+	if truncated {
+		matches = matches[:opts.Limit]
+	}
 
 	if fopts.WantsJSON() {
 		if matches == nil {
 			matches = []sdk.Knowledge{}
 		}
-		return fopts.Emit(iostreams.IO.Out, matches)
+		meta := &output.Meta{Count: len(matches), HasMore: truncated}
+		return fopts.Emit(iostreams.IO.Out, matches, meta)
 	}
 	if len(matches) == 0 {
 		fmt.Fprintln(iostreams.IO.Out, "(no matches)")

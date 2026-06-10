@@ -10,6 +10,7 @@ import (
 
 	"github.com/Tencent/WeKnora/cli/internal/cmdutil"
 	"github.com/Tencent/WeKnora/cli/internal/iostreams"
+	"github.com/Tencent/WeKnora/cli/internal/output"
 	"github.com/Tencent/WeKnora/cli/internal/text"
 	sdk "github.com/Tencent/WeKnora/client"
 )
@@ -35,7 +36,7 @@ var chunkListFields = []string{
 
 // ListService is the narrow SDK surface this command depends on.
 type ListService interface {
-	ListKnowledgeChunks(ctx context.Context, knowledgeID string, page, pageSize int) ([]sdk.Chunk, int64, error)
+	ListKnowledgeChunks(ctx context.Context, knowledgeID string, page, pageSize int, chunkTypes ...string) ([]sdk.Chunk, int64, error)
 }
 
 type ListOptions struct {
@@ -103,6 +104,12 @@ func NewCmdList(f *cmdutil.Factory) *cobra.Command {
 	cmd.Flags().IntVar(&opts.PageSize, "page-size", defaultPageSize, "Items per server batch (1..1000)")
 	cmd.Flags().BoolVar(&opts.AllPages, "all-pages", false, "Walk all server pages until exhausted (or --limit hit)")
 	cmdutil.AddFormatFlag(cmd, chunkListFields...)
+	cmdutil.SetAgentHelp(cmd, cmdutil.AgentHelp{
+		UsedFor:       "List chunks of a specific document in stored order (admin/debug). Results come with meta.count; use --limit (1..1000) and --all-pages to paginate. Prefer 'search chunks' for RAG retrieval.",
+		RequiredFlags: []string{"--doc"},
+		Examples:      []string{"weknora chunk list --doc doc_abc --format json", "weknora chunk list --doc doc_abc --all-pages --format json"},
+		Output:        "envelope.data is an array of Chunk objects with id, chunk_index, content, is_enabled; meta.count is the total returned",
+	})
 	return cmd
 }
 
@@ -121,6 +128,7 @@ func runList(ctx context.Context, opts *ListOptions, fopts *cmdutil.FormatOption
 	}
 
 	var items []sdk.Chunk
+	truncated := false
 	if opts.AllPages {
 		accum := make([]sdk.Chunk, 0)
 		for page := 1; ; page++ {
@@ -131,6 +139,7 @@ func runList(ctx context.Context, opts *ListOptions, fopts *cmdutil.FormatOption
 			accum = append(accum, chunks...)
 			if len(accum) >= opts.Limit {
 				accum = accum[:opts.Limit]
+				truncated = true
 				break
 			}
 			if len(chunks) == 0 || int64(len(accum)) >= total {
@@ -150,10 +159,12 @@ func runList(ctx context.Context, opts *ListOptions, fopts *cmdutil.FormatOption
 	}
 	if len(items) > opts.Limit {
 		items = items[:opts.Limit]
+		truncated = true
 	}
 
 	if fopts.WantsJSON() {
-		return fopts.Emit(iostreams.IO.Out, items)
+		meta := &output.Meta{Count: len(items), HasMore: truncated}
+		return fopts.Emit(iostreams.IO.Out, items, meta)
 	}
 
 	if len(items) == 0 {

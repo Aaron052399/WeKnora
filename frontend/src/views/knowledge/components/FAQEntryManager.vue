@@ -10,10 +10,13 @@
                 {{ $t('menu.knowledgeBase') }}
               </button>
               <t-icon name="chevron-right" class="breadcrumb-separator" />
-              <t-dropdown v-if="knowledgeDropdownOptions.length" :options="knowledgeDropdownOptions" trigger="click"
-                placement="bottom-left" @click="handleKnowledgeDropdownSelect">
-                <button type="button" class="breadcrumb-link dropdown" :disabled="!props.kbId"
-                  @click.stop="handleNavigateToCurrentKB">
+              <KBSwitcherDropdown
+                v-if="knowledgeList.length"
+                :kb-list="knowledgeList"
+                :current-kb-id="props.kbId"
+                @select="(id) => handleKnowledgeDropdownSelect({ value: id })"
+              >
+                <button type="button" class="breadcrumb-link dropdown" :disabled="!props.kbId">
                   <template v-if="!kbInfo">
                     <t-skeleton animation="gradient" :row-col="[{ width: '120px', height: '20px' }]" />
                   </template>
@@ -22,7 +25,7 @@
                     <t-icon name="chevron-down" />
                   </template>
                 </button>
-              </t-dropdown>
+              </KBSwitcherDropdown>
               <button v-else type="button" class="breadcrumb-link" :disabled="!props.kbId"
                 @click="handleNavigateToCurrentKB">
                 <template v-if="!kbInfo">
@@ -35,39 +38,19 @@
               <t-icon name="chevron-right" class="breadcrumb-separator" />
               <span class="breadcrumb-current">{{ $t('knowledgeEditor.faq.title') }}</span>
             </h2>
-            <!-- 身份与最后更新：紧凑单行，置于标题行右侧，悬停显示权限说明 -->
-            <div v-if="kbInfo && !authStore.isLiteMode" class="faq-access-meta">
-              <t-tooltip :content="accessPermissionSummary" placement="top">
-                <span class="faq-access-meta-inner">
-                  <t-tag size="small"
-                    :theme="(!isViaShare && isOwner) ? 'success' : (effectiveKBPermission === 'admin' ? 'primary' : effectiveKBPermission === 'editor' ? 'warning' : 'default')"
-                    class="faq-access-role-tag">
-                    {{ accessRoleLabel }}
-                  </t-tag>
-                  <template v-if="currentSharedKb">
-                    <span class="faq-access-meta-sep">·</span>
-                    <span class="faq-access-meta-text">
-                      {{ $t('knowledgeBase.accessInfo.fromOrg') }}「{{ currentSharedKb.org_name }}」
-                      {{ $t('knowledgeBase.accessInfo.sharedAt') }} {{ formatImportTime(currentSharedKb.shared_at) }}
-                    </span>
-                  </template>
-                  <template v-else-if="effectiveKBPermission">
-                    <span class="faq-access-meta-sep">·</span>
-                    <span class="faq-access-meta-text">{{ $t('knowledgeList.detail.sourceTypeAgent') }}</span>
-                  </template>
-                  <template v-else-if="kbLastUpdated">
-                    <span class="faq-access-meta-sep">·</span>
-                    <span class="faq-access-meta-text">{{ $t('knowledgeBase.accessInfo.lastUpdated') }} {{ kbLastUpdated
-                    }}</span>
-                  </template>
-                </span>
+            <!-- 标题行右侧的动作锚点：与文档详情页保持一致的「信息 + 设置」两个圆形按钮。
+                 FAQ 类型知识库不传 supportedFileTypes，可上传格式行会自动隐藏。 -->
+            <div class="kb-title-actions">
+              <KBInfoPopover
+                v-if="kbInfo && !authStore.isLiteMode"
+                :kb-info="kbInfo"
+              />
+              <t-tooltip v-if="canManage" :content="$t('knowledgeBase.settings')" placement="top">
+                <button type="button" class="kb-settings-button" @click="handleOpenKBSettings">
+                  <t-icon name="setting" size="16px" />
+                </button>
               </t-tooltip>
             </div>
-            <t-tooltip v-if="canManage" :content="$t('knowledgeBase.settings')" placement="top">
-              <button type="button" class="kb-settings-button" @click="handleOpenKBSettings">
-                <t-icon name="setting" size="16px" />
-              </button>
-            </t-tooltip>
           </div>
           <p class="faq-subtitle">{{ $t('knowledgeEditor.faq.subtitle') }}</p>
         </div>
@@ -201,7 +184,8 @@
                   <div class="tag-edit-input">
                     <t-input ref="newTagInputRef" v-model="newTagName" size="small" :maxlength="40"
                       :placeholder="$t('knowledgeBase.tagNamePlaceholder')"
-                      @keydown.enter.stop.prevent="submitCreateTag" @keydown.esc.stop.prevent="cancelCreateTag" />
+                      @enter="submitCreateTag"
+                      @keydown="(_v, ctx) => { if (ctx?.e?.key === 'Escape') { ctx.e.stopPropagation(); ctx.e.preventDefault(); cancelCreateTag() } }" />
                   </div>
                 </div>
                 <div class="tag-inline-actions">
@@ -225,8 +209,8 @@
                     <template v-if="editingTagId === tag.id">
                       <div class="tag-edit-input" @click.stop>
                         <t-input :ref="setEditingTagInputRefByTag(tag.id)" v-model="editingTagName" size="small"
-                          :maxlength="40" @keydown.enter.stop.prevent="submitEditTag"
-                          @keydown.esc.stop.prevent="cancelEditTag" />
+                          :maxlength="40" @enter="submitEditTag"
+                          @keydown="(_v, ctx) => { if (ctx?.e?.key === 'Escape') { ctx.e.stopPropagation(); ctx.e.preventDefault(); cancelEditTag() } }" />
                       </div>
                     </template>
                     <template v-else>
@@ -285,7 +269,7 @@
           <!-- 搜索栏与管理 FAQ -->
           <div class="faq-search-bar">
             <t-input v-model.trim="entrySearchKeyword" :placeholder="$t('knowledgeEditor.faq.searchPlaceholder')"
-              clearable class="faq-search-input" @clear="loadEntries()" @keydown.enter="loadEntries()">
+              clearable class="faq-search-input" @clear="loadEntries()" @enter="loadEntries()">
               <template #prefix-icon>
                 <t-icon name="search" size="16px" />
               </template>
@@ -546,7 +530,7 @@
               <div class="setting-control">
                 <div class="full-width-input-wrapper">
                   <t-input v-model="similarInput" :placeholder="$t('knowledgeEditor.faq.similarPlaceholder')"
-                    @keydown.enter.prevent="addSimilar" class="full-width-input" />
+                    @enter="addSimilar" class="full-width-input" />
                   <t-button theme="primary" variant="outline"
                     :disabled="!similarInput.trim() || editorForm.similar_questions.length >= 10" @click="addSimilar"
                     class="add-item-btn" size="small">
@@ -574,7 +558,7 @@
               <div class="setting-control">
                 <div class="full-width-input-wrapper">
                   <t-input v-model="negativeInput" :placeholder="$t('knowledgeEditor.faq.negativePlaceholder')"
-                    @keydown.enter.prevent="addNegative" class="full-width-input" />
+                    @enter="addNegative" class="full-width-input" />
                   <t-button theme="primary" variant="outline"
                     :disabled="!negativeInput.trim() || editorForm.negative_questions.length >= 10" @click="addNegative"
                     class="add-item-btn" size="small">
@@ -823,7 +807,7 @@
               </div>
               <div class="setting-control">
                 <t-input v-model="searchForm.query" :placeholder="$t('knowledgeEditor.faq.queryPlaceholder')"
-                  @keydown.enter.prevent="handleSearch" class="full-width-input" />
+                  @enter="handleSearch" class="full-width-input" />
               </div>
             </div>
 
@@ -963,6 +947,8 @@ import {
 import * as XLSX from 'xlsx'
 import Papa from 'papaparse'
 import FAQTagTooltip from '@/components/FAQTagTooltip.vue'
+import KBInfoPopover from '@/components/KBInfoPopover.vue'
+import KBSwitcherDropdown from '@/components/KBSwitcherDropdown.vue'
 import { useUIStore } from '@/stores/ui'
 
 interface FAQEntry {
@@ -1059,36 +1045,6 @@ const canManage = computed(() => {
   if (isOwner.value) return true
   if (authStore.hasRole('admin')) return true
   return orgStore.canManageKB(props.kbId, false)
-})
-
-// Effective permission: from direct org share list or from GET /knowledge-bases/:id (e.g. agent-visible KB)
-const effectiveKBPermission = computed(() => orgStore.getKBPermission(props.kbId) || kbInfo.value?.my_permission || '')
-
-// Display role label: when accessed via share, surface the share role even
-// if the user happens to be the original creator — the active context is
-// "viewing through a shared space" and write actions will 403 regardless.
-const accessRoleLabel = computed(() => {
-  if (!isViaShare.value && isOwner.value) return t('knowledgeBase.accessInfo.roleOwner')
-  const perm = effectiveKBPermission.value
-  if (perm) return t(`organization.role.${perm}`)
-  return '--'
-})
-
-// Permission summary text for current role (mirrors accessRoleLabel rule).
-const accessPermissionSummary = computed(() => {
-  if (!isViaShare.value && isOwner.value) return t('knowledgeBase.accessInfo.permissionOwner')
-  const perm = effectiveKBPermission.value
-  if (perm === 'admin') return t('knowledgeBase.accessInfo.permissionAdmin')
-  if (perm === 'editor') return t('knowledgeBase.accessInfo.permissionEditor')
-  if (perm === 'viewer') return t('knowledgeBase.accessInfo.permissionViewer')
-  return '--'
-})
-
-// Last updated time from kbInfo
-const kbLastUpdated = computed(() => {
-  const raw = kbInfo.value?.updated_at
-  if (!raw) return null
-  return formatImportTime(raw)
 })
 
 // FAQ 操作：新建组（新建条目 + 导入）
@@ -1199,14 +1155,6 @@ const filteredTags = computed(() => {
 
 const kbInfo = ref<any>(null)
 const knowledgeList = ref<Array<{ id: string; name: string; type?: string }>>([])
-const knowledgeDropdownOptions = computed(() =>
-  knowledgeList.value
-    .map((item) => ({
-      content: item.name,
-      value: item.id,
-      prefixIcon: () => h(TIcon, { name: item.type === 'document' ? 'folder' : 'chat-bubble-help', size: '16px' }),
-    })),
-)
 
 const loadKnowledgeInfo = async (kbId: string) => {
   if (!kbId) {
@@ -1325,7 +1273,7 @@ const searchForm = reactive({
 const handleTagListScroll = () => {
   const container = tagListRef.value
   if (!container) return
-  if (tagLoadingMore.value || !tagHasMore.value) return
+  if (tagLoading.value || tagLoadingMore.value || !tagHasMore.value) return
 
   const { scrollTop, scrollHeight, clientHeight } = container
   // 距离底部 50px 时触发加载
@@ -1348,6 +1296,8 @@ const loadTags = async (reset = false) => {
     tagList.value = []
     tagTotal.value = 0
     tagHasMore.value = false
+  } else if (tagLoading.value || tagLoadingMore.value) {
+    return
   }
 
   const currentPage = tagPage.value || 1
@@ -1447,7 +1397,7 @@ const submitCreateTag = async () => {
     await createKnowledgeBaseTag(props.kbId, { name })
     MessagePlugin.success(t('knowledgeBase.tagCreateSuccess'))
     cancelCreateTag()
-    await loadTags()
+    await loadTags(true)
   } catch (error: any) {
     MessagePlugin.error(error?.message || t('common.operationFailed'))
   } finally {
@@ -1489,7 +1439,7 @@ const submitEditTag = async () => {
     await updateKnowledgeBaseTag(props.kbId, editingTagId.value, { name })
     MessagePlugin.success(t('knowledgeBase.tagEditSuccess'))
     cancelEditTag()
-    await loadTags()
+    await loadTags(true)
   } catch (error: any) {
     MessagePlugin.error(error?.message || t('common.operationFailed'))
   } finally {
@@ -1522,7 +1472,7 @@ const confirmDeleteTag = (tag: any) => {
           selectedTagId.value = 0
           handleTagFilterChange(0)
         }
-        await loadTags()
+        await loadTags(true)
         await loadEntries()
         confirmDialog.hide()
       } catch (error: any) {
@@ -1544,7 +1494,7 @@ const handleEntryTagChange = async (entryId: number, value?: string) => {
     await updateFAQEntryTagBatch(props.kbId, { updates: { [entryId]: normalizedValue } })
     MessagePlugin.success(t('knowledgeEditor.messages.updateSuccess'))
     await loadEntries()
-    await loadTags()
+    await loadTags(true)
   } catch (error: any) {
     if (targetEntry) {
       targetEntry.tag_id = previousTagId
@@ -1938,7 +1888,7 @@ const handleBatchTag = async () => {
     batchTagDialogVisible.value = false
     selectedRowKeys.value = []
     await loadEntries()
-    await loadTags()
+    await loadTags(true)
   } catch (error: any) {
     MessagePlugin.error(error?.message || t('common.operationFailed'))
   }
@@ -2229,7 +2179,7 @@ const startPolling = (taskId: string) => {
         if (processed > lastProcessed) {
           lastProcessed = processed
           await loadEntries()
-          await loadTags()
+          await loadTags(true)
         }
 
         // 任务完成或失败，停止轮询（但不自动关闭进度条，让用户手动关闭）
@@ -2246,7 +2196,7 @@ const startPolling = (taskId: string) => {
             entrySearchKeyword.value = ''
             overallFAQTotal.value = 0  // Reset to trigger re-fetch
             await loadEntries()
-            await loadTags()
+            await loadTags(true)
             await loadImportResult() // 加载最新的导入结果统计
             // 任务完成后，3秒后自动关闭进度条
             setTimeout(() => {
@@ -3535,30 +3485,12 @@ watch(() => entries.value.map(e => ({
     flex-wrap: wrap;
   }
 
-  .faq-access-meta {
-    flex-shrink: 0;
-  }
-
-  .faq-access-meta-inner {
+  .kb-title-actions {
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    font-size: 12px;
-    color: var(--td-text-color-secondary);
-    cursor: default;
-  }
-
-  .faq-access-role-tag {
     flex-shrink: 0;
-  }
-
-  .faq-access-meta-sep {
-    color: var(--td-text-color-placeholder);
-    user-select: none;
-  }
-
-  .faq-access-meta-text {
-    white-space: nowrap;
+    margin-left: 4px;
   }
 
   .faq-breadcrumb {

@@ -22,6 +22,7 @@ type KnowledgeService interface {
 		customFileName string,
 		tagID string,
 		channel string,
+		processOverrides *types.KnowledgeProcessOverrides,
 	) (*types.Knowledge, error)
 	// CreateKnowledgeFromURL creates knowledge from a URL.
 	// When fileName or fileType is provided (or the URL path has a known file extension),
@@ -37,6 +38,7 @@ type KnowledgeService interface {
 		title string,
 		tagID string,
 		channel string,
+		processOverrides *types.KnowledgeProcessOverrides,
 	) (*types.Knowledge, error)
 	// CreateKnowledgeFromPassage creates knowledge from text passages.
 	// channel identifies the ingestion channel; empty defaults to "web".
@@ -94,7 +96,21 @@ type KnowledgeService interface {
 		payload *types.ManualKnowledgePayload,
 	) (*types.Knowledge, error)
 	// ReparseKnowledge deletes existing document content and re-parses the knowledge asynchronously.
-	ReparseKnowledge(ctx context.Context, knowledgeID string) (*types.Knowledge, error)
+	// When processOverrides is non-nil, it is validated and persisted to the knowledge metadata
+	// before re-parsing, letting callers adjust parse config on reparse; nil keeps stored overrides.
+	ReparseKnowledge(
+		ctx context.Context,
+		knowledgeID string,
+		processOverrides *types.KnowledgeProcessOverrides,
+	) (*types.Knowledge, error)
+	// CancelKnowledgeParse marks an in-progress parse as cancelled by the
+	// user. The knowledge row and any partially written chunks/index are
+	// kept; downstream queued tasks for the same knowledge are best-effort
+	// dequeued and active workers are signalled to stop at their next
+	// checkpoint. Idempotent — returns the existing row when the knowledge
+	// is already cancelled. Returns an error when the knowledge is in a
+	// terminal state (completed / failed) or being deleted.
+	CancelKnowledgeParse(ctx context.Context, knowledgeID string) (*types.Knowledge, error)
 	// CloneKnowledgeBase clones knowledge to another knowledge base.
 	CloneKnowledgeBase(ctx context.Context, srcID, dstID string) error
 	// UpdateImageInfo updates image information for a knowledge chunk.
@@ -210,6 +226,21 @@ type KnowledgeRepository interface {
 	// AminusB returns the difference set of A and B.
 	AminusB(ctx context.Context, Atenant uint64, A string, Btenant uint64, B string) ([]string, error)
 	UpdateKnowledgeColumn(ctx context.Context, id string, column string, value interface{}) error
+	// UpdateKnowledgeColumns updates multiple columns of a knowledge row in a single
+	// statement so callers that flip several related fields (e.g. parse_status +
+	// error_message) cannot leave the row in a half-updated state.
+	UpdateKnowledgeColumns(ctx context.Context, id string, values map[string]interface{}) error
+	// FinalizeSubtask atomically decrements pending_subtasks_count for the
+	// given knowledge and promotes parse_status from "finalizing" to
+	// "completed" when the count reaches zero. Returns the post-decrement
+	// count, whether this caller's UPDATE was the one that promoted the
+	// row, and any error.
+	FinalizeSubtask(ctx context.Context, id string) (int, bool, error)
+	// SetFinalizing atomically transitions a row from "processing" to
+	// "finalizing" and writes the initial pending_subtasks_count. Returns
+	// whether the transition took place (false when the row's parse_status
+	// was no longer "processing", e.g. user cancelled / deleted in flight).
+	SetFinalizing(ctx context.Context, id string, expectedSubtasks int) (bool, error)
 	// CountKnowledgeByKnowledgeBaseID counts the number of knowledge items in a knowledge base.
 	CountKnowledgeByKnowledgeBaseID(ctx context.Context, tenantID uint64, kbID string) (int64, error)
 	// CountKnowledgeByStatus counts the number of knowledge items with the specified parse status.

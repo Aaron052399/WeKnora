@@ -11,6 +11,7 @@ import (
 
 	"github.com/Tencent/WeKnora/cli/internal/cmdutil"
 	"github.com/Tencent/WeKnora/cli/internal/iostreams"
+	"github.com/Tencent/WeKnora/cli/internal/output"
 	"github.com/Tencent/WeKnora/cli/internal/text"
 	sdk "github.com/Tencent/WeKnora/client"
 )
@@ -57,8 +58,13 @@ func NewCmdList(f *cmdutil.Factory) *cobra.Command {
 			return runList(c.Context(), opts, fopts, cli)
 		},
 	}
-	cmd.Flags().IntVarP(&opts.Limit, "limit", "L", 30, "Maximum results to return (0 = no cap, 1..10000 = explicit)")
+	cmd.Flags().IntVarP(&opts.Limit, "limit", "L", 30, "Maximum results to return (1..10000)")
 	cmdutil.AddFormatFlag(cmd, agentListFields...)
+	cmdutil.SetAgentHelp(cmd, cmdutil.AgentHelp{
+		UsedFor:  "List custom agents visible to the active tenant. The SDK returns all agents in one call (no server-side pagination); meta.count reflects the full tenant set, --limit caps client-side.",
+		Examples: []string{"weknora agent list --format json", "weknora agent list --limit 10 --format json"},
+		Output:   "envelope.data is an array of Agent objects with id, name, is_builtin; meta.count is the total returned",
+	})
 	return cmd
 }
 
@@ -66,10 +72,10 @@ func runList(ctx context.Context, opts *ListOptions, fopts *cmdutil.FormatOption
 	if opts == nil {
 		opts = &ListOptions{}
 	}
-	if opts.Limit < 0 || opts.Limit > 10000 {
+	if opts.Limit < 1 || opts.Limit > 10000 {
 		return &cmdutil.Error{
 			Code:    cmdutil.CodeInputInvalidArgument,
-			Message: fmt.Sprintf("--limit must be in 0..10000 (0 = no cap), got %d", opts.Limit),
+			Message: fmt.Sprintf("--limit must be in 1..10000, got %d", opts.Limit),
 		}
 	}
 	items, err := svc.ListAgents(ctx)
@@ -85,12 +91,16 @@ func runList(ctx context.Context, opts *ListOptions, fopts *cmdutil.FormatOption
 		return items[i].UpdatedAt.After(items[j].UpdatedAt)
 	})
 	// --limit applies after sort so the cap returns the top-N most-recent.
+	// The agent list SDK is unpaginated, so client-side truncation does not
+	// imply server-side has_more — there is no cursor to continue with.
+	// has_more is omitted; callers needing all agents should raise --limit.
 	if opts.Limit > 0 && len(items) > opts.Limit {
 		items = items[:opts.Limit]
 	}
 
 	if fopts.WantsJSON() {
-		return fopts.Emit(iostreams.IO.Out, items)
+		meta := &output.Meta{Count: len(items)}
+		return fopts.Emit(iostreams.IO.Out, items, meta)
 	}
 
 	if len(items) == 0 {

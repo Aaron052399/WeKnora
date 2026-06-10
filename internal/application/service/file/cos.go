@@ -123,7 +123,10 @@ func (s *cosFileService) SaveFile(ctx context.Context,
 
 // GetFile retrieves a file from COS storage by its path URL
 func (s *cosFileService) GetFile(ctx context.Context, filePathUrl string) (io.ReadCloser, error) {
-	objectName := s.parseCosObjectName(filePathUrl)
+	objectName, err := s.parseCosObjectName(filePathUrl)
+	if err != nil {
+		return nil, err
+	}
 	if err := utils.SafeObjectKey(objectName); err != nil {
 		return nil, fmt.Errorf("invalid file path: %w", err)
 	}
@@ -136,11 +139,14 @@ func (s *cosFileService) GetFile(ctx context.Context, filePathUrl string) (io.Re
 
 // DeleteFile removes a file from COS storage
 func (s *cosFileService) DeleteFile(ctx context.Context, filePath string) error {
-	objectName := s.parseCosObjectName(filePath)
+	objectName, err := s.parseCosObjectName(filePath)
+	if err != nil {
+		return err
+	}
 	if err := utils.SafeObjectKey(objectName); err != nil {
 		return fmt.Errorf("invalid file path: %w", err)
 	}
-	_, err := s.client.Object.Delete(ctx, objectName)
+	_, err = s.client.Object.Delete(ctx, objectName)
 	if err != nil {
 		return fmt.Errorf("failed to delete file: %w", err)
 	}
@@ -150,18 +156,52 @@ func (s *cosFileService) DeleteFile(ctx context.Context, filePath string) error 
 // parseCosObjectName extracts the object name from:
 // - provider scheme: cos://{bucket}/{region}/{objectKey}
 // - legacy URL: https://bucket.cos.region.myqcloud.com/{objectKey}
-func (s *cosFileService) parseCosObjectName(filePath string) string {
+func (s *cosFileService) parseCosObjectName(filePath string) (string, error) {
+	for _, other := range []string{"local://", "minio://", "s3://", "tos://", "oss://", "ks3://", "obs://"} {
+		if strings.HasPrefix(filePath, other) {
+			return "", fmt.Errorf("cos file service cannot resolve %s path", strings.Split(other, "://")[0])
+		}
+	}
 	// Provider scheme format: cos://{bucket}/{region}/{objectKey}
 	if strings.HasPrefix(filePath, cosScheme) {
 		rest := strings.TrimPrefix(filePath, cosScheme)
 		parts := strings.SplitN(rest, "/", 3)
 		if len(parts) == 3 {
-			return parts[2]
+			return parts[2], nil
 		}
-		return rest
+		return rest, nil
 	}
 	// Legacy format: https://bucket.cos.region.myqcloud.com/{objectKey}
-	return strings.TrimPrefix(filePath, s.bucketURL)
+	return strings.TrimPrefix(filePath, s.bucketURL), nil
+}
+
+// CopyFile copies an existing COS object to a new knowledge-owned object using a
+// server-side Object.Copy (no data leaves COS). The destination uses the same
+// layout as SaveFile. Returns ErrCrossBackendCopy when srcPath is not a cos:// path.
+func (s *cosFileService) CopyFile(ctx context.Context,
+	srcPath string, tenantID uint64, knowledgeID string,
+) (string, error) {
+	srcObjectKey, err := s.parseCosObjectName(srcPath)
+	if err != nil {
+		return "", fmt.Errorf("cos copy rejected source %q: %w", srcPath, ErrCrossBackendCopy)
+	}
+	if err := utils.SafeObjectKey(srcObjectKey); err != nil {
+		return "", fmt.Errorf("invalid source path: %w", err)
+	}
+
+	ext := filepath.Ext(srcPath)
+	destKey := fmt.Sprintf("%s/%d/%s/%s%s", s.cosPathPrefix, tenantID, knowledgeID, uuid.New().String(), ext)
+
+	// sourceURL is the host + object key WITHOUT a scheme, per the COS SDK contract.
+	sourceURL := fmt.Sprintf("%s.cos.%s.myqcloud.com/%s", s.bucketName, s.region, srcObjectKey)
+	_, _, err = s.client.Object.Copy(ctx, destKey, sourceURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to copy file in COS: %w", err)
+	}
+
+	newPath := fmt.Sprintf("cos://%s/%s/%s", s.bucketName, s.region, destKey)
+	logger.Infof(ctx, "Copied COS object %s to %s", srcPath, newPath)
+	return newPath, nil
 }
 
 // SaveBytes saves bytes data to COS
@@ -212,7 +252,10 @@ func (s *cosFileService) GetFileURL(ctx context.Context, filePath string) (strin
 		return presignedURL.String(), nil
 	}
 
-	objectName := s.parseCosObjectName(filePath)
+	objectName, err := s.parseCosObjectName(filePath)
+	if err != nil {
+		return "", err
+	}
 	if err := utils.SafeObjectKey(objectName); err != nil {
 		return "", fmt.Errorf("invalid file path: %w", err)
 	}

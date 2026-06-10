@@ -12,6 +12,7 @@ import (
 
 	"github.com/Tencent/WeKnora/cli/internal/cmdutil"
 	"github.com/Tencent/WeKnora/cli/internal/iostreams"
+	"github.com/Tencent/WeKnora/cli/internal/output"
 	"github.com/Tencent/WeKnora/cli/internal/text"
 	sdk "github.com/Tencent/WeKnora/client"
 )
@@ -38,8 +39,8 @@ type SessionsSearchOptions struct {
 	// can fetch everything in one round-trip.
 	PageSize int
 	// AllPages walks server pages internally until total exhausted or
-	// --limit accumulated. Default true preserves v0.4 behavior; setting
-	// false stops after the first page (useful for cheap previews).
+	// --limit accumulated. Default true; setting false stops after the
+	// first page (useful for cheap previews).
 	AllPages bool
 }
 
@@ -61,8 +62,8 @@ func NewCmdSessions(f *cmdutil.Factory) *cobra.Command {
 title or description contains the query (case-insensitive).
 
 By default, --all-pages=true walks every server page until --limit is
-reached or the tenant's sessions are exhausted (matching v0.4 behavior).
-Pass --all-pages=false to stop after one page.`,
+reached or the tenant's sessions are exhausted. Pass --all-pages=false
+to stop after one page.`,
 		Example: `  weknora search sessions "onboarding"
   weknora search sessions "Q3 review" --limit 3 --format json
   weknora search sessions "Q3 review" --all-pages=false`,
@@ -91,6 +92,11 @@ Pass --all-pages=false to stop after one page.`,
 	cmd.Flags().IntVar(&opts.PageSize, "page-size", sessionsPageSize, "Items per server batch (1..1000)")
 	cmd.Flags().BoolVar(&opts.AllPages, "all-pages", true, "Walk every server page until exhausted or --limit hit")
 	cmdutil.AddFormatFlag(cmd, sessionsSearchFields...)
+	cmdutil.SetAgentHelp(cmd, cmdutil.AgentHelp{
+		UsedFor:  "Find chat sessions by title or description (client-side case-insensitive substring match). Results come with meta.count; use --limit to cap and --all-pages=false to stop after one page.",
+		Examples: []string{`weknora search sessions "onboarding" --format json`},
+		Output:   "envelope.data is an array of Session objects with id, title, updated_at; meta.count is the returned count; meta.has_more=true if more matched than --limit",
+	})
 	return cmd
 }
 
@@ -116,7 +122,8 @@ func runSessionsSearch(ctx context.Context, opts *SessionsSearchOptions, fopts *
 		for _, s := range items {
 			if matchSession(s, needle) {
 				matches = append(matches, s)
-				if opts.Limit > 0 && len(matches) >= opts.Limit {
+				// Collect one past --limit so has_more is accurate; trimmed below.
+				if opts.Limit > 0 && len(matches) > opts.Limit {
 					goto done
 				}
 			}
@@ -130,12 +137,17 @@ func runSessionsSearch(ctx context.Context, opts *SessionsSearchOptions, fopts *
 	}
 done:
 	sortSessionsByRecency(matches)
+	truncated := opts.Limit > 0 && len(matches) > opts.Limit
+	if truncated {
+		matches = matches[:opts.Limit]
+	}
 
 	if fopts.WantsJSON() {
 		if matches == nil {
 			matches = []sdk.Session{}
 		}
-		return fopts.Emit(iostreams.IO.Out, matches)
+		meta := &output.Meta{Count: len(matches), HasMore: truncated}
+		return fopts.Emit(iostreams.IO.Out, matches, meta)
 	}
 	if len(matches) == 0 {
 		fmt.Fprintln(iostreams.IO.Out, "(no matches)")

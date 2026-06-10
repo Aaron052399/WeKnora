@@ -1,5 +1,28 @@
 package types
 
+// Asynq queue names. MUST stay in sync with the Queues weight map in
+// router.NewAsynqServer — a task enqueued to a queue that the server does not
+// list will never be consumed.
+const (
+	QueueCritical   = "critical"
+	QueueDefault    = "default"
+	QueueLow        = "low"
+	// QueueMultimodal isolates high-volume, slow VLM image tasks (OCR + caption)
+	// so a single large scanned PDF (hundreds–thousands of page images) cannot
+	// saturate the shared worker pool and block user-facing document parsing in
+	// the default queue.
+	QueueMultimodal = "multimodal"
+	// QueueGraph isolates high-volume, slow graph-extraction tasks (one per
+	// chunk, LLM-backed, only when Neo4j is enabled). Same rationale as
+	// QueueMultimodal: a large document must not flood the default queue.
+	QueueGraph = "graph"
+	// QueueQuestion isolates high-volume, slow question-generation tasks (one
+	// per 20-chunk batch, LLM-backed). Keeps a large document's hundreds of
+	// question batches from starving the lightweight tasks in the low queue
+	// (summary, deletes, wiki ingest).
+	QueueQuestion = "question"
+)
+
 const (
 	TypeChunkExtract         = "chunk:extract"
 	TypeDocumentProcess      = "document:process"       // 文档处理任务
@@ -25,6 +48,16 @@ type ExtractChunkPayload struct {
 	TenantID uint64 `json:"tenant_id"`
 	ChunkID  string `json:"chunk_id"`
 	ModelID  string `json:"model_id"`
+	// KnowledgeID + Attempt link the per-chunk extract back to the parent
+	// parse attempt's postprocess stage so the worker can record a
+	// postprocess.graph.chunk[i] subspan. 0 / "" means "skip span
+	// recording" for legacy in-flight tasks.
+	KnowledgeID string `json:"knowledge_id,omitempty"`
+	Attempt     int    `json:"attempt,omitempty"`
+	// ChunkIndex is the 0-based ordinal of this chunk inside the parent
+	// knowledge's text-chunk set, used as the subspan name suffix
+	// ("postprocess.graph.chunk[3]") so the timeline preserves order.
+	ChunkIndex int `json:"chunk_index,omitempty"`
 }
 
 // DocumentProcessPayload represents the document process task payload
@@ -44,6 +77,13 @@ type DocumentProcessPayload struct {
 	EnableQuestionGeneration bool     `json:"enable_question_generation"` // 是否启用问题生成
 	QuestionCount            int      `json:"question_count,omitempty"`   // 每个chunk生成的问题数量
 	Language                 string   `json:"language,omitempty"`         // Request locale for {{language}} in prompt templates
+	// Attempt is the per-knowledge attempt number this task belongs to.
+	// Set on enqueue (initial parse → attempt 1; reparse → max+1) so
+	// every span recorded by this task lands on the right attempt
+	// branch. Asynq retries within an attempt keep the same value so
+	// retried spans overwrite the previous attempt's row rather than
+	// fan out into a new attempt for every retry.
+	Attempt int `json:"attempt,omitempty"`
 }
 
 // FAQImportPayload represents the FAQ import task payload (including dry run mode)
@@ -70,6 +110,39 @@ type QuestionGenerationPayload struct {
 	QuestionCount   int    `json:"question_count"`
 	// Language is the request locale (e.g. zh-CN, en-US) when the task was enqueued, used for {{language}} / {{lang}} in templates.
 	Language string `json:"language,omitempty"`
+	// Attempt links this task to the parent parse attempt so the worker
+	// can record a postprocess.question subspan under the right attempt's
+	// postprocess stage. 0 means "skip span recording" (legacy in-flight
+	// tasks queued before this field shipped, or callers without a
+	// tracker).
+	Attempt int `json:"attempt,omitempty"`
+	// ChunkIDs switches the handler into batched fan-out mode: the task
+	// generates questions for this ordered window of text chunks only.
+	// Batching (rather than one task per chunk) keeps the task count
+	// bounded for very large documents, while still giving each batch
+	// independent retry / cancellation / tracing and letting the worker
+	// do a single embedding BatchIndex per batch. Empty means the legacy
+	// whole-knowledge mode (kept for in-flight tasks queued before fan-out
+	// shipped), where the handler iterates all text chunks itself.
+	// Following the ExtractChunkPayload precedent, we carry only chunk ids
+	// (not their content) so the payload stays small and the worker reads
+	// fresh content at run time.
+	ChunkIDs []string `json:"chunk_ids,omitempty"`
+	// ChunkID is the single-chunk variant of ChunkIDs, retained only so
+	// tasks enqueued by an interim per-chunk build still run (treated as a
+	// one-element batch). New enqueues use ChunkIDs.
+	ChunkID string `json:"chunk_id,omitempty"`
+	// BatchIndex is the 0-based ordinal of this batch inside the parent
+	// knowledge's text-chunk set, used as the subspan name suffix
+	// ("postprocess.question.batch[3]") so the timeline preserves order.
+	BatchIndex int `json:"batch_index,omitempty"`
+	// PrevChunkID / NextChunkID are the text chunks (by StartAt) just
+	// outside this batch window, computed at enqueue time so the worker can
+	// rebuild the same surrounding context the legacy whole-knowledge loop
+	// used at the batch boundaries, without re-listing every chunk of the
+	// knowledge. Empty when the batch is at a document boundary.
+	PrevChunkID string `json:"prev_chunk_id,omitempty"`
+	NextChunkID string `json:"next_chunk_id,omitempty"`
 }
 
 // SummaryGenerationPayload represents the summary generation task payload
@@ -79,6 +152,10 @@ type SummaryGenerationPayload struct {
 	KnowledgeBaseID string `json:"knowledge_base_id"`
 	KnowledgeID     string `json:"knowledge_id"`
 	Language        string `json:"language,omitempty"`
+	// Attempt links this task to the parent parse attempt so the worker
+	// can record a postprocess.summary subspan under the right attempt's
+	// postprocess stage. See QuestionGenerationPayload.Attempt notes.
+	Attempt int `json:"attempt,omitempty"`
 }
 
 // KBClonePayload represents the knowledge base clone task payload
@@ -176,6 +253,14 @@ type ImageMultimodalPayload struct {
 	EnableCaption   bool   `json:"enable_caption"`
 	Language        string `json:"language,omitempty"`          // Request locale for {{language}} in prompt templates
 	ImageSourceType string `json:"image_source_type,omitempty"` // Source type of the image (e.g., "scanned_pdf")
+	// Attempt links this image task back to the parent ProcessDocument
+	// attempt so the worker can record its image[i] subspan under the
+	// same attempt's multimodal stage span.
+	Attempt int `json:"attempt,omitempty"`
+	// ImageIndex is the 0-based ordinal of this image inside the
+	// parent's image set. Used as the subspan name suffix
+	// ("multimodal.image[3]") so the timeline preserves order.
+	ImageIndex int `json:"image_index,omitempty"`
 }
 
 // KnowledgePostProcessPayload represents the knowledge post process task payload.
@@ -185,6 +270,7 @@ type KnowledgePostProcessPayload struct {
 	KnowledgeID     string `json:"knowledge_id"`
 	KnowledgeBaseID string `json:"knowledge_base_id"`
 	Language        string `json:"language,omitempty"` // Request locale for {{language}} in prompt templates
+	Attempt         int    `json:"attempt,omitempty"`
 }
 
 // KBCloneTaskStatus represents the status of a knowledge base clone task

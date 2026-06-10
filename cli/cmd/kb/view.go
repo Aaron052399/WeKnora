@@ -53,6 +53,15 @@ func NewCmdView(f *cmdutil.Factory) *cobra.Command {
 		},
 	}
 	cmdutil.AddFormatFlag(cmd, kbViewFields...)
+	cmdutil.SetAgentHelp(cmd, cmdutil.AgentHelp{
+		UsedFor:       "fetch one knowledge base's full configuration by id",
+		RequiredFlags: []string{"<kb-id> (positional)"},
+		Examples: []string{
+			"weknora kb view kb_abc",
+			"weknora kb view kb_abc --jq .data.embedding_model_id",
+		},
+		Output: "envelope.data is the KnowledgeBase object (id, name, type, embedding/summary model ids, chunk_count, ...)",
+	})
 	return cmd
 }
 
@@ -62,11 +71,11 @@ func runView(ctx context.Context, opts *ViewOptions, fopts *cmdutil.FormatOption
 		return cmdutil.WrapHTTP(err, "get knowledge base %q", id)
 	}
 	if fopts.WantsJSON() {
-		return fopts.Emit(iostreams.IO.Out, kb)
+		return fopts.Emit(iostreams.IO.Out, kb, nil)
 	}
-	// Human: KEY: VALUE. Nested config structs (chunking_config, vlm_config,
-	// etc.) are intentionally omitted from the human render — those are for
-	// `--format json | jq '.chunking_config'` workflows.
+	// Text mode: KEY: VALUE. Nested config structs (chunking_config,
+	// vlm_config, etc.) are intentionally omitted from the text render —
+	// those are for `--format json | jq '.chunking_config'` workflows.
 	w := iostreams.IO.Out
 	fmt.Fprintf(w, "ID:        %s\n", kb.ID)
 	fmt.Fprintf(w, "NAME:      %s\n", kb.Name)

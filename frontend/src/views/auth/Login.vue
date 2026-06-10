@@ -3,76 +3,79 @@
     <div class="animated-bg">
       <div class="knowledge-node node-1">
         <svg class="node-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
-          <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+          <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+          <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
         </svg>
       </div>
       <div class="knowledge-node node-2">
         <svg class="node-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
         </svg>
       </div>
       <div class="knowledge-node node-3">
         <svg class="node-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M12 2L2 7l10 5 10-5-10-5z"/>
-          <path d="M2 17l10 5 10-5"/>
-          <path d="M2 12l10 5 10-5"/>
+          <path d="M12 2L2 7l10 5 10-5-10-5z" />
+          <path d="M2 17l10 5 10-5" />
+          <path d="M2 12l10 5 10-5" />
         </svg>
       </div>
       <div class="knowledge-node node-4">
         <svg class="node-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <ellipse cx="12" cy="5" rx="9" ry="3"/>
-          <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/>
-          <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
+          <ellipse cx="12" cy="5" rx="9" ry="3" />
+          <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3" />
+          <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
         </svg>
       </div>
       <div class="knowledge-node node-5">
         <svg class="node-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <circle cx="11" cy="11" r="8"/>
-          <path d="m21 21-4.35-4.35"/>
+          <circle cx="11" cy="11" r="8" />
+          <path d="m21 21-4.35-4.35" />
         </svg>
       </div>
       <div class="knowledge-node node-6">
         <svg class="node-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
-          <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
-          <line x1="12" y1="22.08" x2="12" y2="12"/>
+          <path
+            d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+          <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
+          <line x1="12" y1="22.08" x2="12" y2="12" />
         </svg>
       </div>
       <div class="knowledge-node node-7">
         <svg class="node-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-          <polyline points="14 2 14 8 20 8"/>
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+          <polyline points="14 2 14 8 20 8" />
         </svg>
       </div>
       <div class="knowledge-node node-8">
         <svg class="node-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
-          <circle cx="9" cy="7" r="4"/>
-          <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
-          <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+          <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+          <circle cx="9" cy="7" r="4" />
+          <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
+          <path d="M16 3.13a4 4 0 0 1 0 7.75" />
         </svg>
       </div>
       <div class="knowledge-node node-9">
         <svg class="node-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
         </svg>
       </div>
       <div class="knowledge-node node-10">
         <svg class="node-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <circle cx="12" cy="12" r="3"/>
-          <path d="M12 1v6m0 6v6M5.64 5.64l4.24 4.24m4.24 4.24l4.24 4.24M1 12h6m6 0h6M5.64 18.36l4.24-4.24m4.24-4.24l4.24-4.24"/>
+          <circle cx="12" cy="12" r="3" />
+          <path
+            d="M12 1v6m0 6v6M5.64 5.64l4.24 4.24m4.24 4.24l4.24 4.24M1 12h6m6 0h6M5.64 18.36l4.24-4.24m4.24-4.24l4.24-4.24" />
         </svg>
       </div>
       <div class="knowledge-node node-11">
         <svg class="node-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M9 11l3 3L22 4"/>
-          <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
+          <path d="M9 11l3 3L22 4" />
+          <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
         </svg>
       </div>
       <div class="knowledge-node node-12">
         <svg class="node-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+          <polygon
+            points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
         </svg>
       </div>
 
@@ -100,39 +103,37 @@
     <!-- Header Links - Top Right -->
     <div class="header-links">
       <a href="https://weknora.weixin.qq.com" target="_blank" class="header-link" :title="$t('common.website')">
-        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
-          <circle cx="12" cy="12" r="10"/>
-          <line x1="2" y1="12" x2="22" y2="12"/>
-          <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+          stroke-linecap="round">
+          <circle cx="12" cy="12" r="10" />
+          <line x1="2" y1="12" x2="22" y2="12" />
+          <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
         </svg>
         <span class="link-text">{{ $t('common.website') }}</span>
       </a>
-      
+
       <a href="https://github.com/Tencent/WeKnora" target="_blank" class="header-link" :title="$t('common.info')">
         <svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor">
-          <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/>
+          <path
+            d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z" />
         </svg>
         <span class="link-text">GitHub</span>
       </a>
-      
+
       <div class="language-switch">
         <button @click="toggleLanguageMenu" class="header-link" :title="currentLangOption?.label">
           <span class="lang-flag-icon">{{ currentLangOption?.flag }}</span>
           <span class="link-text">{{ currentLangOption?.shortLabel }}</span>
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
-            <polyline points="6 9 12 15 18 9"/>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+            stroke-linecap="round">
+            <polyline points="6 9 12 15 18 9" />
           </svg>
         </button>
-        
+
         <!-- Language Dropdown -->
         <div v-if="showLanguageMenu" class="language-dropdown">
-          <div 
-            v-for="lang in languageOptions" 
-            :key="lang.value"
-            @click="selectLanguage(lang.value)"
-            class="language-option"
-            :class="{ active: currentLanguage === lang.value }"
-          >
+          <div v-for="lang in languageOptions" :key="lang.value" @click="selectLanguage(lang.value)"
+            class="language-option" :class="{ active: currentLanguage === lang.value }">
             <span class="lang-flag">{{ lang.flag }}</span>
             <span class="lang-label">{{ lang.label }}</span>
             <span v-if="currentLanguage === lang.value" class="check-icon">✓</span>
@@ -149,26 +150,18 @@
 
         <div class="feature-tags">
           <span class="tag">{{ $t('platform.rag') }}</span>
+          <span class="tag">{{ $t('platform.agent') }}</span>
+          <span class="tag">{{ $t('platform.wiki') }}</span>
           <span class="tag">{{ $t('platform.hybridSearch') }}</span>
-          <span class="tag">{{ $t('platform.localDeploy') }}</span>
         </div>
 
         <!-- Swiper Carousel -->
         <div class="carousel-container">
-          <swiper
-            :modules="modules"
-            :slides-per-view="1"
-            :loop="true"
-            :autoplay="{
-              delay: 4000,
-              disableOnInteraction: false,
-            }"
-            :effect="'fade'"
-            :fade-effect="{ crossFade: true }"
-            :pagination="{ clickable: true, dynamicBullets: false }"
-            :speed="800"
-            class="screenshot-swiper"
-          >
+          <swiper :modules="modules" :slides-per-view="1" :loop="true" :autoplay="{
+            delay: 4000,
+            disableOnInteraction: false,
+          }" :effect="'fade'" :fade-effect="{ crossFade: true }"
+            :pagination="{ clickable: true, dynamicBullets: false }" :speed="800" class="screenshot-swiper">
             <swiper-slide v-for="(slide, index) in slides" :key="index">
               <div class="slide-content">
                 <img :src="slide.image" :alt="slide.title" class="slide-image" />
@@ -184,75 +177,47 @@
       <div class="form-panel">
         <!-- Login Card -->
         <div class="form-card" v-if="!isRegisterMode">
-                <div class="form-header">
-                  <h2 class="form-title">{{ $t('auth.login') }}</h2>
-                  <p class="form-welcome">{{ $t('auth.subtitle') }}</p>
-                </div>
+          <div class="form-header">
+            <h2 class="form-title">{{ $t('auth.login') }}</h2>
+            <p class="form-welcome">{{ $t('auth.subtitle') }}</p>
+            <p v-if="registrationEnabled" class="form-hint">{{ $t('auth.loginHint') }}</p>
+          </div>
 
           <div class="form-content">
-        <t-form
-          ref="formRef"
-          :data="formData"
-          :rules="formRules"
-          @submit="handleLogin"
-          layout="vertical"
-        >
-          <t-form-item :label="$t('auth.email')" name="email">
-            <t-input
-              v-model="formData.email"
-              :placeholder="$t('auth.emailPlaceholder')"
-              type="email"
-              size="large"
-              :disabled="loading"
-            />
-          </t-form-item>
+            <t-form ref="formRef" :data="formData" :rules="formRules" @submit="handleLogin" layout="vertical">
+              <t-form-item :label="$t('auth.email')" name="email">
+                <t-input v-model="formData.email" :placeholder="$t('auth.emailPlaceholder')" type="text"
+                  autocomplete="email" size="large" :disabled="loading" />
+              </t-form-item>
 
-          <t-form-item :label="$t('auth.password')" name="password">
-            <t-input
-              v-model="formData.password"
-              :placeholder="$t('auth.passwordPlaceholder')"
-              type="password"
-              size="large"
-              :disabled="loading"
-              @keydown.enter="handleLogin"
-            />
-          </t-form-item>
+              <t-form-item :label="$t('auth.password')" name="password">
+                <t-input v-model="formData.password" :placeholder="$t('auth.passwordPlaceholder')" type="password"
+                  size="large" :disabled="loading" @enter="handleLogin" />
+              </t-form-item>
 
-          <t-button
-            type="submit"
-            theme="primary"
-            size="large"
-            block
-            :loading="loading"
-                class="submit-button"
-          >
+              <t-button type="submit" theme="primary" size="large" block :loading="loading" class="submit-button">
                 {{ loading ? $t('auth.loggingIn') : $t('auth.login') }}
-          </t-button>
+              </t-button>
 
-          <div class="form-footer login-form-footer" v-if="registrationEnabled">
-            <span>{{ $t('auth.noAccount') }}</span>
-            <a href="#" @click.prevent="toggleMode" class="link-button">
-              {{ $t('auth.registerNow') }}
-            </a>
-          </div>
+              <div class="register-cta" v-if="registrationEnabled">
+                <div class="register-cta__divider">
+                  <span>{{ $t('auth.firstTime') }}</span>
+                </div>
+                <t-button theme="default" variant="outline" size="large" block class="register-cta__button"
+                  :disabled="loading" @click="toggleMode">
+                  {{ $t('auth.createAccount') }}
+                </t-button>
+              </div>
 
-          <div v-if="oidcEnabled" class="oidc-divider">
-            <span>{{ $t('auth.orContinueWith') }}</span>
-          </div>
+              <div v-if="oidcEnabled" class="oidc-divider">
+                <span>{{ $t('auth.orContinueWith') }}</span>
+              </div>
 
-          <t-button
-            v-if="oidcEnabled"
-            theme="default"
-            size="large"
-            block
-            :loading="oidcLoading"
-            :disabled="loading"
-            class="oidc-button"
-            @click="handleOIDCLogin"
-          >
-            {{ oidcLoading ? $t('auth.redirectingToOIDC') : oidcLoginText }}
-          </t-button>
-        </t-form>
+              <t-button v-if="oidcEnabled" theme="default" size="large" block :loading="oidcLoading" :disabled="loading"
+                class="oidc-button" @click="handleOIDCLogin">
+                {{ oidcLoading ? $t('auth.redirectingToOIDC') : oidcLoginText }}
+              </t-button>
+            </t-form>
 
             <!-- Features list -->
             <div class="login-features">
@@ -269,89 +234,78 @@
                 <span class="feature-text">{{ $t('platform.ragQandA') }}</span>
               </div>
             </div>
-      </div>
-    </div>
+          </div>
+        </div>
 
-        <!-- Register Card -->
-        <div class="form-card" v-if="isRegisterMode && registrationEnabled">
+        <!-- Register Card. Renders when the user is in register mode
+             AND either self-service registration is enabled OR they
+             arrived with a valid share-link token (which bypasses the
+             invite_only gate). -->
+        <div class="form-card" v-if="isRegisterMode && (registrationEnabled || inviteLookup)">
+          <!-- Share-link banner: shown only when ?token= resolved to a
+               real invitation row. Sits above the form header so the
+               invitee instantly sees who invited them and into which
+               workspace, without bumping the existing register UX. -->
+          <div v-if="inviteLookup" class="invite-banner">
+            <t-icon name="link" class="invite-banner__icon" />
+            <div class="invite-banner__text">
+              <div class="invite-banner__title">
+                {{ $t('inviteRegister.bannerTitle', { tenant: inviteLookup.tenant_name || '' }) }}
+              </div>
+              <div class="invite-banner__hint">
+                {{ $t('inviteRegister.bannerHint') }}
+              </div>
+            </div>
+          </div>
+          <div v-else-if="inviteLookupError" class="invite-banner invite-banner--error">
+            {{ inviteLookupError }}
+          </div>
           <div class="form-header">
             <h2 class="form-title">{{ $t('auth.createAccount') }}</h2>
             <p class="form-subtitle">{{ $t('auth.registerSubtitle') }}</p>
-      </div>
+          </div>
 
           <div class="form-content">
-        <t-form
-          ref="registerFormRef"
-          :data="registerData"
-          :rules="registerRules"
-          @submit="handleRegister"
-          layout="vertical"
-        >
-          <t-form-item :label="$t('auth.username')" name="username">
-            <t-input
-              v-model="registerData.username"
-              :placeholder="$t('auth.usernamePlaceholder')"
-              size="large"
-              :disabled="loading"
-            />
-          </t-form-item>
+            <t-form ref="registerFormRef" :data="registerData" :rules="registerRules" @submit="handleRegister"
+              layout="vertical">
+              <t-form-item :label="$t('auth.username')" name="username">
+                <t-input v-model="registerData.username" :placeholder="$t('auth.usernamePlaceholder')" size="large"
+                  :disabled="loading" />
+              </t-form-item>
 
-          <t-form-item :label="$t('auth.email')" name="email">
-            <t-input
-              v-model="registerData.email"
-              :placeholder="$t('auth.emailPlaceholder')"
-              type="email"
-              size="large"
-              :disabled="loading"
-            />
-          </t-form-item>
+              <t-form-item :label="$t('auth.email')" name="email">
+                <t-input v-model="registerData.email" :placeholder="$t('auth.emailPlaceholder')" type="text"
+                  autocomplete="email" size="large" :disabled="loading" />
+              </t-form-item>
 
-          <t-form-item :label="$t('auth.password')" name="password">
-            <t-input
-              v-model="registerData.password"
-              :placeholder="$t('auth.passwordPlaceholder')"
-              type="password"
-              size="large"
-              :disabled="loading"
-            />
-          </t-form-item>
+              <t-form-item :label="$t('auth.password')" name="password">
+                <t-input v-model="registerData.password" :placeholder="$t('auth.passwordPlaceholder')" type="password"
+                  size="large" :disabled="loading" />
+              </t-form-item>
 
-          <t-form-item :label="$t('auth.confirmPassword')" name="confirmPassword">
-            <t-input
-              v-model="registerData.confirmPassword"
-              :placeholder="$t('auth.confirmPasswordPlaceholder')"
-              type="password"
-              size="large"
-              :disabled="loading"
-              @keydown.enter="handleRegister"
-            />
-          </t-form-item>
+              <t-form-item :label="$t('auth.confirmPassword')" name="confirmPassword">
+                <t-input v-model="registerData.confirmPassword" :placeholder="$t('auth.confirmPasswordPlaceholder')"
+                  type="password" size="large" :disabled="loading" @enter="handleRegister" />
+              </t-form-item>
 
-          <t-button
-            type="submit"
-            theme="primary"
-            size="large"
-            block
-            :loading="loading"
-                class="submit-button"
-          >
-            {{ loading ? $t('auth.registering') : $t('auth.register') }}
-          </t-button>
-        </t-form>
+              <t-button type="submit" theme="primary" size="large" block :loading="loading" class="submit-button">
+                {{ loading ? $t('auth.registering') : $t('auth.register') }}
+              </t-button>
+            </t-form>
 
             <div class="form-footer">
-          <span>{{ $t('auth.haveAccount') }}</span>
+              <span>{{ $t('auth.haveAccount') }}</span>
               <a href="#" @click.prevent="toggleMode" class="link-button">
-            {{ $t('auth.backToLogin') }}
-          </a>
-        </div>
+                {{ $t('auth.backToLogin') }}
+              </a>
+            </div>
 
             <!-- Features list for register -->
             <div class="login-features">
               <div class="feature-item">
                 <span class="feature-icon">✓</span>
                 <span class="feature-text">{{ $t('platform.independentTenant') }}</span>
-      </div>
+              </div>
               <div class="feature-item">
                 <span class="feature-icon">✓</span>
                 <span class="feature-text">{{ $t('platform.fullApiAccess') }}</span>
@@ -370,7 +324,7 @@
 
 <script setup lang="ts">
 import { ref, reactive, nextTick, onMounted, onBeforeUnmount, computed } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { MessagePlugin } from 'tdesign-vue-next'
 import { useRoleLabel } from '@/composables/useRoleLabel'
 import { notifyLoginSuccess } from '@/utils/loginNotify'
@@ -379,16 +333,29 @@ import { Autoplay, EffectFade, Pagination } from 'swiper/modules'
 import 'swiper/css'
 import 'swiper/css/effect-fade'
 import 'swiper/css/pagination'
-import { login, register, getOIDCAuthorizationURL, getOIDCConfig, autoSetup, getAuthConfig } from '@/api/auth'
+import {
+  login,
+  register,
+  getOIDCAuthorizationURL,
+  getOIDCConfig,
+  autoSetup,
+  getAuthConfig,
+  userInfoFromApi,
+  getInvitationByToken,
+  registerByInvite,
+  type InviteLookup,
+} from '@/api/auth'
 import { useAuthStore } from '@/stores/auth'
 import { useI18n } from 'vue-i18n'
 
 // Import screenshot images
 import screenshot1 from '@/assets/img/screenshot-1.svg'
 import screenshot2 from '@/assets/img/screenshot-2.svg'
+import screenshot3 from '@/assets/img/screenshot-3.svg'
 import screenshot4 from '@/assets/img/screenshot-4.svg'
 
 const router = useRouter()
+const route = useRoute()
 const authStore = useAuthStore()
 const { t, tm, locale } = useI18n()
 const { formatRole, roleIcon } = useRoleLabel()
@@ -407,6 +374,11 @@ const slides = [
     image: screenshot2,
     title: t('platform.carousel.hybridSearchTitle'),
     description: t('platform.carousel.hybridSearchDesc')
+  },
+  {
+    image: screenshot3,
+    title: t('platform.carousel.wikiTitle'),
+    description: t('platform.carousel.wikiDesc')
   },
   {
     image: screenshot1,
@@ -431,6 +403,17 @@ const oidcProviderName = ref('')
 // In invite_only mode the link/card are hidden.
 const registrationEnabled = ref(true)
 
+// invite-link state. When the URL carries ?token=xxx we resolve it to
+// the originating tenant + role and switch the form into a "register
+// via invitation" mode. The token bypasses the normal invite_only
+// gate — possessing it IS the authorisation. Submitting the register
+// form with this set hits /auth/register-by-invite (auto-login on
+// success) instead of /auth/register.
+const inviteToken = ref('')
+const inviteLookup = ref<InviteLookup | null>(null)
+const inviteLookupError = ref('')
+const inviteLookupLoading = ref(false)
+
 // Language options
 const languageOptions = [
   { value: 'zh-CN', label: '简体中文', shortLabel: '中文', flag: '🇨🇳' },
@@ -449,13 +432,13 @@ const oidcLoginText = computed(() => {
 const currentLangOption = computed(() => languageOptions.find(l => l.value === currentLanguage.value))
 
 // Login form data
-const formData = reactive<{[key: string]: any}>({
+const formData = reactive<{ [key: string]: any }>({
   email: '',
   password: '',
 })
 
 // Register form data
-const registerData = reactive<{[key: string]: any}>({
+const registerData = reactive<{ [key: string]: any }>({
   username: '',
   email: '',
   password: '',
@@ -483,10 +466,10 @@ const registerRules = computed(() => ({
     { required: true, message: t('auth.usernameRequired'), type: 'error' },
     { min: 2, message: t('auth.usernameMinLength'), type: 'error' },
     { max: 20, message: t('auth.usernameMaxLength'), type: 'error' },
-    { 
-      pattern: /^[a-zA-Z0-9_\u4e00-\u9fa5]+$/, 
-      message: t('auth.usernameInvalid'), 
-      type: 'error' 
+    {
+      pattern: /^[a-zA-Z0-9_\u4e00-\u9fa5]+$/,
+      message: t('auth.usernameInvalid'),
+      type: 'error'
     }
   ],
   email: [
@@ -513,7 +496,7 @@ const registerRules = computed(() => ({
 // Toggle login/register mode
 const toggleMode = () => {
   isRegisterMode.value = !isRegisterMode.value
-  
+
   Object.keys(registerData).forEach(key => {
     (registerData as any)[key] = ''
   })
@@ -562,17 +545,7 @@ const persistLoginResponse = async (response: any) => {
     // server honoured a remembered last-active-tenant preference) is
     // expressed separately via setSelectedTenant below.
     const homeTenantIdRaw = response.user.tenant_id ?? activeTenant.id
-    authStore.setUser({
-      id: response.user.id || '',
-      username: response.user.username || '',
-      email: response.user.email || '',
-      avatar: response.user.avatar,
-      tenant_id: String(homeTenantIdRaw) || '',
-      can_access_all_tenants: response.user.can_access_all_tenants || false,
-      preferences: response.user.preferences,
-      created_at: response.user.created_at || new Date().toISOString(),
-      updated_at: response.user.updated_at || new Date().toISOString()
-    })
+    authStore.setUser(userInfoFromApi(response.user, homeTenantIdRaw))
     authStore.setToken(response.token)
     if (response.refresh_token) {
       authStore.setRefreshToken(response.refresh_token)
@@ -634,7 +607,7 @@ const loadAuthConfig = async () => {
 const handleOIDCLogin = async () => {
   try {
     oidcLoading.value = true
-		const response = await getOIDCAuthorizationURL(getBackendOIDCRedirectURI())
+    const response = await getOIDCAuthorizationURL(getBackendOIDCRedirectURI())
     const authorizationURL = response.authorization_url
 
     if (!response.success || !authorizationURL) {
@@ -658,7 +631,7 @@ const handleLogin = async () => {
     if (valid !== true) return
 
     loading.value = true
-    
+
     const response = await login({
       email: formData.email,
       password: formData.password,
@@ -678,14 +651,36 @@ const handleLogin = async () => {
   }
 }
 
-// Handle registration
+// Handle registration. Dispatches based on whether the user arrived
+// with a share-link token: with token -> register-by-invite (auto-
+// login on success); without -> the normal self-service register
+// (drops back to the login form for the user to sign in).
 const handleRegister = async () => {
   try {
     const valid = await registerFormRef.value?.validate()
     if (valid !== true) return
 
     loading.value = true
-    
+
+    if (inviteToken.value) {
+      const response = await registerByInvite({
+        token: inviteToken.value,
+        username: registerData.username,
+        email: registerData.email,
+        password: registerData.password,
+      })
+      if (!response.success) {
+        MessagePlugin.error(response.message || t('auth.registerFailed'))
+        return
+      }
+      MessagePlugin.success(t('auth.registerSuccess'))
+      // register-by-invite returns the same shape as login (token +
+      // active_tenant + memberships), so reuse the login persistence
+      // path — same store writes, same redirect target.
+      await persistLoginResponse(response)
+      return
+    }
+
     const response = await register({
       username: registerData.username,
       email: registerData.email,
@@ -694,11 +689,11 @@ const handleRegister = async () => {
 
     if (response.success) {
       MessagePlugin.success(t('auth.registerSuccess'))
-      
+
       // Switch to login mode and fill in email
       isRegisterMode.value = false
       formData.email = registerData.email
-      
+
       // Clear register form
       Object.keys(registerData).forEach(key => {
         (registerData as any)[key] = ''
@@ -716,6 +711,41 @@ const handleRegister = async () => {
 
 // Check if already logged in; for lite edition, attempt transparent auto-setup
 onMounted(async () => {
+  // Share-link landing: ?token=xxx switches the form into invite-
+  // register mode before any other auto-flow (logged-in redirect /
+  // auto-setup / OIDC) gets a chance to redirect. Resolution failure
+  // surfaces inline; the user can still log in normally if they
+  // already have an account. We check this BEFORE the isLoggedIn
+  // redirect so an existing session doesn't bounce the user to
+  // /platform (and possibly back to /login if the session is stale),
+  // dropping the invite token along the way.
+  const tokenFromQuery = String(route.query.token || '').trim()
+  if (tokenFromQuery) {
+    inviteToken.value = tokenFromQuery
+    inviteLookupLoading.value = true
+    try {
+      const resp = await getInvitationByToken(tokenFromQuery)
+      if (resp.success && resp.data) {
+        inviteLookup.value = resp.data
+        // Token bypasses invite_only — show the register card even
+        // when self-service registration is otherwise disabled.
+        registrationEnabled.value = true
+        isRegisterMode.value = true
+      } else {
+        inviteLookupError.value = resp.message || t('inviteRegister.invalidBody')
+      }
+    } catch {
+      inviteLookupError.value = t('inviteRegister.invalidBody')
+    } finally {
+      inviteLookupLoading.value = false
+    }
+    // Don't run auto-setup when the user came in via an invite link —
+    // they're explicitly trying to register, not bootstrap a Lite
+    // single-user instance.
+    loadOIDCConfig()
+    return
+  }
+
   if (authStore.isLoggedIn) {
     router.replace('/platform/knowledge-bases')
     return
@@ -759,7 +789,7 @@ onMounted(async () => {
     right: 0;
     bottom: 0;
     background: radial-gradient(circle at 20% 50%, rgba(255, 255, 255, 0.06) 0%, transparent 50%),
-                radial-gradient(circle at 80% 50%, rgba(255, 255, 255, 0.04) 0%, transparent 50%);
+      radial-gradient(circle at 80% 50%, rgba(255, 255, 255, 0.04) 0%, transparent 50%);
     pointer-events: none;
   }
 }
@@ -800,22 +830,90 @@ onMounted(async () => {
   color: rgba(255, 255, 255, 0.9);
 }
 
-.node-1  { top: 15%; left: 20%;  animation-delay: 0s; }
-.node-2  { top: 25%; left: 35%;  animation-delay: 0.5s; }
-.node-3  { top: 20%; left: 55%;  animation-delay: 1s; }
-.node-4  { top: 30%; left: 75%;  animation-delay: 1.5s; }
-.node-5  { top: 45%; left: 25%;  animation-delay: 2s; }
-.node-6  { top: 50%; left: 45%;  animation-delay: 2.5s; }
-.node-7  { top: 48%; left: 65%;  animation-delay: 3s; }
-.node-8  { top: 60%; left: 20%;  animation-delay: 0.3s; }
-.node-9  { top: 12%; right: 15%; animation-delay: 1.8s; }
-.node-10 { top: 38%; right: 10%; animation-delay: 2.3s; }
-.node-11 { top: 70%; left: 40%;  animation-delay: 0.8s; }
-.node-12 { top: 65%; left: 80%;  animation-delay: 1.3s; }
+.node-1 {
+  top: 15%;
+  left: 20%;
+  animation-delay: 0s;
+}
+
+.node-2 {
+  top: 25%;
+  left: 35%;
+  animation-delay: 0.5s;
+}
+
+.node-3 {
+  top: 20%;
+  left: 55%;
+  animation-delay: 1s;
+}
+
+.node-4 {
+  top: 30%;
+  left: 75%;
+  animation-delay: 1.5s;
+}
+
+.node-5 {
+  top: 45%;
+  left: 25%;
+  animation-delay: 2s;
+}
+
+.node-6 {
+  top: 50%;
+  left: 45%;
+  animation-delay: 2.5s;
+}
+
+.node-7 {
+  top: 48%;
+  left: 65%;
+  animation-delay: 3s;
+}
+
+.node-8 {
+  top: 60%;
+  left: 20%;
+  animation-delay: 0.3s;
+}
+
+.node-9 {
+  top: 12%;
+  right: 15%;
+  animation-delay: 1.8s;
+}
+
+.node-10 {
+  top: 38%;
+  right: 10%;
+  animation-delay: 2.3s;
+}
+
+.node-11 {
+  top: 70%;
+  left: 40%;
+  animation-delay: 0.8s;
+}
+
+.node-12 {
+  top: 65%;
+  left: 80%;
+  animation-delay: 1.3s;
+}
 
 @keyframes nodePulse {
-  0%, 100% { transform: scale(1); opacity: 0.65; }
-  50% { transform: scale(1.08); opacity: 0.9; }
+
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 0.65;
+  }
+
+  50% {
+    transform: scale(1.08);
+    opacity: 0.9;
+  }
 }
 
 .knowledge-lines {
@@ -836,27 +934,73 @@ onMounted(async () => {
   will-change: stroke-dashoffset;
 }
 
-.line-1  { animation-delay: 0s; }
-.line-2  { animation-delay: 0.5s; }
-.line-3  { animation-delay: 1s; }
-.line-4  { animation-delay: 0.3s; }
-.line-5  { animation-delay: 0.8s; }
-.line-6  { animation-delay: 1.3s; }
-.line-7  { animation-delay: 1.8s; }
-.line-8  { animation-delay: 2.3s; }
-.line-9  { animation-delay: 0.2s; }
-.line-10 { animation-delay: 0.7s; }
-.line-11 { animation-delay: 0.9s; }
-.line-12 { animation-delay: 1.5s; }
+.line-1 {
+  animation-delay: 0s;
+}
+
+.line-2 {
+  animation-delay: 0.5s;
+}
+
+.line-3 {
+  animation-delay: 1s;
+}
+
+.line-4 {
+  animation-delay: 0.3s;
+}
+
+.line-5 {
+  animation-delay: 0.8s;
+}
+
+.line-6 {
+  animation-delay: 1.3s;
+}
+
+.line-7 {
+  animation-delay: 1.8s;
+}
+
+.line-8 {
+  animation-delay: 2.3s;
+}
+
+.line-9 {
+  animation-delay: 0.2s;
+}
+
+.line-10 {
+  animation-delay: 0.7s;
+}
+
+.line-11 {
+  animation-delay: 0.9s;
+}
+
+.line-12 {
+  animation-delay: 1.5s;
+}
 
 @keyframes lineFlow {
-  0% { stroke-dashoffset: 0; }
-  100% { stroke-dashoffset: 18; }
+  0% {
+    stroke-dashoffset: 0;
+  }
+
+  100% {
+    stroke-dashoffset: 18;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .knowledge-node { animation: none; opacity: 0.65; }
-  .connection-line { animation: none; }
+  .knowledge-node {
+    animation: none;
+    opacity: 0.65;
+  }
+
+  .connection-line {
+    animation: none;
+  }
 }
 
 /* Left Showcase Section */
@@ -1030,8 +1174,13 @@ onMounted(async () => {
   cursor: pointer;
   position: relative;
 
-  svg { flex-shrink: 0; }
-  .link-text { line-height: 1; }
+  svg {
+    flex-shrink: 0;
+  }
+
+  .link-text {
+    line-height: 1;
+  }
 
   &:hover {
     background: rgba(255, 255, 255, 0.3);
@@ -1089,8 +1238,14 @@ onMounted(async () => {
   font-family: var(--app-font-family);
   color: var(--td-text-color-primary);
 
-  .lang-flag { font-size: 16px; flex-shrink: 0; }
-  .lang-label { flex: 1; }
+  .lang-flag {
+    font-size: 16px;
+    flex-shrink: 0;
+  }
+
+  .lang-label {
+    flex: 1;
+  }
 
   .check-icon {
     color: var(--td-success-color);
@@ -1099,8 +1254,14 @@ onMounted(async () => {
     flex-shrink: 0;
   }
 
-  &:hover { background: var(--td-bg-color-secondarycontainer); }
-  &.active { background: var(--td-success-color-light); color: var(--td-brand-color-active); }
+  &:hover {
+    background: var(--td-bg-color-secondarycontainer);
+  }
+
+  &.active {
+    background: var(--td-success-color-light);
+    color: var(--td-brand-color-active);
+  }
 }
 
 .form-card {
@@ -1113,6 +1274,57 @@ onMounted(async () => {
   width: 100%;
 }
 
+/* Share-link invitation banner. Sits above the register form when the
+ * user arrived via /register?token=xxx; gives them confirmation of who
+ * invited them before they fill anything in. Subtle, neutral card —
+ * the page background is heavily brand-coloured already, so a loud
+ * tinted banner clashes; we lean on the form's own surface tokens. */
+.invite-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  margin-bottom: 20px;
+  border-radius: 10px;
+  background: var(--td-bg-color-container-hover, rgba(0, 0, 0, 0.03));
+  border: 1px solid var(--td-component-stroke);
+  color: var(--td-text-color-primary);
+}
+
+.invite-banner__icon {
+  margin-top: 2px;
+  font-size: 18px;
+  flex-shrink: 0;
+  color: var(--td-text-color-secondary);
+}
+
+.invite-banner__text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.invite-banner__title {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--td-text-color-primary);
+}
+
+.invite-banner__hint {
+  font-size: 12px;
+  color: var(--td-text-color-secondary);
+  line-height: 1.5;
+}
+
+.invite-banner--error {
+  background: var(--td-error-color-1, rgba(220, 38, 38, 0.06));
+  border-color: var(--td-error-color-3, rgba(220, 38, 38, 0.2));
+  color: var(--td-error-color, #b91c1c);
+  font-size: 13px;
+}
+
 .form-header {
   text-align: center;
   margin-bottom: 32px;
@@ -1120,7 +1332,7 @@ onMounted(async () => {
 
 .form-title {
   font-size: 24px;
-    font-weight: 600;
+  font-weight: 600;
   color: var(--td-text-color-primary);
   margin: 0 0 6px 0;
   font-family: var(--app-font-family);
@@ -1129,8 +1341,65 @@ onMounted(async () => {
 .form-welcome {
   font-size: 13px;
   color: var(--td-text-color-secondary);
-    margin: 0;
+  margin: 0;
   font-family: var(--app-font-family);
+}
+
+.form-hint {
+  margin: 10px 0 0;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--td-success-color-light, rgba(7, 192, 95, 0.08));
+  color: var(--td-brand-color-active);
+  font-size: 12.5px;
+  line-height: 1.5;
+  font-family: var(--app-font-family);
+}
+
+/* 注册入口：从底部小字链接升级为带分隔线的醒目次级按钮，
+   让首次访客一眼就能找到「创建账户」。 */
+.register-cta {
+  margin-top: 8px;
+
+  &__divider {
+    position: relative;
+    text-align: center;
+    margin: 4px 0 14px;
+    color: var(--td-text-color-secondary);
+    font-size: 13px;
+    font-family: var(--app-font-family);
+
+    span {
+      position: relative;
+      z-index: 1;
+      padding: 0 12px;
+      background: rgba(255, 255, 255, 0.97);
+    }
+
+    &::before {
+      content: '';
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: 50%;
+      border-top: 1px solid var(--td-component-stroke);
+    }
+  }
+
+  &__button {
+    height: 46px;
+    border-radius: 8px;
+    font-size: 15px;
+    font-weight: 500;
+    border-color: var(--td-brand-color);
+    color: var(--td-brand-color);
+
+    &:hover {
+      border-color: var(--td-brand-color-active);
+      color: var(--td-brand-color-active);
+      background: var(--td-success-color-light, rgba(7, 192, 95, 0.08));
+    }
+  }
 }
 
 .form-subtitle {
@@ -1156,16 +1425,16 @@ onMounted(async () => {
     border-radius: 8px;
     background: var(--td-bg-color-container);
     transition: all 0.2s;
-    
+
     &:focus-within {
       border-color: var(--td-brand-color);
       box-shadow: 0 0 0 3px rgba(7, 192, 95, 0.1);
     }
-    
+
     &:hover {
       border-color: var(--td-brand-color);
     }
-    
+
     .t-input__inner {
       border: none !important;
       box-shadow: none !important;
@@ -1173,14 +1442,14 @@ onMounted(async () => {
       background: transparent;
       font-size: 15px;
       font-family: var(--app-font-family);
-      
+
       &:focus {
         border: none !important;
         box-shadow: none !important;
         outline: none !important;
       }
     }
-    
+
     .t-input__wrap {
       border: none !important;
       box-shadow: none !important;
@@ -1189,12 +1458,12 @@ onMounted(async () => {
 
   :deep(.t-form-item) {
     margin-bottom: 18px;
-    
+
     &:last-child {
       margin-bottom: 0;
     }
   }
-  
+
   :deep(.t-form-item__control) {
     width: 100%;
   }
@@ -1472,6 +1741,7 @@ onMounted(async () => {
 }
 
 @media (prefers-reduced-motion: reduce) {
+
   .knowledge-node,
   .connection-line {
     animation: none !important;
@@ -1507,13 +1777,19 @@ html[theme-mode="dark"] {
   .header-link {
     background: rgba(255, 255, 255, 0.12);
     border-color: rgba(255, 255, 255, 0.15);
-    &:hover { background: rgba(255, 255, 255, 0.2); }
+
+    &:hover {
+      background: rgba(255, 255, 255, 0.2);
+    }
   }
 
   .language-switch button {
     background: rgba(255, 255, 255, 0.12);
     border-color: rgba(255, 255, 255, 0.15);
-    &:hover { background: rgba(255, 255, 255, 0.2); }
+
+    &:hover {
+      background: rgba(255, 255, 255, 0.2);
+    }
   }
 
   .language-dropdown {
@@ -1522,18 +1798,30 @@ html[theme-mode="dark"] {
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4) !important;
   }
 
-  .tag { background: rgba(255, 255, 255, 0.12); }
+  .tag {
+    background: rgba(255, 255, 255, 0.12);
+  }
 
   .form-card {
     background: rgba(36, 36, 36, 0.97) !important;
     box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4) !important;
   }
 
+  .register-cta__divider span {
+    background: rgba(36, 36, 36, 0.97);
+  }
+
   .form-content .t-input {
     background: var(--td-bg-color-page) !important;
     border-color: rgba(255, 255, 255, 0.1) !important;
-    &:hover { border-color: var(--td-brand-color) !important; }
-    &:focus-within { border-color: var(--td-brand-color) !important; }
+
+    &:hover {
+      border-color: var(--td-brand-color) !important;
+    }
+
+    &:focus-within {
+      border-color: var(--td-brand-color) !important;
+    }
   }
 
   .screenshot-swiper .swiper-pagination-bullet-active {

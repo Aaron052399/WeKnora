@@ -11,6 +11,7 @@ import (
 
 	"github.com/Tencent/WeKnora/cli/internal/cmdutil"
 	"github.com/Tencent/WeKnora/cli/internal/iostreams"
+	"github.com/Tencent/WeKnora/cli/internal/output"
 	"github.com/Tencent/WeKnora/cli/internal/text"
 	sdk "github.com/Tencent/WeKnora/client"
 )
@@ -39,7 +40,7 @@ type KBSearchService interface {
 }
 
 // NewCmdKB builds `weknora search kb "<query>"` - substring + case-insensitive
-// match across KB names and descriptions visible to the active context.
+// match across KB names and descriptions visible to the active profile.
 // Results are sorted by name length (shortest first; usually the closest
 // hit) for deterministic output.
 func NewCmdKB(f *cmdutil.Factory) *cobra.Command {
@@ -48,7 +49,7 @@ func NewCmdKB(f *cmdutil.Factory) *cobra.Command {
 		Use:   `kb "<query>"`,
 		Short: "Find knowledge bases by name or description (client-side substring match)",
 		Long: `Substring + case-insensitive match across KB names and descriptions visible
-to the active context. Results are sorted by name length (shortest first;
+to the active profile. Results are sorted by name length (shortest first;
 usually the closest hit) for deterministic output.
 
 This is name-discovery only - for searching *inside* a knowledge base's
@@ -78,6 +79,11 @@ content, use ` + "`weknora search chunks`" + `.`,
 	}
 	cmd.Flags().IntVarP(&opts.Limit, "limit", "L", 30, "Maximum results to return")
 	cmdutil.AddFormatFlag(cmd, kbSearchFields...)
+	cmdutil.SetAgentHelp(cmd, cmdutil.AgentHelp{
+		UsedFor:  "Find knowledge bases by name or description (client-side case-insensitive substring match). Results come with meta.count; use --limit to cap. For searching content inside a KB, use 'search chunks' instead.",
+		Examples: []string{`weknora search kb "engineering" --format json`},
+		Output:   "envelope.data is an array of KnowledgeBase objects with id, name, knowledge_count; meta.count is the returned count; meta.has_more=true if more matched than --limit",
+	})
 	return cmd
 }
 
@@ -87,7 +93,8 @@ func runKBSearch(ctx context.Context, opts *KBSearchOptions, fopts *cmdutil.Form
 		return cmdutil.WrapHTTP(err, "list knowledge bases")
 	}
 	matches := filterKBs(items, opts.Query)
-	if opts.Limit > 0 && len(matches) > opts.Limit {
+	truncated := opts.Limit > 0 && len(matches) > opts.Limit
+	if truncated {
 		matches = matches[:opts.Limit]
 	}
 
@@ -95,7 +102,8 @@ func runKBSearch(ctx context.Context, opts *KBSearchOptions, fopts *cmdutil.Form
 		if matches == nil {
 			matches = []sdk.KnowledgeBase{}
 		}
-		return fopts.Emit(iostreams.IO.Out, matches)
+		meta := &output.Meta{Count: len(matches), HasMore: truncated}
+		return fopts.Emit(iostreams.IO.Out, matches, meta)
 	}
 	if len(matches) == 0 {
 		fmt.Fprintln(iostreams.IO.Out, "(no matches)")

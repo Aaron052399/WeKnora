@@ -62,9 +62,24 @@ func (s *vectorStoreService) CreateStore(ctx context.Context, store *types.Vecto
 		return err
 	}
 
+	// 2.1. SSRF validation on user-supplied addresses (whitelist-first).
+	// Placed before any network I/O (step 5 TestConnection, step 7 registry
+	// factory) so a blocked address never triggers an outbound connection.
+	if err := validateConnectionAddrSSRF(store.EngineType, store.ConnectionConfig); err != nil {
+		return err
+	}
+
 	// 2.5. Index config validation (bounds, name characters)
 	if err := types.ValidateIndexConfig(store.IndexConfig); err != nil {
 		return err
+	}
+
+	// 2.6. Engine-specific index config validation (OpenSearch HNSW bounds).
+	// Create-only: UpdateStore mutates just the name, so this is not re-run there.
+	if store.EngineType == types.OpenSearchRetrieverEngineType {
+		if err := validateOpenSearchIndexConfig(store.IndexConfig); err != nil {
+			return err
+		}
 	}
 
 	// 3. Duplicate check — DB stores
@@ -261,11 +276,19 @@ func (s *vectorStoreService) SaveDetectedVersion(ctx context.Context, store *typ
 // transient infrastructure failures can be classified, but the returned
 // StoreDisplay is still UnavailableStoreDisplay so a handler that ignores
 // the error degrades gracefully rather than panicking on a zero value.
+// EnvDefaultStoreView is the env-fallback display, enriched with the
+// active env store's engine type when one is configured. Exposed
+// separately from ResolveStoreView so list paths can fill the
+// env-bound entries without invoking the single-KB resolver.
+func (s *vectorStoreService) EnvDefaultStoreView(_ context.Context) types.StoreDisplay {
+	return s.defaultStoreDisplay()
+}
+
 func (s *vectorStoreService) ResolveStoreView(
 	ctx context.Context, tenantID uint64, storeID string,
 ) (types.StoreDisplay, error) {
 	if storeID == "" {
-		return types.DefaultStoreDisplay(), nil
+		return s.defaultStoreDisplay(), nil
 	}
 	store, err := s.repo.GetByID(ctx, tenantID, storeID)
 	if err != nil {
@@ -359,7 +382,7 @@ func (s *vectorStoreService) BatchResolveStoreView(
 	// sentinel so callers can rely on a key for every requested ID.
 	for _, id := range storeIDs {
 		if id == "" {
-			out[id] = types.DefaultStoreDisplay()
+			out[id] = s.defaultStoreDisplay()
 			continue
 		}
 		if _, ok := out[id]; !ok {
@@ -367,6 +390,19 @@ func (s *vectorStoreService) BatchResolveStoreView(
 		}
 	}
 	return out, nil
+}
+
+// defaultStoreDisplay returns the env-fallback display, enriched with the
+// active env store's engine type when one is configured. Callers receive a
+// fully populated StoreDisplay so UIs can render the same badge shape for
+// env-bound and user-bound KBs (e.g. "postgres" vs "qdrant") without
+// branching on Source.
+func (s *vectorStoreService) defaultStoreDisplay() types.StoreDisplay {
+	d := types.DefaultStoreDisplay()
+	if len(s.envStores) > 0 {
+		d.EngineType = string(s.envStores[0].EngineType)
+	}
+	return d
 }
 
 // registerInRegistry creates an engine service and registers it in the registry.
@@ -431,8 +467,147 @@ func validateConnectionConfig(engineType types.RetrieverEngineType, config types
 		if config.Database == "" {
 			return errors.NewValidationError("database is required for doris")
 		}
+	case types.OpenSearchRetrieverEngineType:
+		if config.Addr == "" {
+			return errors.NewValidationError("addr is required for opensearch")
+		}
 	case types.SQLiteRetrieverEngineType:
 		// No connection config needed for SQLite
+	}
+	return nil
+}
+
+// validateConnectionAddrSSRF validates every user-supplied address field of a
+// connection config against the SSRF policy (whitelist first, then the strict
+// IP / port / DNS checks inside secutils.ValidateURLForSSRF). It is applied
+// ONLY at user-input boundaries — CreateStore and TestRawConnection. Env
+// stores and already-stored configs are trusted and intentionally skip it.
+//
+// Unknown engine types are REJECTED (fail-closed): a newly added engine must
+// not be able to reach a dial path without an explicit address mapping here.
+// Empty fields are skipped — required-field presence is the responsibility of
+// validateConnectionConfig, which runs first on every guarded path.
+func validateConnectionAddrSSRF(engineType types.RetrieverEngineType, config types.ConnectionConfig) error {
+	// check validates a single address field. Empty fields are no-ops so this
+	// helper is independent of required-field enforcement.
+	check := func(addr string) error {
+		if addr == "" {
+			return nil
+		}
+		if err := secutils.ValidateURLForSSRF(addr); err != nil {
+			return errors.NewValidationError(
+				secutils.FormatSSRFError("vector store address", addr, err))
+		}
+		return nil
+	}
+
+	switch engineType {
+	case types.ElasticsearchRetrieverEngineType,
+		types.OpenSearchRetrieverEngineType,
+		types.MilvusRetrieverEngineType,
+		types.TencentVectorDBRetrieverEngineType,
+		types.DorisRetrieverEngineType:
+		// Single address field: a URL (es/opensearch) or bare host:port
+		// (milvus/tencent/doris). ValidateURLForSSRF normalises both.
+		return check(config.Addr)
+	case types.QdrantRetrieverEngineType:
+		// Host (+ optional Port) — combine so the port blocklist applies to
+		// the actual dial target rather than just the bare host.
+		addr := config.Host
+		if addr != "" && config.Port != 0 {
+			addr = fmt.Sprintf("%s:%d", config.Host, config.Port)
+		}
+		return check(addr)
+	case types.WeaviateRetrieverEngineType:
+		// Both the HTTP host and the gRPC address are dialed by the driver,
+		// so both must be validated (validating Host alone leaves GrpcAddress
+		// as an open SSRF vector).
+		if err := check(config.Host); err != nil {
+			return err
+		}
+		return check(config.GrpcAddress)
+	case types.SQLiteRetrieverEngineType:
+		// File-based engine; no remote address to validate.
+		return nil
+	default:
+		// Fail closed. Engines without a DB-store address mapping (postgres,
+		// infinity, elasticfaiss, and any future engine) must not silently
+		// bypass SSRF validation. The guarded callers (CreateStore,
+		// TestRawConnection) already restrict to validEngineTypes, so this is
+		// defence-in-depth rather than a user-facing path.
+		return errors.NewValidationError(
+			fmt.Sprintf("SSRF validation is not configured for engine type: %s", engineType))
+	}
+}
+
+// TestRawConnection validates raw (unpersisted) user-supplied connection config
+// — engine-type allowlist, required fields, then the SSRF policy — before
+// delegating to TestConnection. Handlers MUST use this for raw user input
+// (e.g. POST /vector-stores/test).
+//
+// TestConnection itself stays validation-free for trusted callers (env stores
+// and stored configs already validated at create time, which legitimately use
+// internal hosts such as localhost). Do NOT consolidate the two methods.
+func (s *vectorStoreService) TestRawConnection(
+	ctx context.Context,
+	engineType types.RetrieverEngineType,
+	config types.ConnectionConfig,
+) (string, error) {
+	// 1. Engine-type allowlist. Only DB-registerable engines may be probed
+	//    with raw credentials; this blocks e.g. a raw postgres probe against
+	//    the application's own database host (a credential oracle).
+	if !types.IsValidEngineType(engineType) {
+		return "", errors.NewValidationError(
+			fmt.Sprintf("connection test is not supported for engine type: %s", engineType))
+	}
+	// 2. Required fields. Prevents an empty field from falling through to a
+	//    driver's internal default (e.g. milvus empty addr -> localhost:19530),
+	//    which would otherwise dial an internal host unchecked.
+	if err := validateConnectionConfig(engineType, config); err != nil {
+		return "", err
+	}
+	// 3. SSRF policy on every user-supplied address field.
+	if err := validateConnectionAddrSSRF(engineType, config); err != nil {
+		return "", err
+	}
+	return s.TestConnection(ctx, engineType, config)
+}
+
+// openSearch HNSW bound constants. Shards / replicas are NOT validated here —
+// the flat types.ValidateIndexConfig already enforces those caps for every
+// engine. These caps mirror the GetVectorStoreTypes Min/Max so the UI and
+// backend agree. A zero / empty field means "use the driver default" and is
+// always accepted.
+const (
+	osHNSWMMin              = 2
+	osHNSWMMax              = 100
+	osHNSWEFConstructionMin = 2
+	osHNSWEFConstructionMax = 4096
+	osHNSWEFSearchMin       = 1
+	osHNSWEFSearchMax       = 10000
+)
+
+// validateOpenSearchIndexConfig validates the OpenSearch-specific HNSW fields.
+// Called from CreateStore only (the store is create-only; UpdateStore mutates
+// just the name). Unset fields (zero / empty) fall back to driver defaults and
+// are accepted.
+func validateOpenSearchIndexConfig(ic types.IndexConfig) error {
+	if ic.HNSWM != 0 && (ic.HNSWM < osHNSWMMin || ic.HNSWM > osHNSWMMax) {
+		return errors.NewValidationError(
+			fmt.Sprintf("hnsw_m must be between %d and %d", osHNSWMMin, osHNSWMMax))
+	}
+	if ic.HNSWEFConstruction != 0 &&
+		(ic.HNSWEFConstruction < osHNSWEFConstructionMin || ic.HNSWEFConstruction > osHNSWEFConstructionMax) {
+		return errors.NewValidationError(
+			fmt.Sprintf("hnsw_ef_construction must be between %d and %d", osHNSWEFConstructionMin, osHNSWEFConstructionMax))
+	}
+	if ic.HNSWEFSearch != 0 &&
+		(ic.HNSWEFSearch < osHNSWEFSearchMin || ic.HNSWEFSearch > osHNSWEFSearchMax) {
+		return errors.NewValidationError(
+			fmt.Sprintf("hnsw_ef_search must be between %d and %d", osHNSWEFSearchMin, osHNSWEFSearchMax))
+	}
+	if ic.KNNEngine != "" && ic.KNNEngine != "lucene" && ic.KNNEngine != "faiss" {
+		return errors.NewValidationError(`knn_engine must be "lucene" or "faiss"`)
 	}
 	return nil
 }

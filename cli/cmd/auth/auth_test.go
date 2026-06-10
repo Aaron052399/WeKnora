@@ -31,12 +31,15 @@ func TestNewCmdAuth_TreeShape(t *testing.T) {
 
 func TestNewCmdLogin_FlagsRegistered(t *testing.T) {
 	cmd := NewCmdLogin(&cmdutil.Factory{}, nil)
-	for _, name := range []string{"host", "name", "with-token", "format"} {
-		assert.NotNilf(t, cmd.Flags().Lookup(name), "flag %s missing", name)
-	}
-	// `--context` should NOT be a local flag (it's the global persistent flag).
-	// Local registration would silently shadow the global single-shot override.
-	assert.Nil(t, cmd.Flags().Lookup("context"), "auth login must not declare a local --context flag (use --name)")
+	// --format is a persistent root flag (v0.7); only per-command flags here.
+	assert.NotNil(t, cmd.Flags().Lookup("with-token"), "flag with-token missing")
+	// login authenticates the active profile; host/name come from config
+	// (created via `profile add`), so these flags are gone.
+	assert.Nil(t, cmd.Flags().Lookup("host"), "auth login must not declare --host (v0.9)")
+	assert.Nil(t, cmd.Flags().Lookup("name"), "auth login must not declare --name (v0.9)")
+	// --profile is the global persistent override; local registration would
+	// silently shadow it.
+	assert.Nil(t, cmd.Flags().Lookup("profile"), "auth login must not declare a local --profile flag (use the global --profile)")
 }
 
 func TestNewCmdLogin_InvokesRunF(t *testing.T) {
@@ -48,11 +51,12 @@ func TestNewCmdLogin_InvokesRunF(t *testing.T) {
 	}
 	cmd := NewCmdLogin(f, func(_ context.Context, opts *LoginOptions, _ *cmdutil.FormatOptions, _ *cmdutil.Factory, _ LoginService) error {
 		called = true
-		assert.Equal(t, "https://kb.example.com", opts.Host)
+		// host/profile resolve inside runLogin from the active profile;
+		// the runF seam just receives the parsed flags.
 		assert.True(t, opts.WithToken)
 		return nil
 	})
-	cmd.SetArgs([]string{"--host", "https://kb.example.com", "--with-token"})
+	cmd.SetArgs([]string{"--with-token"})
 	require.NoError(t, cmd.Execute())
 	assert.True(t, called)
 }
@@ -71,19 +75,25 @@ func TestPersistAPIKey_WritesContext(t *testing.T) {
 		Prompter: func() prompt.Prompter { return prompt.AgentPrompter{} },
 		Secrets:  func() (secrets.Store, error) { return store, nil },
 	}
+	// persistAPIKey MERGES into the existing active profile record (created
+	// via `profile add`) rather than creating it; seed it first.
+	require.NoError(t, config.Save(&config.Config{
+		CurrentProfile: "ci",
+		Profiles:       map[string]config.Profile{"ci": {Host: "https://kb.example.com"}},
+	}))
 	opts := &LoginOptions{
 		Host:    "https://kb.example.com",
-		Context: "ci",
+		Profile: "ci",
 		APIKey:  "sk-zzz",
 	}
 	require.NoError(t, persistAPIKey(opts, &cmdutil.FormatOptions{Mode: cmdutil.FormatText}, f, nil))
 	v, _ := store.Get("ci", "api_key")
 	assert.Equal(t, "sk-zzz", v)
 	cfg, _ := f.Config()
-	assert.Equal(t, "ci", cfg.CurrentContext)
-	assert.Equal(t, "https://kb.example.com", cfg.Contexts["ci"].Host)
+	assert.Equal(t, "ci", cfg.CurrentProfile, "active profile unchanged by login")
+	assert.Equal(t, "https://kb.example.com", cfg.Profiles["ci"].Host, "existing host preserved by merge")
 	// APIKeyRef should be the mem:// URI from the store's Ref method.
-	assert.Equal(t, "mem://ci/api_key", cfg.Contexts["ci"].APIKeyRef)
+	assert.Equal(t, "mem://ci/api_key", cfg.Profiles["ci"].APIKeyRef)
 }
 
 func TestPersistJWT_StoresBothTokens(t *testing.T) {
@@ -97,7 +107,7 @@ func TestPersistJWT_StoresBothTokens(t *testing.T) {
 	}
 	opts := &LoginOptions{
 		Host:    "https://x",
-		Context: "p",
+		Profile: "p",
 	}
 	resp := &sdk.LoginResponse{
 		Token:        "jwt-acc",

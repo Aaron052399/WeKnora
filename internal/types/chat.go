@@ -10,14 +10,39 @@ type TokenUsage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
+	// CachedTokens is the subset of PromptTokens that hit a provider-side
+	// prompt cache. Populated from `usage.prompt_tokens_details.cached_tokens`
+	// in OpenAI-compatible responses.
+	//
+	// Whether this field is non-zero depends on the provider's caching mode:
+	//
+	//   - Implicit caching (OpenAI, Azure OpenAI, DeepSeek, …) — automatic.
+	//     The field populates whenever the prompt prefix matches a previous
+	//     request within the provider's cache TTL. No client-side opt-in.
+	//
+	//   - Explicit caching (Qwen on Aliyun, Anthropic Claude, …) — opt-in
+	//     required. The caller must attach `cache_control: {"type":
+	//     "ephemeral"}` to the relevant message or content block to make
+	//     the provider create and read the cache. Until that opt-in is
+	//     applied, CachedTokens stays zero even when the prompt prefix is
+	//     otherwise byte-stable.
+	//
+	// Omitted from JSON when zero so payloads stay quiet for providers
+	// that never populate it.
+	CachedTokens int `json:"cached_tokens,omitempty"`
 }
 
 // LLMToolCall represents a function/tool call from the LLM
 type LLMToolCall struct {
-	ID       string       `json:"id"`
-	Type     string       `json:"type"` // "function"
-	Function FunctionCall `json:"function"`
+	ID               string           `json:"id"`
+	Type             string           `json:"type"` // "function"
+	Function         FunctionCall     `json:"function"`
+	ProviderMetadata ToolCallMetadata `json:"provider_metadata,omitempty"`
 }
+
+// ToolCallMetadata carries provider-specific tool-call state that must round-trip
+// with the assistant tool call, without teaching core agent code vendor fields.
+type ToolCallMetadata map[string]json.RawMessage
 
 // FunctionCall represents the function details
 type FunctionCall struct {
@@ -34,6 +59,19 @@ type ChatResponse struct {
 	ToolCalls        []LLMToolCall `json:"tool_calls,omitempty"`
 	FinishReason     string        `json:"finish_reason,omitempty"`
 	Usage            TokenUsage    `json:"usage"`
+
+	// AnswerStreamed reports whether the user-facing answer text was already
+	// streamed live to the final-answer UI area during this round (i.e. the
+	// model answered with plain content). When true, the natural-stop branch
+	// must only emit the closing
+	// Done marker for AnswerEventID instead of re-emitting the whole answer —
+	// otherwise the answer would render twice and "jump" at end of stream.
+	// Transient, never persisted.
+	AnswerStreamed bool `json:"-"`
+	// AnswerEventID is the EventBus event ID under which the live answer
+	// chunks were streamed, so the natural-stop branch can close the same
+	// stream with a Done marker. Empty when AnswerStreamed is false.
+	AnswerEventID string `json:"-"`
 }
 
 // Response type
