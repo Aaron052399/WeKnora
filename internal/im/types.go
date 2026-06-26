@@ -146,6 +146,10 @@ func (ch *IMChannel) computeBotIdentity() string {
 				return "wechatkf:" + corpID + ":" + openKFID
 			}
 		}
+	case "qqbot":
+		if appID := str("app_id"); appID != "" {
+			return "qqbot:" + appID
+		}
 	}
 	return ""
 }

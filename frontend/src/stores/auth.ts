@@ -8,6 +8,16 @@ import { reloadFontFromStorage } from '@/composables/useFont'
 import { reloadThemeFromStorage } from '@/composables/useTheme'
 import { resetMigrationLatch } from '@/composables/preferenceStorage'
 import { BUILTIN_QUICK_ANSWER_ID } from '@/api/agent'
+import { useChatResourcesStore } from '@/stores/chatResources'
+import { useEditorResourcesStore } from '@/stores/editorResources'
+import { useOrganizationStore } from '@/stores/organization'
+
+/** 登出时丢弃 Pinia 内的租户级资源缓存，避免 SPA 重登复用上一账号数据。 */
+function clearSessionResourceCaches() {
+  useChatResourcesStore().invalidate()
+  useEditorResourcesStore().invalidate()
+  useOrganizationStore().clearState()
+}
 
 // Per-user UI preferences are namespaced by user id in localStorage.
 // Reload them whenever the active user changes.
@@ -236,6 +246,7 @@ export const useAuthStore = defineStore('auth', () => {
         if (parsed && typeof parsed === 'object') {
           parsed.selectedAgentId = BUILTIN_QUICK_ANSWER_ID
           parsed.selectedAgentSourceTenantId = null
+          parsed.isAgentEnabled = false
           if (parsed.conversationModels && typeof parsed.conversationModels === 'object') {
             parsed.conversationModels.summaryModelId = ''
             parsed.conversationModels.rerankModelId = ''
@@ -380,6 +391,7 @@ export const useAuthStore = defineStore('auth', () => {
     allTenants.value = []
     memberships.value = []
     pendingInvitationCount.value = 0
+    clearSessionResourceCaches()
 
     // 清空localStorage
     localStorage.removeItem('weknora_user')

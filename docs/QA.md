@@ -260,5 +260,62 @@ Wiki 模式允许 Agent 根据原始文档自动生成并维护一套结构化�
 
 0.6.1 引入了系统管理员与统一平台设置面板（含平台审计日志），与租户内 RBAC 区分：系统管理员管理的是「平台级」配置，而非单个租户内的资源。首次启用需通过系统管理员 bootstrap 流程晋升首个管理员；撤销管理员权限有安全防护（避免误撤导致无人可管）。相关迁移为 `000053_system_admin_and_settings`。
 
+## 18. 上传时如何自定义解析配置（process_config）？
+
+0.6.2 起，文件 / URL / 文件夹上传可携带 `process_config`（`KnowledgeProcessOverrides`），在**本次批次**内覆盖知识库默认的解析引擎、分块、多模态（VLM / ASR）、问题生成、图谱抽取等设置，而不会改动 KB 全局配置。Web UI 在上传前会弹出确认对话框供调整；API 与 `weknora doc upload` 传同名 JSON 即可。
+
+- **与 KB 默认配置的关系**：未传的字段沿用 KB 默认值；`graph_enabled` 仅在 `extract_config.enabled` 为 true 时生效。
+- **重新解析**：`POST /knowledge/:id/reparse` 可在 body 中传 `process_config` 以新配置重跑解析，覆盖项会写入 `knowledge.metadata.process_overrides`。
+- **图片 / 音频校验**：批次含图片时需 KB 已配置 VLM；含音频时需已配置 ASR，否则上传会被拒绝。
+- 详见 [`docs/api/knowledge.md`](./api/knowledge.md)。
+
+## 19. 升级到 0.6.2 后 `weknora` CLI 登录或 MCP 工具报错？
+
+0.6.2 随附 **CLI v0.9**（破坏性变更），常见迁移：
+
+- **`auth login` 不再创建 profile**：先 `weknora profile add <name> --host <url> --use`，再 `weknora auth login`；切换 profile 用全局 `--profile <name>`。
+- **`auth logout` / `auth refresh` 去掉 `--name`**：作用于当前 active profile。
+- **MCP 工具 `agent_invoke` 已更名为 `session_ask`**：外部 MCP 客户端需刷新工具 schema。
+- **`agent create --kb` 改为 `--attach-kb`**；`doc delete --all` 与 `search chunks` / `search docs` 的 `--kb` 必填且支持名称或 ID。
+- 新增 `weknora session stop <session-id>` 可中止进行中的 Agent 运行；仓库内附带 `weknora-rag-search` / `weknora-shared` 内置 Skills。
+- 详见 [`cli/CHANGELOG.md`](../cli/CHANGELOG.md)。
+
+## 20. pgvector 检索变慢或刚升级后需要做什么？
+
+0.6.2 新增迁移 `000059_embeddings_hnsw_1024`，为 **1024 维** embedding（如 bge-m3）在 PostgreSQL pgvector 上创建 HNSW 索引。服务启动会自动执行迁移；若你使用其他维度，该索引可能不适用，需按自身 embedding 维度另行调优。升级后首次大批量入库期间索引构建可能占用额外 I/O，属正常现象。
+
+## 21. 如何在网站嵌入 WeKnora 智能体（Embed Widget）？
+
+0.6.3 起支持**嵌入渠道**：在 **集成中心** 或 Agent 编辑器中创建 embed 渠道，绑定自定义 Agent，获取渠道 ID 与发布 Token（`em_…`），将 `weknora-widget.js` 嵌入外部网页即可提供访客问答。
+
+- **域名白名单**：必须在渠道配置中填写允许加载 Widget 的 Origin，否则 exchange 会返回 403。
+- **安全模式（推荐）**：生产环境不要把 `em_…` 写在页面 HTML 里；由业务后端提供 `token-endpoint`，用发布 Token 调 `POST /api/v1/embed/:id/exchange` 换取短时令牌 `ems_…`（约 30 分钟有效）。详见 [`docs/embed-secure-mode.md`](./embed-secure-mode.md) 与 [`docs/embed-subdomain.md`](./embed-subdomain.md)。
+- **限流**：渠道可配置每分钟 / 每日请求上限；超限返回 429。
+- **子域部署**：若 embed 页面与 API 不同子域，参考 `docs/embed-subdomain.md` 配置 CORS 与 Nginx。
+
+## 22. 文档如何设置多个标签？
+
+0.6.3 将文档标签从单选升级为**多标签**（迁移 `000063_knowledge_multi_tags`）。在知识库列表可为文档打多个标签，侧边栏支持按标签筛选；**标签管理**抽屉可批量维护标签。API 上传 / 更新知识时传 `tag_ids` 数组（取代旧的单 `tag_id`）。
+
+## 23. 如何批量重新解析文档？
+
+在知识库文档列表框选多篇文档后，使用批量操作栏的 **重新解析**；也可调用 `POST /knowledge/batch-reparse`，body 可含 `ids` 与可选 `process_config`。任务异步入队，UI 会在入队后刷新状态。单篇仍可用 `POST /knowledge/:id/reparse`。
+
+## 24. RSS 数据源如何配置？
+
+0.6.3 新增 **RSS / Atom** 连接器。在知识库 **设置 → 数据源** 中选择 RSS，填写 Feed URL 与同步策略即可全量 / 增量拉取正文入库。若部分条目失败，同步日志会展示 partial failure 详情；编辑数据源保存配置**不会**自动触发同步，需手动点同步。
+
+## 25. MCP 远程服务如何配置 OAuth2？
+
+0.6.3 支持 MCP 服务的 **OAuth2 授权**（迁移 `000062_mcp_oauth`）。在 **设置 → MCP** 添加 HTTP 类型服务并选择 OAuth2，按向导完成授权回调；另支持自定义 HTTP Header 与 JSON **代码导入**快速粘贴配置。授权 Token 加密存储，过期后需在 UI 重新授权。
+
+## 26. Embedding 维度如何覆盖？
+
+在 **设置 → 模型** 编辑 Embedding 模型时可填写 **dimensions** 覆盖值（如 1024、1536）。0.6.3 修复了部分提供商请求未携带 `dimensions` 的问题（#1654）。若向量库索引维度与模型不一致，检索可能异常，请保持 KB 绑定向量库与模型维度一致。
+
+## 27. Agent 提示「模型未就绪」无法对话？
+
+0.6.3 在 Agent 选择器引入**模型就绪校验**：绑定的 LLM / Embedding / Rerank / VLM 缺失或配置无效时会阻断对话并给出修复指引。可在模型卡片打开 **调试抽屉** 先测试连通性；确认 KB 与 Agent 引用的模型均存在且可用。
+
 ## P.S.
 如果以上方式未解决问题，请在issue中描述您的问题，并提供必要的日志信息辅助我们进行问题排查

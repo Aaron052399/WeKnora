@@ -279,7 +279,7 @@
                     </t-tooltip>
                   </div>
                 </div>
-                <div v-if="!authStore.isLiteMode" class="bottom-right">
+                <div v-if="!authStore.isLiteMode && showKbOriginBadge(kb)" class="bottom-right">
                   <ResourceOriginBadge :variant="kbOriginVariant(kb)" :creator-name="kb.creator_name" />
                 </div>
               </div>
@@ -504,7 +504,7 @@
                     </t-tooltip>
                   </div>
                 </div>
-                <div v-if="!authStore.isLiteMode" class="bottom-right">
+                <div v-if="!authStore.isLiteMode && showKbOriginBadge(kb)" class="bottom-right">
                   <ResourceOriginBadge :variant="kbOriginVariant(kb)" :creator-name="kb.creator_name" />
                 </div>
               </div>
@@ -603,15 +603,6 @@
                       </div>
                     </t-tooltip>
                   </div>
-                </div>
-                <div class="bottom-right">
-                  <t-tooltip :content="shared.org_name" placement="top">
-                    <div class="org-source">
-                      <img src="@/assets/img/organization-green.svg" class="org-source-icon" alt=""
-                        aria-hidden="true" />
-                      <span>{{ shared.org_name }}</span>
-                    </div>
-                  </t-tooltip>
                 </div>
               </div>
             </div>
@@ -763,7 +754,6 @@
       </Transition>
     </Teleport>
 
-    <TenantModelsGuide :when="showTenantModelsGuide" />
     <ContextualGuide tour="kbList" :when="showKbListContextualGuide" />
   </div>
 </template>
@@ -784,8 +774,8 @@ import KnowledgeBaseEditorModal from './KnowledgeBaseEditorModal.vue'
 import ShareKnowledgeBaseDialog from '@/components/ShareKnowledgeBaseDialog.vue'
 import ListSpaceSidebar from '@/components/ListSpaceSidebar.vue'
 import ResourceOriginBadge from '@/components/ResourceOriginBadge.vue'
+import { shouldShowResourceOriginBadge } from '@/utils/card-list-badge'
 import ContextualGuide from '@/components/ContextualGuide.vue'
-import TenantModelsGuide from '@/components/TenantModelsGuide.vue'
 import { isContextualGuideDone, markContextualGuideDone } from '@/config/contextualGuides'
 import { useTenantModelReadiness } from '@/composables/useTenantModelReadiness'
 import { useI18n } from 'vue-i18n'
@@ -1178,12 +1168,8 @@ const showKbListEmpty = computed(() => {
   return false
 })
 
-const showTenantModelsGuide = computed(
-  () => modelsReadyLoaded.value && showKbListEmpty.value && !isReadyForDocumentKb.value,
-)
-
 const showKbListContextualGuide = computed(
-  () => showKbListEmpty.value && isReadyForDocumentKb.value && !uiStore.showKBEditorModal,
+  () => showKbListEmpty.value && !uiStore.showKBEditorModal,
 )
 
 interface UploadTaskState {
@@ -1365,6 +1351,15 @@ function isMyKb(kb: { creator_id?: string }): boolean {
 //     resourceOrigin.tenant 文案（"本空间"），不会出现空标签。
 function kbOriginVariant(kb: { creator_id?: string }): 'mine' | 'creator' {
   return isMyKb(kb) ? 'mine' : 'creator'
+}
+
+function showKbOriginBadge(kb: { creator_id?: string; creator_name?: string }): boolean {
+  return shouldShowResourceOriginBadge({
+    section: kbSectionOf(kb),
+    variant: kbOriginVariant(kb),
+    creatorName: kb.creator_name,
+    showSectionHeaders: showShareGroupHeaders.value,
+  })
 }
 
 // 通过 ID 处理设置（用于全部 Tab 下的知识库）
@@ -1640,13 +1635,11 @@ const goSettings = (id: string) => {
 
 // 创建知识库
 const handleCreateKnowledgeBase = () => {
-  if (!isReadyForDocumentKb.value) {
-    MessagePlugin.warning(t('contextualGuide.tenantModels.needModelsFirst'))
-    uiStore.openSettings('models')
-    return
-  }
   markContextualGuideDone('kbList')
-  uiStore.openCreateKB()
+  // 无模型时仍打开创建向导，并定位到模型配置页；用户可在向导内添加模型，无需先跳转系统设置
+  const initialSection =
+    modelsReadyLoaded.value && !isReadyForDocumentKb.value ? 'models' : undefined
+  uiStore.openCreateKB('document', initialSection)
 }
 
 // 知识库编辑器成功回调（创建或编辑成功）
@@ -1737,7 +1730,7 @@ const handleUploadFinishedEvent = (event: Event) => {
 
 <style scoped lang="less">
 .kb-list-container {
-  margin: 0 16px 0 0;
+  margin: 0;
   height: 100%;
   box-sizing: border-box;
   flex: 1;
@@ -1751,7 +1744,7 @@ const handleUploadFinishedEvent = (event: Event) => {
   display: flex;
   flex-direction: column;
   min-width: 0;
-  padding: 20px 28px 0 28px;
+  padding: 20px 0 0 28px;
 }
 
 .header {
@@ -1759,6 +1752,7 @@ const handleUploadFinishedEvent = (event: Event) => {
   align-items: center;
   justify-content: space-between;
   margin-bottom: 16px;
+  padding-right: 28px;
 
   .header-title {
     display: flex;
@@ -1800,7 +1794,9 @@ const handleUploadFinishedEvent = (event: Event) => {
   overflow-x: hidden;
   // 顶部不留 padding，sticky 的分组标题 (top: 0) 才能贴到容器最顶；
   // 底部 padding 保留，避免最后一行卡片紧贴边。
-  padding: 0 0 8px;
+  padding: 0 28px 8px 0;
+  scrollbar-width: auto;
+  scrollbar-color: auto;
 }
 
 .kb-list-main-loading {
