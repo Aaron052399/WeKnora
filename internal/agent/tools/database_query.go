@@ -72,11 +72,6 @@ Count documents by status:
   "sql": "SELECT parse_status, COUNT(*) as count FROM knowledges GROUP BY parse_status"
 }
 
-Find recent sessions:
-{
-  "sql": "SELECT id, title, created_at FROM sessions ORDER BY created_at DESC LIMIT 5"
-}
-
 Get storage usage:
 {
   "sql": "SELECT SUM(storage_size) as total_storage FROM knowledges"
@@ -255,21 +250,18 @@ func (t *DatabaseQueryTool) Execute(ctx context.Context, args json.RawMessage) (
 
 // validateAndSecureSQL validates the SQL query and injects tenant_id conditions
 func (t *DatabaseQueryTool) validateAndSecureSQL(sqlQuery string, tenantID uint64) (string, error) {
-	kbIDs := t.searchTargets.GetAllKnowledgeBaseIDs()
-	var knowledgeIDs []string
-	for _, target := range t.searchTargets {
-		if target.Type == types.SearchTargetTypeKnowledge && len(target.KnowledgeIDs) > 0 {
-			knowledgeIDs = append(knowledgeIDs, target.KnowledgeIDs...)
-		}
+	searchScopes := searchScopesFromTargets(t.searchTargets)
+	if len(searchScopes) == 0 {
+		return "", fmt.Errorf("no effective Agent knowledge scope is available")
 	}
-
 	securedSQL, validationResult, err := utils.ValidateAndSecureSQL(
 		sqlQuery,
 		utils.WithSecurityDefaults(tenantID),
 		utils.WithSoftDeleteFilter("knowledge_bases", "knowledges", "chunks"),
 		utils.WithHiddenKBFilter(),
+		utils.WithChunkEnabledFilter(),
 		utils.WithInjectionRiskCheck(),
-		utils.WithSearchScopeFilter(kbIDs, knowledgeIDs),
+		utils.WithSearchScopes(searchScopes),
 	)
 	if err != nil {
 		return "", err
@@ -284,6 +276,25 @@ func (t *DatabaseQueryTool) validateAndSecureSQL(sqlQuery string, tenantID uint6
 	}
 
 	return securedSQL, nil
+}
+
+func searchScopesFromTargets(searchTargets types.SearchTargets) []utils.SearchScope {
+	scopes := make([]utils.SearchScope, 0, len(searchTargets))
+	for _, target := range searchTargets {
+		if target == nil || target.KnowledgeBaseID == "" {
+			continue
+		}
+		knowledgeIDs, tagIDs := searchTargetScope(target)
+		if !searchTargetIsWholeKB(target) && len(knowledgeIDs) == 0 && len(tagIDs) == 0 {
+			continue
+		}
+		scopes = append(scopes, utils.SearchScope{
+			KnowledgeBaseID: target.KnowledgeBaseID,
+			KnowledgeIDs:    knowledgeIDs,
+			TagIDs:          tagIDs,
+		})
+	}
+	return scopes
 }
 
 // formatQueryResults formats query results into readable text

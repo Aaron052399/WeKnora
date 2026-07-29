@@ -22,12 +22,13 @@ var regThinkIndex = regexp.MustCompile(`(?s)<think>.*?</think>`)
 // It reads the chat history knowledge base configuration from the tenant's ChatHistoryConfig,
 // which is managed via the settings UI.
 type messageService struct {
-	messageRepo   interfaces.MessageRepository    // Repository for message storage operations
-	sessionRepo   interfaces.SessionRepository    // Repository for session validation
-	tenantService interfaces.TenantService        // Service for tenant operations (read ChatHistoryConfig)
-	kbService     interfaces.KnowledgeBaseService // Service for knowledge base operations (search chat history KB)
-	knowService   interfaces.KnowledgeService     // Service for knowledge operations (index/delete passages)
-	modelService  interfaces.ModelService         // Service for model operations (rerank model)
+	messageRepo    interfaces.MessageRepository    // Repository for message storage operations
+	sessionRepo    interfaces.SessionRepository    // Repository for session validation
+	tenantService  interfaces.TenantService        // Service for tenant operations (read ChatHistoryConfig)
+	kbService      interfaces.KnowledgeBaseService // Service for knowledge base operations (search chat history KB)
+	knowService    interfaces.KnowledgeService     // Service for knowledge operations (index/delete passages)
+	modelService   interfaces.ModelService         // Service for model operations (rerank model)
+	suggestionRepo interfaces.MessageSuggestionRepository
 }
 
 // NewMessageService creates a new message service instance with the required repositories
@@ -37,14 +38,16 @@ func NewMessageService(messageRepo interfaces.MessageRepository,
 	kbService interfaces.KnowledgeBaseService,
 	knowService interfaces.KnowledgeService,
 	modelService interfaces.ModelService,
+	suggestionRepo interfaces.MessageSuggestionRepository,
 ) interfaces.MessageService {
 	return &messageService{
-		messageRepo:   messageRepo,
-		sessionRepo:   sessionRepo,
-		tenantService: tenantService,
-		kbService:     kbService,
-		knowService:   knowService,
-		modelService:  modelService,
+		messageRepo:    messageRepo,
+		sessionRepo:    sessionRepo,
+		tenantService:  tenantService,
+		kbService:      kbService,
+		knowService:    knowService,
+		modelService:   modelService,
+		suggestionRepo: suggestionRepo,
 	}
 }
 
@@ -69,8 +72,7 @@ func sessionUserIDForLookup(ctx context.Context) string {
 		// Shared-agent pipelines resolve the session owner tenant first; keep that internal lookup tenant-scoped.
 		return ""
 	}
-	userID, _ := types.UserIDFromContext(ctx)
-	return userID
+	return types.SessionOwnerIDFromContext(ctx)
 }
 
 // CreateMessage creates a new message within an existing session
@@ -106,7 +108,7 @@ func (s *messageService) GetMessage(ctx context.Context, sessionID string, messa
 
 	tenantID := types.MustTenantIDFromContext(ctx)
 	logger.Infof(ctx, "Checking if session exists, tenant ID: %d", tenantID)
-	_, err := s.sessionRepo.Get(ctx, tenantID, sessionUserIDForLookup(ctx), sessionID)
+	_, err := loadSessionForRead(ctx, s.sessionRepo, tenantID, sessionUserIDForLookup(ctx), sessionID)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to get session: %v", err)
 		return nil, err
@@ -135,7 +137,7 @@ func (s *messageService) GetMessagesBySession(ctx context.Context,
 
 	tenantID := types.MustTenantIDFromContext(ctx)
 	logger.Infof(ctx, "Checking if session exists, tenant ID: %d", tenantID)
-	_, err := s.sessionRepo.Get(ctx, tenantID, sessionUserIDForLookup(ctx), sessionID)
+	_, err := loadSessionForRead(ctx, s.sessionRepo, tenantID, sessionUserIDForLookup(ctx), sessionID)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to get session: %v", err)
 		return nil, err
@@ -165,11 +167,11 @@ func (s *messageService) GetRecentMessagesBySession(ctx context.Context,
 
 	tenantID, ok := sessionTenantIDForLookup(ctx)
 	if !ok {
-		logger.Error(ctx, "Tenant ID not found in context for session lookup")
-		return nil, errors.New("tenant ID not found in context")
+		logger.Error(ctx, "Workspace ID not found in context for session lookup")
+		return nil, errors.New("workspace ID not found in context")
 	}
 	logger.Infof(ctx, "Checking if session exists, tenant ID: %d", tenantID)
-	_, err := s.sessionRepo.Get(ctx, tenantID, sessionUserIDForLookup(ctx), sessionID)
+	_, err := loadSessionForRead(ctx, s.sessionRepo, tenantID, sessionUserIDForLookup(ctx), sessionID)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to get session: %v", err)
 		return nil, err
@@ -198,11 +200,11 @@ func (s *messageService) GetMessagesBySessionBeforeTime(ctx context.Context,
 
 	tenantID, ok := sessionTenantIDForLookup(ctx)
 	if !ok {
-		logger.Error(ctx, "Tenant ID not found in context for session lookup")
-		return nil, errors.New("tenant ID not found in context")
+		logger.Error(ctx, "Workspace ID not found in context for session lookup")
+		return nil, errors.New("workspace ID not found in context")
 	}
 	logger.Infof(ctx, "Checking if session exists, tenant ID: %d", tenantID)
-	_, err := s.sessionRepo.Get(ctx, tenantID, sessionUserIDForLookup(ctx), sessionID)
+	_, err := loadSessionForRead(ctx, s.sessionRepo, tenantID, sessionUserIDForLookup(ctx), sessionID)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to get session: %v", err)
 		return nil, err
@@ -290,6 +292,11 @@ func (s *messageService) DeleteMessage(ctx context.Context, sessionID string, me
 		})
 		return err
 	}
+	if s.suggestionRepo != nil {
+		if err := s.suggestionRepo.DeleteByMessageID(ctx, tenantID, sessionID, messageID); err != nil {
+			logger.Warnf(ctx, "Failed to delete suggestions for message %s: %v", messageID, err)
+		}
+	}
 
 	// Async cleanup: delete the associated Knowledge entry from the chat history KB.
 	// Use WithoutCancel so the goroutine survives after the HTTP request context is done.
@@ -319,6 +326,11 @@ func (s *messageService) ClearSessionMessages(ctx context.Context, sessionID str
 	if err := s.messageRepo.DeleteMessagesBySessionID(ctx, sessionID); err != nil {
 		logger.Errorf(ctx, "Failed to delete messages for session %s: %v", sessionID, err)
 		return err
+	}
+	if s.suggestionRepo != nil {
+		if err := s.suggestionRepo.DeleteBySessionID(ctx, tenantID, sessionID); err != nil {
+			logger.Warnf(ctx, "Failed to delete suggestions for session %s: %v", sessionID, err)
+		}
 	}
 
 	logger.Infof(ctx, "All messages cleared for session: %s", sessionID)

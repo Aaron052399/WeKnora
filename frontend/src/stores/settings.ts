@@ -2,8 +2,8 @@ import { defineStore } from "pinia";
 import { nextTick } from "vue";
 import { BUILTIN_QUICK_ANSWER_ID, BUILTIN_SMART_REASONING_ID } from "@/api/agent";
 import { getApiBaseUrl } from "@/utils/api-base";
-import { updateMyPreferences, type UserPreferences } from "@/api/auth";
-import { isAgentStreamAgentId, reconcileBuiltinAgentMode } from "@/utils/agent-mode";
+import { isAgentStreamAgentId } from "@/utils/agent-mode";
+import { loadAndReconcileSettings } from "@/stores/settingsStorage";
 
 // 定义设置接口
 interface Settings {
@@ -15,13 +15,16 @@ interface Settings {
   selectedKnowledgeBases: string[];  // 当前选中的知识库ID列表
   selectedFiles: string[]; // 当前选中的文件ID列表
   selectedFileKbMap: Record<string, string>; // 文件ID -> 知识库ID，用于刷新后带 kb_id 拉取共享知识库文件
+  selectedTags: Array<{ id: string; name: string; kbId: string; kbName?: string }>;
+  selectedMCPServices: string[];
+  selectedSkills: string[];
+  selectedTools?: string[];
   modelConfig: ModelConfig;  // 模型配置
   ollamaConfig: OllamaConfig;  // Ollama配置
   webSearchEnabled: boolean;  // 网络搜索是否启用
-  enableMemory: boolean;      // 是否开启记忆功能
   conversationModels: ConversationModels;
   selectedAgentId: string;  // 当前选中的智能体ID
-  selectedAgentSourceTenantId: string | null;  // 当使用共享智能体时，来源租户 ID（用于后端 model/KB/MCP 解析）
+  selectedAgentSourceTenantId: string | null;  // 当使用共享智能体时，来源空间 ID（用于后端 model/KB/MCP 解析）
   autoCheckUpdate?: boolean; // 是否自动检查并下载更新
 }
 
@@ -81,6 +84,9 @@ const defaultSettings: Settings = {
   selectedKnowledgeBases: [],  // 默认为空数组
   selectedFiles: [], // 默认为空数组
   selectedFileKbMap: {},  // 文件ID -> 知识库ID
+  selectedTags: [],
+  selectedMCPServices: [],
+  selectedSkills: [],
   modelConfig: {
     chatModels: [],
     embeddingModels: [],
@@ -92,32 +98,20 @@ const defaultSettings: Settings = {
     enabled: true
   },
   webSearchEnabled: false,  // 默认关闭网络搜索
-  enableMemory: false,       // 默认关闭记忆功能
   conversationModels: {
     summaryModelId: "",
     rerankModelId: "",
     selectedChatModelId: "",  // 用户当前选择的对话模型ID
   },
   selectedAgentId: BUILTIN_QUICK_ANSWER_ID,  // 默认选中快速问答模式
-  selectedAgentSourceTenantId: null as string | null,  // 共享智能体来源租户 ID
+  selectedAgentSourceTenantId: null as string | null,  // 共享智能体来源空间 ID
   autoCheckUpdate: true,
 };
-
-/** Keep builtin agent id and isAgentEnabled in sync after localStorage reload. */
-function loadAndReconcileSettings(): Settings {
-  const loaded = JSON.parse(
-    localStorage.getItem("WeKnora_settings") || JSON.stringify(defaultSettings),
-  ) as Settings;
-  if (reconcileBuiltinAgentMode(loaded)) {
-    localStorage.setItem("WeKnora_settings", JSON.stringify(loaded));
-  }
-  return loaded;
-}
 
 export const useSettingsStore = defineStore("settings", {
   state: () => ({
     // 从本地存储加载设置，如果没有则使用默认设置
-    settings: loadAndReconcileSettings(),
+    settings: loadAndReconcileSettings(defaultSettings),
     // 进入会话时拍下"全局默认"的快照；离开会话时还原。非持久化字段：
     // 刷新页面相当于重新走"进入会话"流程，自然会重新拍快照。
     _defaultsSnapshot: null as Settings | null,
@@ -173,15 +167,12 @@ export const useSettingsStore = defineStore("settings", {
     // 网络搜索是否启用
     isWebSearchEnabled: (state) => state.settings.webSearchEnabled || false,
     
-    // 记忆功能是否启用
-    isMemoryEnabled: (state) => state.settings.enableMemory || false,
-
     // 是否自动检查并下载更新
     isAutoCheckUpdateEnabled: (state) => state.settings.autoCheckUpdate ?? true,
 
     // 当前选中的智能体ID
     selectedAgentId: (state) => state.settings.selectedAgentId || BUILTIN_QUICK_ANSWER_ID,
-    // 共享智能体来源租户 ID（可选）
+    // 共享智能体来源空间 ID（可选）
     selectedAgentSourceTenantId: (state) => state.settings.selectedAgentSourceTenantId ?? null,
   },
 
@@ -337,47 +328,6 @@ export const useSettingsStore = defineStore("settings", {
       localStorage.setItem("WeKnora_settings", JSON.stringify(this.settings));
     },
 
-    // 启用/禁用记忆功能。
-    // 现在是"真用户级"开关：
-    //   - 本地缓存 (localStorage) 用作 UI 首屏 / 离线兜底；
-    //   - PUT /auth/me/preferences 是真正的持久化，跨设备/浏览器同步。
-    //
-    // 乐观更新：先翻本地状态让 UI 立刻响应，再异步写后端；失败则回滚 + throw
-    // 让调用方（GeneralSettings.vue 的 t-switch）可以提示并把开关复位。
-    async toggleMemory(enabled: boolean): Promise<void> {
-      const previous = !!this.settings.enableMemory;
-      this.settings.enableMemory = enabled;
-      localStorage.setItem("WeKnora_settings", JSON.stringify(this.settings));
-
-      try {
-        const resp = await updateMyPreferences({ enable_memory: enabled });
-        if (!resp.success) {
-          throw new Error(resp.message || "update failed");
-        }
-      } catch (err) {
-        // 回滚本地状态，让 UI 复位到旧值。
-        this.settings.enableMemory = previous;
-        localStorage.setItem("WeKnora_settings", JSON.stringify(this.settings));
-        throw err;
-      }
-    },
-
-    // 从 /auth/me 或 /auth/login 返回的 user.preferences 同步到本地 settings。
-    // 调用方：authStore.setUser（每次登录 / 刷新 user / 切租户后都会触发）。
-    // 不写后端，纯本地状态 + localStorage 写入，避免把后端的值再原路 PUT 回去。
-    hydrateFromUserPreferences(prefs: UserPreferences | undefined | null) {
-      if (!prefs) return;
-      let changed = false;
-      if (typeof prefs.enable_memory === "boolean" &&
-          this.settings.enableMemory !== prefs.enable_memory) {
-        this.settings.enableMemory = prefs.enable_memory;
-        changed = true;
-      }
-      if (changed) {
-        localStorage.setItem("WeKnora_settings", JSON.stringify(this.settings));
-      }
-    },
-
     // 启用/禁用自动检查更新
     toggleAutoCheckUpdate(enabled: boolean) {
       this.settings.autoCheckUpdate = enabled;
@@ -406,6 +356,53 @@ export const useSettingsStore = defineStore("settings", {
       localStorage.setItem("WeKnora_settings", JSON.stringify(this.settings));
     },
 
+    addTag(tag: { id: string; name: string; kbId: string; kbName?: string }) {
+      if (!this.settings.selectedTags) this.settings.selectedTags = [];
+      if (!this.settings.selectedTags.some(t => t.id === tag.id && t.kbId === tag.kbId)) {
+        this.settings.selectedTags.push(tag);
+        localStorage.setItem("WeKnora_settings", JSON.stringify(this.settings));
+      }
+    },
+
+    removeTag(tagId: string, kbId?: string) {
+      if (!this.settings.selectedTags) return;
+      this.settings.selectedTags = this.settings.selectedTags.filter(t => !(t.id === tagId && (!kbId || t.kbId === kbId)));
+      localStorage.setItem("WeKnora_settings", JSON.stringify(this.settings));
+    },
+
+    clearTags() {
+      this.settings.selectedTags = [];
+      localStorage.setItem("WeKnora_settings", JSON.stringify(this.settings));
+    },
+
+    addMCPService(serviceId: string) {
+      if (!this.settings.selectedMCPServices) this.settings.selectedMCPServices = [];
+      if (!this.settings.selectedMCPServices.includes(serviceId)) {
+        this.settings.selectedMCPServices.push(serviceId);
+        localStorage.setItem("WeKnora_settings", JSON.stringify(this.settings));
+      }
+    },
+
+    removeMCPService(serviceId: string) {
+      if (!this.settings.selectedMCPServices) return;
+      this.settings.selectedMCPServices = this.settings.selectedMCPServices.filter(id => id !== serviceId);
+      localStorage.setItem("WeKnora_settings", JSON.stringify(this.settings));
+    },
+
+    addSkill(skillName: string) {
+      if (!this.settings.selectedSkills) this.settings.selectedSkills = [];
+      if (!this.settings.selectedSkills.includes(skillName)) {
+        this.settings.selectedSkills.push(skillName);
+        localStorage.setItem("WeKnora_settings", JSON.stringify(this.settings));
+      }
+    },
+
+    removeSkill(skillName: string) {
+      if (!this.settings.selectedSkills) return;
+      this.settings.selectedSkills = this.settings.selectedSkills.filter(name => name !== skillName);
+      localStorage.setItem("WeKnora_settings", JSON.stringify(this.settings));
+    },
+
     setFileKbMap(updates: Record<string, string>) {
       if (!this.settings.selectedFileKbMap) this.settings.selectedFileKbMap = {};
       Object.assign(this.settings.selectedFileKbMap, updates);
@@ -420,11 +417,42 @@ export const useSettingsStore = defineStore("settings", {
     getSelectedFiles(): string[] {
       return this.settings.selectedFiles || [];
     },
+
+    /**
+     * Scope for suggested-questions API (KB / file / tag @mentions).
+     * Leave `limit` undefined to let the backend apply the agent's configured
+     * starter count; pass a number only to request a specific count.
+     */
+    getSuggestedQuestionsParams(limit?: number) {
+      const selectedKBs = this.getSelectedKnowledgeBases();
+      const selectedFiles = this.getSelectedFiles();
+      const tags = this.settings.selectedTags || [];
+      const tagScopes = Object.entries(tags.reduce<Record<string, string[]>>((scopes, tag) => {
+        if (!tag.id || !tag.kbId) return scopes;
+        (scopes[tag.kbId] ||= []).push(tag.id);
+        return scopes;
+      }, {})).map(([knowledge_base_id, ids]) => ({
+        knowledge_base_id,
+        tag_ids: [...new Set(ids)],
+      }));
+      return {
+        // A tag's parent KB is only an ownership hint, not an explicit whole-KB
+        // selection. Keep it in tag_scopes so the backend cannot widen a tag to
+        // every document in that KB.
+        knowledge_base_ids: selectedKBs.length > 0 ? selectedKBs : undefined,
+        knowledge_ids: selectedFiles.length > 0 ? selectedFiles : undefined,
+        tag_scopes: tagScopes.length > 0 ? tagScopes : undefined,
+        limit,
+      };
+    },
     
     // 选择智能体（sourceTenantId 仅在使用共享智能体时传入）
     selectAgent(agentId: string, sourceTenantId?: string | null) {
       this.settings.selectedAgentId = agentId;
       this.settings.selectedAgentSourceTenantId = (sourceTenantId != null && sourceTenantId !== "") ? sourceTenantId : null;
+      // 智能体配置只决定是否具备网络搜索能力，不替用户决定是否在本轮使用。
+      // 每次选择智能体都默认关闭，之后只能由用户从输入框主动开启。
+      this.settings.webSearchEnabled = false;
       // 根据智能体类型自动切换 Agent 模式
       if (agentId === BUILTIN_QUICK_ANSWER_ID) {
         this.settings.isAgentEnabled = false;
@@ -438,6 +466,9 @@ export const useSettingsStore = defineStore("settings", {
       this.settings.selectedKnowledgeBases = [];
       this.settings.selectedFiles = [];
       this.settings.selectedFileKbMap = {};
+      this.settings.selectedTags = [];
+      this.settings.selectedMCPServices = [];
+      this.settings.selectedSkills = [];
       localStorage.setItem("WeKnora_settings", JSON.stringify(this.settings));
     },
     
@@ -499,6 +530,37 @@ export const useSettingsStore = defineStore("settings", {
           // selectedFileKbMap 此时无法重建（state 里没存 KB 归属），交给前端按
           // 需要 lazy 拉取。保留 store 现值，避免误删用户刚加进来的文件映射。
         }
+        if (Array.isArray(state.mentioned_items)) {
+          const fromMentions = state.mentioned_items
+            .filter(item => item.type === "tag" && item.id && item.kb_id)
+            .map(item => ({ id: item.id, name: item.name || item.id, kbId: item.kb_id!, kbName: item.kb_name }));
+          const covered = new Set(fromMentions.map(t => t.id));
+          const orphanTagIds = (state.tag_ids || []).filter(id => id && !covered.has(id));
+          if (orphanTagIds.length > 0 && Array.isArray(state.knowledge_base_ids) && state.knowledge_base_ids.length === 1) {
+            const kbId = state.knowledge_base_ids[0];
+            orphanTagIds.forEach(id => {
+              fromMentions.push({ id, name: id, kbId, kbName: undefined });
+            });
+          }
+          this.settings.selectedTags = fromMentions;
+        } else if (Array.isArray(state.tag_ids)) {
+          const existing = this.settings.selectedTags || [];
+          this.settings.selectedTags = existing.filter(tag => state.tag_ids?.includes(tag.id));
+        }
+        if (Array.isArray(state.mcp_service_ids)) {
+          this.settings.selectedMCPServices = [...state.mcp_service_ids];
+        } else if (Array.isArray(state.mentioned_items)) {
+          this.settings.selectedMCPServices = state.mentioned_items
+            .filter(item => item.type === "mcp" && item.id)
+            .map(item => item.id);
+        }
+        if (Array.isArray(state.skill_names)) {
+          this.settings.selectedSkills = [...state.skill_names];
+        } else if (Array.isArray(state.mentioned_items)) {
+          this.settings.selectedSkills = state.mentioned_items
+            .filter(item => item.type === "skill" && item.id)
+            .map(item => item.skill_name || item.id);
+        }
         if (typeof state.web_search_enabled === "boolean") {
           this.settings.webSearchEnabled = state.web_search_enabled;
         }
@@ -526,6 +588,16 @@ export interface SessionLastRequestStatePayload {
   model_id?: string;
   knowledge_base_ids?: string[];
   knowledge_ids?: string[];
+  tag_ids?: string[];
+  mcp_service_ids?: string[];
+  skill_names?: string[];
+  mentioned_items?: Array<{
+    id: string;
+    name?: string;
+    type: string;
+    kb_id?: string;
+    kb_name?: string;
+    skill_name?: string;
+  }>;
   web_search_enabled?: boolean;
 }
- 

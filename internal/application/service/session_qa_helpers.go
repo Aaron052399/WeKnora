@@ -21,12 +21,13 @@ import (
 func (s *sessionService) resolveKnowledgeBases(
 	ctx context.Context,
 	req *types.QARequest,
-) (kbIDs []string, knowledgeIDs []string) {
+) (kbIDs []string, knowledgeIDs []string, err error) {
 	kbIDs = req.KnowledgeBaseIDs
 	knowledgeIDs = req.KnowledgeIDs
+	requestedKBIDs := append([]string(nil), req.KnowledgeBaseIDs...)
 	customAgent := req.CustomAgent
 
-	hasExplicitMention := len(kbIDs) > 0 || len(knowledgeIDs) > 0
+	hasExplicitMention := len(kbIDs) > 0 || len(knowledgeIDs) > 0 || len(req.TagScopes) > 0
 	if customAgent != nil {
 		logger.Infof(ctx, "KB resolution: hasExplicitMention=%v, RetrieveKBOnlyWhenMentioned=%v, KBSelectionMode=%s",
 			hasExplicitMention, customAgent.Config.RetrieveKBOnlyWhenMentioned, customAgent.Config.KBSelectionMode)
@@ -38,6 +39,7 @@ func (s *sessionService) resolveKnowledgeBases(
 		// to prevent users from injecting KB/knowledge IDs outside the agent's configured range.
 		if customAgent != nil && req.Session != nil && req.Session.TenantID != customAgent.TenantID {
 			kbIDs, knowledgeIDs = s.restrictMentionsToAgentScope(ctx, customAgent, req.Session.TenantID, kbIDs, knowledgeIDs)
+			req.TagScopes = s.restrictTagScopesToAgentScope(ctx, customAgent, req.Session.TenantID, req.TagScopes)
 		}
 	} else if customAgent != nil && customAgent.Config.RetrieveKBOnlyWhenMentioned {
 		kbIDs = nil
@@ -46,7 +48,40 @@ func (s *sessionService) resolveKnowledgeBases(
 	} else if customAgent != nil {
 		kbIDs = s.resolveKnowledgeBasesFromAgent(ctx, customAgent, req.Session.TenantID)
 	}
-	return kbIDs, knowledgeIDs
+
+	if err := types.AuthorizeTenantAPIKeyKnowledgeTargets(ctx, requestedKBIDs, req.KnowledgeIDs); err != nil {
+		return nil, nil, err
+	}
+	kbIDs, err = types.FilterKnowledgeBasesForTenantAPIKeyScope(ctx, requestedKBIDs, kbIDs)
+	if err != nil {
+		return nil, nil, err
+	}
+	return kbIDs, knowledgeIDs, nil
+}
+
+func (s *sessionService) restrictTagScopesToAgentScope(
+	ctx context.Context,
+	agent *types.CustomAgent,
+	sessionTenantID uint64,
+	tagScopes []types.TagScope,
+) []types.TagScope {
+	if len(tagScopes) == 0 {
+		return nil
+	}
+	allowedKBIDs := s.resolveKnowledgeBasesFromAgent(ctx, agent, sessionTenantID)
+	allowedSet := make(map[string]bool, len(allowedKBIDs))
+	for _, id := range allowedKBIDs {
+		allowedSet[id] = true
+	}
+	filtered := make([]types.TagScope, 0, len(tagScopes))
+	for _, scope := range tagScopes {
+		if allowedSet[scope.KnowledgeBaseID] {
+			filtered = append(filtered, scope)
+			continue
+		}
+		logger.Warnf(ctx, "Blocking @mentioned tag scope for KB %s: not in shared agent's allowed scope", scope.KnowledgeBaseID)
+	}
+	return filtered
 }
 
 // resolveChatModelID resolves the effective chat model ID for a QA request.
@@ -119,7 +154,8 @@ func (s *sessionService) resolveRetrievalTenantID(
 // applyAgentOverridesToChatManage applies custom agent configuration overrides
 // to a ChatManage object that was initialized with system defaults.
 // This covers: system prompt, context template, temperature, max tokens, thinking,
-// retrieval thresholds, rewrite settings, fallback settings, FAQ strategy, and history turns.
+// citation output, retrieval thresholds, rewrite settings, fallback settings, FAQ strategy,
+// and history turns.
 func (s *sessionService) applyAgentOverridesToChatManage(
 	ctx context.Context,
 	customAgent *types.CustomAgent,
@@ -153,6 +189,7 @@ func (s *sessionService) applyAgentOverridesToChatManage(
 	// EnsureDefaults pins nil to explicit false so thinking_control wire formats
 	// always receive a value.
 	cm.SummaryConfig.Thinking = customAgent.Config.Thinking
+	cm.CitationEnabled = customAgent.Config.CitationEnabled
 	if customAgent.Config.Thinking != nil {
 		logger.Infof(ctx, "Using custom agent's thinking: %v", *customAgent.Config.Thinking)
 	} else {

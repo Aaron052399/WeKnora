@@ -12,6 +12,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/common"
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/logger"
+	"github.com/Tencent/WeKnora/internal/modelcontext"
 	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/types"
 )
@@ -58,8 +59,19 @@ type responseVerdict struct {
 	step         types.AgentStep
 }
 
+// isNaturalStopFinishReason reports whether a provider finish reason means the
+// assistant has ended its message without requesting more tool work.
+func isNaturalStopFinishReason(reason string) bool {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "stop", "end_turn", "stop_sequence":
+		return true
+	default:
+		return false
+	}
+}
+
 // analyzeResponse inspects the LLM response for stop conditions:
-//   - finish_reason == "stop" with no tool calls → agent is done (natural stop)
+//   - natural finish reason with no tool calls → agent is done (natural stop)
 //   - finish_reason == "content_filter" with no tool calls → agent is done (content filtered)
 //
 // The agent ends a turn by stopping naturally with its answer as plain
@@ -114,8 +126,8 @@ func (e *AgentEngine) analyzeResponse(
 		}
 	}
 
-	// Case 1: LLM stopped naturally without requesting any tool calls
-	if response.FinishReason == "stop" && len(response.ToolCalls) == 0 {
+	// Case 1: LLM stopped naturally without requesting any tool calls.
+	if isNaturalStopFinishReason(response.FinishReason) && len(response.ToolCalls) == 0 {
 		// Strip <think>…</think> blocks that some models embed in content
 		// (DeepSeek, Qwen, etc.) before processing or displaying.
 		response.Content = agenttools.StripThinkBlocks(response.Content)
@@ -206,18 +218,10 @@ func escapeXMLAttr(s string) string {
 }
 
 // buildRuntimeContextBlock builds a metadata block with current time, session
-// info, and the *active retrieval scope for this turn*. The scope snapshot is
-// critical for multi-turn correctness: when the user switches their @mention
-// to a different KB or document between turns, earlier turns still carry
-// their own scope snapshot in history, so the model can see the scope change
-// and avoid reusing last turn's answer against the new scope.
-//
-// The detailed bound-KB metadata (capabilities, recent documents, summaries)
-// also lives here — it is turn state, not instructions, so it belongs next
-// to the user query rather than baked into the system prompt. Keeping it in
-// the user message keeps the system prompt stable/cacheable and lets the
-// model see exactly which KBs were in scope at the time of each historical
-// turn.
+// info, and the *active retrieval scope for this turn only*. It is injected
+// into the current user message for the LLM call and is not persisted into
+// conversation history — replayed user turns keep bare Content so stale scope
+// snapshots do not steer follow-up questions.
 //
 // Per-turn communication_instruction and answer_instruction remind the model
 // not to leak internal tool names or IDs in user-visible text, and to end the
@@ -232,7 +236,7 @@ func buildRuntimeContextBlock(
 	docs []*SelectedDocumentInfo,
 ) string {
 	var sb strings.Builder
-	sb.WriteString("<runtime_context note=\"turn metadata; follow communication_instruction and answer_instruction\">\n")
+	sb.WriteString("<runtime_context scope=\"this_turn\">\n")
 	fmt.Fprintf(&sb, "  <current_time>%s</current_time>\n", time.Now().Format(time.RFC3339))
 	fmt.Fprintf(&sb, "  <session>%s</session>\n", escapeXMLAttr(sessionID))
 
@@ -261,11 +265,18 @@ func buildRuntimeContextBlock(
 			if title == "" {
 				title = d.KnowledgeID
 			}
-			fmt.Fprintf(&sb, "    <document knowledge_id=\"%s\" title=\"%s\" />\n",
-				escapeXMLAttr(d.KnowledgeID), escapeXMLAttr(title))
+			if d.FileType != "" {
+				fmt.Fprintf(&sb, "    <document knowledge_id=\"%s\" title=\"%s\" file_type=\"%s\" />\n",
+					escapeXMLAttr(d.KnowledgeID), escapeXMLAttr(title), escapeXMLAttr(d.FileType))
+			} else {
+				fmt.Fprintf(&sb, "    <document knowledge_id=\"%s\" title=\"%s\" />\n",
+					escapeXMLAttr(d.KnowledgeID), escapeXMLAttr(title))
+			}
 		}
 		sb.WriteString("  </pinned_documents>\n")
-		sb.WriteString("  <note>The pinned-document set above is authoritative for THIS turn. If an earlier turn in this conversation analysed a different document, do NOT reuse that analysis — re-query against the current scope.</note>\n")
+		sb.WriteString("  <note>The pinned-document set above is authoritative for THIS turn. ")
+		sb.WriteString("Prioritize retrieving content from these documents (e.g. list_knowledge_chunks with the knowledge_id). ")
+		sb.WriteString("If an earlier turn analysed a different document, do NOT reuse that analysis — re-query against the current scope.</note>\n")
 	}
 
 	sb.WriteString("  <communication_instruction>Do not use internal tool names or identifiers in your answers or in Thought. Say \"keyword retrieval\" instead of grep_chunks, \"semantic retrieval\" instead of knowledge_search, \"browse full document\" instead of list_knowledge_chunks; likewise never expose chunk_id, knowledge_id, or other internal IDs—refer to documents by title or name.</communication_instruction>\n")
@@ -273,6 +284,158 @@ func buildRuntimeContextBlock(
 
 	sb.WriteString("</runtime_context>")
 	return sb.String()
+}
+
+// buildMustUseBlock emits a short per-turn hint when the user @mentioned MCP/Skill.
+// Tool names are not listed here — they are already in the function-calling schema.
+func buildMustUseBlock(mcpServices []*PinnedMCPServiceInfo, skills []*PinnedSkillInfo) string {
+	var lines []string
+	for _, svc := range mcpServices {
+		if svc == nil {
+			continue
+		}
+		prefix := mcpToolNamePrefix(svc)
+		if prefix == "" {
+			continue
+		}
+		display := sanitizeMustUseField(svc.Name)
+		if display == "" {
+			display = sanitizeMustUseField(svc.ID)
+		}
+		lines = append(lines, fmt.Sprintf("Must use MCP tools whose names start with %s (@%s) to answer the question below.", prefix, display))
+	}
+	for _, skill := range skills {
+		if skill == nil || skill.Name == "" {
+			continue
+		}
+		name := sanitizeMustUseField(skill.Name)
+		lines = append(lines, fmt.Sprintf("Must call read_skill(skill_name=\"%s\") for @Skill \"%s\" before answering.", name, name))
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return "<must_use>\n" + strings.Join(lines, "\n") + "\n</must_use>"
+}
+
+// sanitizeMustUseField strips newlines and angle brackets so an MCP/skill name
+// cannot break out of the <must_use> block or inject extra instruction lines.
+func sanitizeMustUseField(s string) string {
+	replacer := strings.NewReplacer("\n", " ", "\r", " ", "<", " ", ">", " ")
+	return strings.TrimSpace(replacer.Replace(s))
+}
+
+// mcpToolNamePrefix returns the shared prefix for an MCP service's registered
+// tools (e.g. mcp_iwiki_ from mcp_iwiki_getdocument). Tool names are
+// mcp_{sanitized_service_name}_{tool}, and the service slug itself may contain
+// underscores (sanitizeName turns spaces/hyphens into "_"), so we take the
+// longest common prefix across the service's tools and trim it back to the last
+// segment boundary instead of naively cutting at the first underscore.
+func mcpToolNamePrefix(svc *PinnedMCPServiceInfo) string {
+	if svc == nil || len(svc.ToolNames) == 0 {
+		return ""
+	}
+	const head = "mcp_"
+	var mcpNames []string
+	for _, toolName := range svc.ToolNames {
+		if strings.HasPrefix(toolName, head) {
+			mcpNames = append(mcpNames, toolName)
+		}
+	}
+	if len(mcpNames) == 0 {
+		return ""
+	}
+	prefix := mcpNames[0]
+	for _, name := range mcpNames[1:] {
+		prefix = commonStringPrefix(prefix, name)
+	}
+	// Trim to the last underscore so the hint names the service prefix
+	// (mcp_{service}_) rather than a partial tool name.
+	if idx := strings.LastIndex(prefix, "_"); idx >= len(head)-1 {
+		prefix = prefix[:idx+1]
+	}
+	if len(prefix) <= len(head) {
+		return ""
+	}
+	return prefix
+}
+
+func commonStringPrefix(a, b string) string {
+	n := len(a)
+	if len(b) < n {
+		n = len(b)
+	}
+	i := 0
+	for i < n && a[i] == b[i] {
+		i++
+	}
+	return a[:i]
+}
+
+// RenderUserTurnContent builds the user-turn payload for the current LLM call
+// (runtime_context + must_use + query). Used by Execute and finalize paths only;
+// not written to rendered_content / history.
+func (e *AgentEngine) RenderUserTurnContent(sessionID, query string) string {
+	e.registerRuntimeReferences()
+	runtimeCtx := buildRuntimeContextBlock(sessionID, e.knowledgeBasesInfo, e.selectedDocs)
+	runtimeCtx = e.modelContext.CompactKnownText(runtimeCtx)
+	mustUse := buildMustUseBlock(e.pinnedMCPServices, e.pinnedSkills)
+	return composeUserTurnContent(runtimeCtx, mustUse, query)
+}
+
+// registerRuntimeReferences makes bound KBs, pinned documents and recent
+// chunks addressable without exposing their durable IDs to the model.
+func (e *AgentEngine) registerRuntimeReferences() {
+	if e == nil || e.modelContext == nil {
+		return
+	}
+	for _, kb := range e.knowledgeBasesInfo {
+		if kb == nil {
+			continue
+		}
+		e.modelContext.RegisterKnowledgeBase(kb.ID)
+		for _, doc := range kb.RecentDocs {
+			e.modelContext.RegisterDocument(doc.KnowledgeID)
+			if doc.ChunkID != "" {
+				title := doc.Title
+				if title == "" {
+					title = doc.FileName
+				}
+				e.modelContext.RegisterChunk(modelcontext.ChunkReference{
+					ChunkID:         doc.ChunkID,
+					KnowledgeID:     doc.KnowledgeID,
+					KnowledgeBaseID: firstNonEmptyAgent(doc.KnowledgeBaseID, kb.ID),
+					DocumentTitle:   title,
+					ChunkType:       doc.Type,
+				})
+			}
+		}
+	}
+	for _, doc := range e.selectedDocs {
+		if doc == nil {
+			continue
+		}
+		e.modelContext.RegisterDocument(doc.KnowledgeID)
+		e.modelContext.RegisterKnowledgeBase(doc.KnowledgeBaseID)
+	}
+}
+
+func firstNonEmptyAgent(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func composeUserTurnContent(parts ...string) string {
+	nonEmpty := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if strings.TrimSpace(part) != "" {
+			nonEmpty = append(nonEmpty, part)
+		}
+	}
+	return strings.Join(nonEmpty, "\n\n")
 }
 
 // listToolNames returns tool.function names for logging
@@ -310,6 +473,13 @@ func (e *AgentEngine) appendToolResults(
 	messages []chat.Message,
 	step types.AgentStep,
 ) []chat.Message {
+	if stepContainsMarkdownImage(step) {
+		// Keep the requirement at system priority even when a custom Agent prompt
+		// replaces the built-in template. Appending it once, when image-bearing
+		// evidence first appears, also avoids burdening text-only turns.
+		messages = appendAgentRetrievedImageRequirement(messages)
+	}
+
 	// Add assistant message with tool calls (if any)
 	if step.Thought != "" || len(step.ToolCalls) > 0 || step.ReasoningContent != "" {
 		assistantMsg := chat.Message{
@@ -342,10 +512,7 @@ func (e *AgentEngine) appendToolResults(
 
 	// Add tool result messages (role: "tool", following OpenAI format)
 	for _, toolCall := range step.ToolCalls {
-		resultContent := toolCall.Result.Output
-		if !toolCall.Result.Success {
-			resultContent = fmt.Sprintf("Error: %s", toolCall.Result.Error)
-		}
+		resultContent := e.modelContext.ModelToolResultForTool(toolCall.Name, toolCall.Result)
 
 		toolMsg := chat.Message{
 			Role:       "tool",
@@ -435,15 +602,13 @@ func (e *AgentEngine) buildMessagesWithLLMContext(
 		}
 	}
 
-	// Build user message with runtime context safety tag.
-	// The runtime context carries a per-turn scope snapshot so that multi-turn
-	// history preserves the (kb, pinned docs) that each earlier turn ran under;
-	// this is what lets the model detect a scope switch instead of silently
-	// answering the new question against last turn's retrieval.
-	runtimeCtx := buildRuntimeContextBlock(sessionID, e.knowledgeBasesInfo, e.selectedDocs)
+	// Build the current user message through the same registration path used by
+	// final synthesis. Calling buildRuntimeContextBlock directly here would put
+	// durable bound-KB/document IDs into the first model request before the
+	// request-local source registry had seen them.
 	userMsg := chat.Message{
 		Role:    "user",
-		Content: runtimeCtx + "\n\n" + currentQuery,
+		Content: e.RenderUserTurnContent(sessionID, currentQuery),
 		Images:  imageURLs,
 	}
 	messages = append(messages, userMsg)

@@ -15,6 +15,7 @@ import (
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/Tencent/WeKnora/internal/types"
+	secutils "github.com/Tencent/WeKnora/internal/utils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -25,6 +26,12 @@ import (
 // 返回的 cleanup 用 defer 调用即可。
 func newTestRepo(t *testing.T) (*dorisRepository, sqlmock.Sqlmock, *httptest.Server, func()) {
 	t.Helper()
+	// httptest binds to loopback, which production SSRF policy correctly blocks.
+	// Make that one test host explicit and restore the process-global policy when
+	// the test completes.
+	secutils.SetSSRFWhitelistFromRaw("127.0.0.1")
+	t.Cleanup(secutils.ResetSSRFWhitelistForTest)
+
 	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
 	require.NoError(t, err)
 
@@ -231,6 +238,63 @@ func TestPartialUpdateRows_FailureSurfaced(t *testing.T) {
 	assert.Contains(t, err.Error(), "stream load failed")
 }
 
+func TestStreamLoadOnce_BlocksUnsafeTarget(t *testing.T) {
+	repo, _, _, cleanup := newTestRepo(t)
+	defer cleanup()
+
+	// Override the helper's loopback allowance: link-local metadata endpoints
+	// must be rejected before the HTTP client is called.
+	secutils.SetSSRFWhitelistFromRaw("")
+	repo.feHTTPBase = "http://169.254.169.254"
+
+	err := repo.streamLoadOnce(context.Background(), "t", []string{"id"},
+		[]map[string]any{{"id": "x"}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "blocked by SSRF validation")
+}
+
+func TestDorisStreamLoadHTTPClient_BlocksUnsafeRedirect(t *testing.T) {
+	secutils.SetSSRFWhitelistFromRaw("127.0.0.1")
+	t.Cleanup(secutils.ResetSSRFWhitelistForTest)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://169.254.169.254/latest/meta-data", http.StatusTemporaryRedirect)
+	}))
+	defer server.Close()
+
+	req, err := http.NewRequest(http.MethodPut, server.URL, strings.NewReader("[]"))
+	require.NoError(t, err)
+	_, err = newDorisStreamLoadHTTPClient().Do(req)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, secutils.ErrSSRFRedirectBlocked)
+}
+
+func TestDorisStreamLoadHTTPClient_ForwardsAuthorizationToTrustedRedirect(t *testing.T) {
+	secutils.SetSSRFWhitelistFromRaw("127.0.0.1")
+	t.Cleanup(secutils.ResetSSRFWhitelistForTest)
+
+	var gotAuthorization string
+	be := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuthorization = r.Header.Get(headerAuthorization)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer be.Close()
+
+	fe := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, be.URL, http.StatusTemporaryRedirect)
+	}))
+	defer fe.Close()
+
+	req, err := http.NewRequest(http.MethodPut, fe.URL, strings.NewReader("[]"))
+	require.NoError(t, err)
+	req.Header.Set(headerAuthorization, "Basic trusted-doris-credential")
+
+	resp, err := newDorisStreamLoadHTTPClient().Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, "Basic trusted-doris-credential", gotAuthorization)
+}
+
 // ---------------------------------------------------------------------------
 // repository.go：SQL 形态
 // ---------------------------------------------------------------------------
@@ -265,8 +329,10 @@ func TestVectorRetrieve_SQLShape(t *testing.T) {
 		WithArgs("weknora", "weknora_embeddings_3").
 		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
 
-	mock.ExpectQuery(`SELECT id, content, .*inner_product_approximate.*HAVING score >= \? ORDER BY score DESC LIMIT \?`).
-		WithArgs(true, 0.5, 5).
+	// Doris does not support placeholders for LIMIT, so TopK is inlined as a
+	// literal and is not a bound argument.
+	mock.ExpectQuery(`SELECT id, content, .*inner_product_approximate.*HAVING score >= \? ORDER BY score DESC LIMIT \d+`).
+		WithArgs(true, 0.5).
 		WillReturnRows(
 			sqlmock.NewRows([]string{
 				"id", "content", "source_id", "source_type",
@@ -298,8 +364,8 @@ func TestVectorRetrieve_SQLShape_LegacyMode(t *testing.T) {
 		WithArgs("weknora", "weknora_embeddings_3").
 		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
 
-	mock.ExpectQuery(`SELECT id, content, .*cosine_distance_approximate.*HAVING score >= \? ORDER BY score DESC LIMIT \?`).
-		WithArgs(true, 0.5, 5).
+	mock.ExpectQuery(`SELECT id, content, .*cosine_distance_approximate.*HAVING score >= \? ORDER BY score DESC LIMIT \d+`).
+		WithArgs(true, 0.5).
 		WillReturnRows(
 			sqlmock.NewRows([]string{
 				"id", "content", "source_id", "source_type",
@@ -345,8 +411,10 @@ func TestKeywordsRetrieve_SQLShape(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"TABLE_NAME"}).
 			AddRow("weknora_embeddings_768"))
 
+	// LIMIT is inlined (see VectorRetrieve), so only is_enabled and the
+	// MATCH_ANY query string are bound arguments.
 	mock.ExpectQuery(`MATCH_ANY \?`).
-		WithArgs(true, "你好", 3).
+		WithArgs(true, "你好").
 		WillReturnRows(
 			sqlmock.NewRows([]string{
 				"id", "content", "source_id", "source_type",

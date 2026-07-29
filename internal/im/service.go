@@ -3,15 +3,18 @@ package im
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
 	"net/textproto"
 	"os"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	agenttools "github.com/Tencent/WeKnora/internal/agent/tools"
@@ -20,6 +23,7 @@ import (
 	apperrors "github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/logger"
+	mcppkg "github.com/Tencent/WeKnora/internal/mcp"
 	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/ratelimit"
 	"github.com/Tencent/WeKnora/internal/types"
@@ -76,8 +80,22 @@ func stripImageXMLTags(s string) string {
 	})
 }
 
-// storageSchemeRe matches provider:// URLs used by file storage backends.
-var storageSchemeRe = regexp.MustCompile(`\b(local|minio|s3|cos|tos|oss)://[^\s)\]>"]+`)
+// storageSchemeRe matches both legacy provider:// URLs and canonical
+// storage://<backend-id>/provider:// URLs.
+var storageSchemeRe = regexp.MustCompile(
+	`\b(?:resource://[0-9A-Za-z_-]+|` +
+		`(?:storage://[0-9A-Za-z_-]+/)?` +
+		`(?:local|minio|s3|cos|tos|oss|obs|ks3)://[^\s)\]>"]+)`,
+)
+
+// isHTTPResolvedURL reports whether s is an http(s) URL — the only form an IM
+// client can fetch; any provider:// scheme (oss://, local://, …) is not.
+// Scheme match is case-insensitive per RFC 3986 §3.1: a backend may emit an
+// operator-configured host (e.g. OBS_PROXY_DOMAIN) with an uppercase scheme.
+func isHTTPResolvedURL(s string) bool {
+	return len(s) >= 7 && strings.EqualFold(s[:7], "http://") ||
+		len(s) >= 8 && strings.EqualFold(s[:8], "https://")
+}
 
 // rewriteStorageURLs replaces all provider:// URLs in content with HTTP URLs
 // obtained from fileService.GetFileURL. URLs that are already HTTP or cannot
@@ -89,8 +107,9 @@ var storageSchemeRe = regexp.MustCompile(`\b(local|minio|s3|cos|tos|oss)://[^\s)
 //     trade-off: anyone with log access can use a signed URL until it
 //     expires (WeKnora 2h, MinIO 24h). Acceptable for diagnosability.
 //   - Failure or no-op rewrite logs at WARN. The no-op case typically means
-//     APP_EXTERNAL_URL is not configured for the local backend, which is
-//     the most common cause of "image broken in IM" reports.
+//     APP_EXTERNAL_URL is not configured (local backend, or resource:// content
+//     that must be served via /r/), the most common cause of "image broken in
+//     IM" reports.
 func rewriteStorageURLs(ctx context.Context, content string, resolver *imFileServiceResolver) string {
 	if resolver == nil {
 		return content
@@ -106,10 +125,13 @@ func rewriteStorageURLs(ctx context.Context, content string, resolver *imFileSer
 			logger.Warnf(ctx, "[IM] rewriteStorageURLs failed: src=%s err=%v", match, err)
 			return match
 		}
-		if httpURL == match {
+		// A non-http(s) result cannot be rendered by an IM client — covers both the
+		// unchanged no-op and a resource:// alias left as an internal storage:// path
+		// (APP_EXTERNAL_URL unset / nginx not proxying /r/).
+		if !isHTTPResolvedURL(httpURL) {
 			logger.Warnf(ctx,
-				"[IM] rewriteStorageURLs no-op (URL unchanged; for local storage set APP_EXTERNAL_URL): src=%s",
-				match)
+				"[IM] rewriteStorageURLs no-op (resolved to non-HTTP URL %q; for local/private storage set APP_EXTERNAL_URL and ensure nginx proxies /r/): src=%s",
+				httpURL, match)
 			return match
 		}
 		logger.Infof(ctx, "[IM] rewriteStorageURLs: src=%s dst=%s", match, httpURL)
@@ -126,7 +148,7 @@ func rewriteStorageURLs(ctx context.Context, content string, resolver *imFileSer
 // incompleteURLSuffixRe matches a provider:// URL that reaches the end of the
 // string — it may continue in the next chunk.
 var incompleteURLSuffixRe = regexp.MustCompile(
-	`\b(?:local|minio|s3|cos|tos|oss)://[^\s)\]>"]*$`,
+	`\b(?:resource|storage|local|minio|s3|cos|tos|oss|obs|ks3)://[^\s)\]>"]*$`,
 )
 
 // findIncompleteStorageURL returns the byte offset of a potentially truncated
@@ -196,18 +218,19 @@ func holdbackCutoff(chunk string) int {
 }
 
 // formatIMOutboundAnswer strips thinking/tool blocks and applies IM content cleanup.
-func formatIMOutboundAnswer(ctx context.Context, raw string, tenant *types.Tenant, defaultFileSvc interfaces.FileService) string {
-	return cleanIMContent(ctx, FormatIMDisplayContent(raw, StreamDisplayFinal), tenant, defaultFileSvc)
+func formatIMOutboundAnswer(ctx context.Context, raw string, tenant *types.Tenant, defaultFileSvc interfaces.FileService, storageResolvers ...interfaces.StorageBackendResolver) string {
+	return cleanIMContent(ctx, FormatIMDisplayContent(raw, StreamDisplayFinal), tenant, defaultFileSvc, storageResolvers...)
 }
 
 // cleanIMContent applies all IM-specific content transformations:
 //  1. Collapse <image> XML blocks back to plain markdown
 //  2. Strip <kb/> and <web/> citation tags
 //  3. Rewrite provider:// URLs to HTTP URLs (scheme-aware per tenant config)
-func cleanIMContent(ctx context.Context, content string, tenant *types.Tenant, defaultFileSvc interfaces.FileService) string {
+func cleanIMContent(ctx context.Context, content string, tenant *types.Tenant, defaultFileSvc interfaces.FileService, storageResolvers ...interfaces.StorageBackendResolver) string {
 	content = stripImageXMLTags(content)
 	content = stripIMCitationTags(content)
-	resolver := newIMFileServiceResolver(tenant, defaultFileSvc)
+	resolver := newIMFileServiceResolver(tenant, defaultFileSvc, storageResolvers...)
+	resolver.ctx = ctx
 	content = rewriteStorageURLs(ctx, content, resolver)
 	return content
 }
@@ -224,20 +247,31 @@ func imLocalStorageBaseDir() string {
 // for the lifetime of one cleanIMContent / outbound message (avoids re-creating SDK clients
 // for every URL in a long answer).
 type imFileServiceResolver struct {
-	tenant     *types.Tenant
-	defaultSvc interfaces.FileService
-	cache      map[string]interfaces.FileService
+	tenant          *types.Tenant
+	defaultSvc      interfaces.FileService
+	storageResolver interfaces.StorageBackendResolver
+	ctx             context.Context
+	cache           map[string]interfaces.FileService
 }
 
-func newIMFileServiceResolver(tenant *types.Tenant, defaultSvc interfaces.FileService) *imFileServiceResolver {
-	return &imFileServiceResolver{
+func newIMFileServiceResolver(tenant *types.Tenant, defaultSvc interfaces.FileService, storageResolvers ...interfaces.StorageBackendResolver) *imFileServiceResolver {
+	resolver := &imFileServiceResolver{
 		tenant:     tenant,
 		defaultSvc: defaultSvc,
+		ctx:        context.Background(),
 		cache:      make(map[string]interfaces.FileService),
 	}
+	if len(storageResolvers) > 0 {
+		resolver.storageResolver = storageResolvers[0]
+	}
+	return resolver
 }
 
 func (r *imFileServiceResolver) resolve(filePath string) interfaces.FileService {
+	if _, ok := types.ParseResourcePath(filePath); ok {
+		return r.defaultSvc
+	}
+	backendID, _, _ := types.ParseStorageBackendPath(filePath)
 	provider := types.ParseProviderScheme(filePath)
 	if provider == "" {
 		if r.tenant != nil && r.tenant.StorageEngineConfig != nil {
@@ -247,12 +281,21 @@ func (r *imFileServiceResolver) resolve(filePath string) interfaces.FileService 
 			return nil
 		}
 	}
-	if svc, ok := r.cache[provider]; ok {
+	cacheKey := backendID + ":" + provider
+	if svc, ok := r.cache[cacheKey]; ok {
 		return svc
+	}
+	if r.storageResolver != nil && r.tenant != nil {
+		svc, _, err := r.storageResolver.ResolveFileService(r.ctx, r.tenant, backendID, provider, imLocalStorageBaseDir())
+		if err == nil {
+			r.cache[cacheKey] = svc
+			return svc
+		}
+		logger.Warnf(r.ctx, "[IM] resolve storage backend failed: backend_id=%s provider=%s err=%v", backendID, provider, err)
 	}
 	svc := buildIMFileServiceForProvider(r.tenant, provider, r.defaultSvc)
 	if svc != nil {
-		r.cache[provider] = svc
+		r.cache[cacheKey] = svc
 	}
 	return svc
 }
@@ -315,10 +358,17 @@ const (
 	RedisKeyQueueUser  = "im:queue:user:"   // + userKey   — global per-user queue counter
 	RedisKeyRateLimit  = "im:ratelimit:"    // + key       — sliding-window rate limiting
 	RedisKeyGlobalGate = "im:global:active" // global concurrent worker counter
+	// RedisChannelConfig broadcasts durable im_channels mutations so every
+	// application replica invalidates its local adapter/config snapshot.
+	RedisChannelConfig = "im:channel:config"
 
 	defaultRateLimitWindow      = 60 * time.Second
 	defaultRateLimitMaxRequests = 10
 )
+
+// ErrChannelDisabled reports that a channel row exists but is disabled, so
+// callers can tell it apart from a missing channel or a transient failure.
+var ErrChannelDisabled = errors.New("channel is disabled")
 
 // channelState holds runtime state for a running IM channel.
 type channelState struct {
@@ -326,6 +376,15 @@ type channelState struct {
 	Adapter      Adapter
 	Cancel       context.CancelFunc // for stopping websocket goroutines
 	leaderCancel context.CancelFunc // stops the leader renewal goroutine (nil if not leader)
+}
+
+type leaderRetryState struct {
+	cancel context.CancelFunc
+}
+
+type channelConfigEvent struct {
+	ChannelID      string `json:"channel_id"`
+	SourceInstance string `json:"source_instance"`
 }
 
 // AdapterFactory creates an Adapter from an IMChannel configuration.
@@ -361,6 +420,11 @@ type Service struct {
 	// modelService is used to obtain the chat model for generating smart notification replies.
 	modelService interfaces.ModelService
 
+	// oauthManager builds MCP OAuth authorization URLs so IM users can authorize
+	// OAuth-enabled MCP services out-of-band (IM cannot resolve the in-conversation
+	// prompt). May be nil, in which case a generic console hint is shown instead.
+	oauthManager *mcppkg.OAuthManager
+
 	// streamManager writes/reads QA events for distributed stop detection,
 	// consistent with the web StopSession mechanism. May be nil in Lite mode
 	// (but NewStreamManager always returns at least a memory implementation).
@@ -368,14 +432,16 @@ type Service struct {
 
 	// defaultFileSvc is the process-wide storage backend (STORAGE_TYPE / env).
 	// Used when tenant StorageEngineConfig cannot build a service for the URL scheme.
-	defaultFileSvc interfaces.FileService
+	defaultFileSvc  interfaces.FileService
+	storageResolver interfaces.StorageBackendResolver
 
 	// cmdRegistry holds all registered slash-commands.
 	cmdRegistry *CommandRegistry
 
 	// channels maps channel ID -> running channel state
-	channels map[string]*channelState
-	mu       sync.RWMutex
+	channels      map[string]*channelState
+	leaderRetries map[string]*leaderRetryState
+	mu            sync.RWMutex
 
 	// adapterFactories maps platform name -> factory function
 	adapterFactories map[string]AdapterFactory
@@ -405,7 +471,10 @@ type Service struct {
 	// instanceID uniquely identifies this service instance for leader election.
 	instanceID string
 
-	stopCh chan struct{}
+	stopCh         chan struct{}
+	stopOnce       sync.Once
+	subscriberOnce sync.Once
+	stopped        atomic.Bool
 }
 
 // makeUserKey builds the canonical key used to identify a user's request
@@ -468,11 +537,107 @@ func formatQuotedContext(quote *QuotedMessage) string {
 // knowledge bases be merged and resolved correctly, since the shared-KB code
 // gates on a non-empty UserID. Viewer is the least privilege sufficient to
 // retrieve shared KBs.
-func withIMIdentity(ctx context.Context, tenantID uint64) context.Context {
+func withIMIdentity(ctx context.Context, tenantID uint64, channelID string, msg *IncomingMessage) context.Context {
 	ctx = context.WithValue(ctx, types.TenantIDContextKey, tenantID)
 	ctx = context.WithValue(ctx, types.UserIDContextKey, fmt.Sprintf("system-%d", tenantID))
+	if msg != nil {
+		principalID := fmt.Sprintf("%d:%s:%s:%s", tenantID, channelID, msg.Platform, msg.UserID)
+		ctx = types.WithPrincipal(ctx, types.Principal{Type: types.PrincipalIMUser, ID: principalID})
+	}
 	ctx = context.WithValue(ctx, types.TenantRoleContextKey, types.TenantRoleViewer)
+	// IM bots have no live client that can complete an in-conversation MCP OAuth
+	// prompt, so mark the context non-interactive: the agent emits a one-shot
+	// authorization notice (surfaced in the reply) instead of blocking until the
+	// OAuth wait times out for every unauthorized service.
+	ctx = types.WithMCPOAuthNonInteractive(ctx)
 	return ctx
+}
+
+// imMCPAuthService identifies an OAuth-enabled MCP service that the IM user has
+// not authorized yet, collected during a turn so an authorization notice can be
+// appended to the reply.
+type imMCPAuthService struct {
+	ID   string
+	Name string
+}
+
+// mcpOAuthCallbackURL returns the absolute backend callback URL registered with
+// the authorization server, derived from APP_EXTERNAL_URL. Empty when unset.
+func mcpOAuthCallbackURL() string {
+	base := strings.TrimRight(strings.TrimSpace(os.Getenv("APP_EXTERNAL_URL")), "/")
+	if base == "" {
+		return ""
+	}
+	return base + "/api/v1/mcp-oauth/callback"
+}
+
+// buildIMMCPAuthNotice builds a user-facing authorization notice for the given
+// OAuth-enabled MCP services. When the OAuth manager and APP_EXTERNAL_URL are
+// available it generates a per-service authorization URL (StartAuthorization)
+// the user can open; otherwise it falls back to a console hint. Returns "" when
+// there is nothing to report. The user authorizes out-of-band, then re-sends
+// their message to use the service (IM cannot resolve the prompt inline).
+func (s *Service) buildIMMCPAuthNotice(ctx context.Context, services []imMCPAuthService) string {
+	// Deduplicate by service ID, preserving order.
+	seen := make(map[string]bool, len(services))
+	uniq := make([]imMCPAuthService, 0, len(services))
+	for _, svc := range services {
+		if svc.ID == "" || seen[svc.ID] {
+			continue
+		}
+		seen[svc.ID] = true
+		uniq = append(uniq, svc)
+	}
+	if len(uniq) == 0 {
+		return ""
+	}
+
+	tenantID, _ := types.TenantIDFromContext(ctx)
+	principal := types.MCPOAuthPrincipalFromContext(ctx)
+	redirectURI := mcpOAuthCallbackURL()
+	frontendRedirect := strings.TrimSpace(os.Getenv("APP_EXTERNAL_URL"))
+	if frontendRedirect == "" {
+		frontendRedirect = "/"
+	}
+
+	var lines []string
+	for _, svc := range uniq {
+		name := strings.TrimSpace(svc.Name)
+		if name == "" {
+			name = svc.ID
+		}
+		var authURL string
+		if s.oauthManager != nil && redirectURI != "" && tenantID != 0 && principal.Valid() {
+			url, err := s.oauthManager.StartAuthorizationForService(
+				ctx, tenantID, principal, svc.ID, redirectURI, frontendRedirect,
+			)
+			if err != nil {
+				logger.Warnf(ctx, "[IM] Failed to build MCP OAuth URL for service %s: %v", svc.ID, err)
+			} else {
+				authURL = url
+			}
+		}
+		if authURL != "" {
+			lines = append(lines, fmt.Sprintf("• %s：%s", name, authURL))
+		} else {
+			lines = append(lines, fmt.Sprintf("• %s（请在 WeKnora 管理后台完成 OAuth 授权）", name))
+		}
+	}
+
+	return "⚠️ 以下 MCP 服务需要授权后才能使用，请点击链接完成授权，然后重新发送你的消息：\n" +
+		strings.Join(lines, "\n")
+}
+
+// appendIMAuthNotice appends an authorization notice to an existing reply body,
+// separated by a blank line. When the body is empty the notice becomes the body.
+func appendIMAuthNotice(body, notice string) string {
+	if notice == "" {
+		return body
+	}
+	if strings.TrimSpace(body) == "" {
+		return notice
+	}
+	return body + "\n\n" + notice
 }
 
 func buildIMQARequest(
@@ -682,8 +847,10 @@ func NewService(
 	modelService interfaces.ModelService,
 	streamManager interfaces.StreamManager,
 	defaultFileSvc interfaces.FileService,
+	oauthManager *mcppkg.OAuthManager,
 	redisClient *redis.Client,
 	appCfg *config.Config,
+	storageResolver interfaces.StorageBackendResolver,
 ) *Service {
 	// Resolve IM configuration with defaults.
 	workers, maxQueue, maxPerUser, globalMaxWorkers, rlWindow, rlMax := resolveIMConfig(appCfg)
@@ -708,8 +875,11 @@ func NewService(
 		modelService:     modelService,
 		streamManager:    streamManager,
 		defaultFileSvc:   defaultFileSvc,
+		storageResolver:  storageResolver,
+		oauthManager:     oauthManager,
 		cmdRegistry:      registry,
 		channels:         make(map[string]*channelState),
+		leaderRetries:    make(map[string]*leaderRetryState),
 		adapterFactories: make(map[string]AdapterFactory),
 		rateLimiter:      ratelimit.New(redisClient, RedisKeyRateLimit, rlWindow, instanceID),
 		rateLimitMax:     rlMax,
@@ -754,13 +924,22 @@ func (s *Service) RegisterAdapterFactory(platform string, factory AdapterFactory
 
 // Stop gracefully shuts down the service, stopping all channels and background goroutines.
 func (s *Service) Stop() {
-	close(s.stopCh)
-	s.qaQueue.Stop()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for id, cs := range s.channels {
-		s.stopChannelLocked(id, cs)
-	}
+	s.stopOnce.Do(func() {
+		s.stopped.Store(true)
+		close(s.stopCh)
+		if s.qaQueue != nil {
+			s.qaQueue.Stop()
+		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		for id, cs := range s.channels {
+			s.stopChannelLocked(id, cs)
+		}
+		for id, retry := range s.leaderRetries {
+			retry.cancel()
+			delete(s.leaderRetries, id)
+		}
+	})
 }
 
 // dedupCleanupLoop periodically cleans up expired entries from the dedup map.
@@ -783,20 +962,48 @@ func (s *Service) dedupCleanupLoop() {
 	}
 }
 
+// imImageConfigWarning returns an operator warning when IM channels are active
+// but APP_EXTERNAL_URL is unset. resource:// images then render only if the
+// storage backend is itself publicly reachable (e.g. a cloud bucket with a
+// public endpoint); on the default MinIO (internal minio:9000) or local
+// deployment it is not, so images silently break. Advisory only; returns ""
+// when there is nothing to warn about. Pure (no receiver/closures) so it is
+// unit-testable.
+func imImageConfigWarning(activeChannels int, externalURL string) string {
+	if activeChannels == 0 || strings.TrimSpace(externalURL) != "" {
+		return ""
+	}
+	return fmt.Sprintf("[IM] %d IM channel(s) active but APP_EXTERNAL_URL is unset; "+
+		"resource:// images render only if the storage backend is publicly reachable — "+
+		"otherwise set APP_EXTERNAL_URL so they route through nginx /r/",
+		activeChannels)
+}
+
 // LoadAndStartChannels loads all enabled channels from the database and starts them.
 func (s *Service) LoadAndStartChannels() error {
+	s.startChannelConfigSubscriber()
+
 	ctx := context.Background()
 	var channels []IMChannel
 	if err := s.db.Where("enabled = ? AND deleted_at IS NULL", true).Find(&channels).Error; err != nil {
 		return fmt.Errorf("load im channels: %w", err)
 	}
 
+	if msg := imImageConfigWarning(len(channels), os.Getenv("APP_EXTERNAL_URL")); msg != "" {
+		logger.Warnf(ctx, "%s", msg)
+	}
+
 	for i := range channels {
 		ch := channels[i]
 		if err := s.StartChannel(&ch); err != nil {
 			logger.Warnf(ctx, "[IM] Failed to start channel %s (%s/%s): %v", ch.ID, ch.Platform, ch.Name, err)
+		} else if _, _, active := s.GetChannelAdapter(ch.ID); active {
+			// Adapter initialization can launch an asynchronous connection attempt.
+			// Do not claim network readiness here; platform connection logs report it.
+			logger.Infof(ctx, "[IM] Initialized channel runtime: id=%s platform=%s name=%s mode=%s agent=%s",
+				ch.ID, ch.Platform, ch.Name, ch.Mode, ch.AgentID)
 		} else {
-			logger.Infof(ctx, "[IM] Started channel: id=%s platform=%s name=%s mode=%s agent=%s",
+			logger.Infof(ctx, "[IM] Channel runtime is on standby: id=%s platform=%s name=%s mode=%s agent=%s",
 				ch.ID, ch.Platform, ch.Name, ch.Mode, ch.AgentID)
 		}
 	}
@@ -805,12 +1012,98 @@ func (s *Service) LoadAndStartChannels() error {
 	return nil
 }
 
+// startChannelConfigSubscriber listens for durable channel mutations made by
+// other application replicas. Redis Pub/Sub provides the fast path; callback
+// freshness checks and the leader renewal DB check remain the durable fallback
+// if an event is missed while a replica is disconnected.
+func (s *Service) startChannelConfigSubscriber() {
+	if s.redis == nil {
+		return
+	}
+	s.subscriberOnce.Do(func() {
+		go s.channelConfigSubscriberLoop()
+	})
+}
+
+func (s *Service) channelConfigSubscriberLoop() {
+	pubsub := s.redis.Subscribe(context.Background(), RedisChannelConfig)
+	defer pubsub.Close()
+
+	messages := pubsub.Channel()
+	for {
+		select {
+		case <-s.stopCh:
+			return
+		case msg, ok := <-messages:
+			if !ok {
+				return
+			}
+			var event channelConfigEvent
+			if err := json.Unmarshal([]byte(msg.Payload), &event); err != nil {
+				logger.Warnf(context.Background(), "[IM] Ignore invalid channel config event: %v", err)
+				continue
+			}
+			if event.ChannelID == "" || event.SourceInstance == s.instanceID {
+				continue
+			}
+			s.reloadChannelFromDB(event.ChannelID, "config event")
+		}
+	}
+}
+
+func (s *Service) publishChannelConfigChange(channelID string) {
+	if s.redis == nil || channelID == "" || s.stopped.Load() {
+		return
+	}
+	payload, err := json.Marshal(channelConfigEvent{
+		ChannelID:      channelID,
+		SourceInstance: s.instanceID,
+	})
+	if err != nil {
+		return
+	}
+	if err := s.redis.Publish(context.Background(), RedisChannelConfig, payload).Err(); err != nil {
+		// The database is the source of truth. Subscribers also verify freshness
+		// on webhook callbacks / leader renewal, so publication is best-effort.
+		logger.Warnf(context.Background(), "[IM] Publish channel config event failed for %s: %v", channelID, err)
+	}
+}
+
+func (s *Service) reloadChannelFromDB(channelID, reason string) {
+	fresh, err := s.GetChannelByID(channelID)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		s.StopChannel(channelID)
+		return
+	}
+	if err != nil {
+		logger.Warnf(context.Background(), "[IM] Reload channel %s after %s failed: %v", channelID, reason, err)
+		return
+	}
+	if !fresh.Enabled {
+		s.StopChannel(channelID)
+		return
+	}
+	if _, cached, running := s.GetChannelAdapter(channelID); running && sameChannelRuntimeConfig(cached, fresh) {
+		return
+	}
+
+	logger.Infof(context.Background(), "[IM] Reloading channel %s after %s", channelID, reason)
+	if err := s.StartChannel(fresh); err != nil && !s.stopped.Load() {
+		logger.Warnf(context.Background(), "[IM] Reload channel %s after %s failed: %v", channelID, reason, err)
+	}
+}
+
 // StartChannel creates and registers an adapter for the given channel.
 // For WebSocket channels with Redis available, only one instance acquires
 // the leader lock and opens the connection; other instances periodically
 // retry so they can take over if the leader dies.
 func (s *Service) StartChannel(channel *IMChannel) error {
+	if s.stopped.Load() {
+		return fmt.Errorf("im service is stopped")
+	}
+
 	s.mu.Lock()
+	s.stopLeaderRetryLocked(channel.ID)
 	factory, ok := s.adapterFactories[channel.Platform]
 	if !ok {
 		s.mu.Unlock()
@@ -830,7 +1123,7 @@ func (s *Service) StartChannel(channel *IMChannel) error {
 		if !acquired {
 			logger.Infof(context.Background(),
 				"[IM] Channel %s %s owned by another instance, will retry", channel.ID, channel.Mode)
-			go s.wsLeaderRetryLoop(channel)
+			s.scheduleWSLeaderRetry(channel)
 			return nil
 		}
 	}
@@ -861,6 +1154,26 @@ func (s *Service) startChannelInternal(channel *IMChannel, factory AdapterFactor
 	}
 
 	s.mu.Lock()
+	// Stop() may have drained the channel map while the factory was connecting
+	// above, since the factory runs unlocked. Re-check under the lock, otherwise
+	// this adapter's long connection would outlive process shutdown.
+	if s.stopped.Load() {
+		s.mu.Unlock()
+		if leaderCancel != nil {
+			leaderCancel()
+		}
+		if cancelFn != nil {
+			cancelFn()
+		}
+		s.releaseWSLeader(channel.ID)
+		return fmt.Errorf("im service is stopped")
+	}
+	// Idempotency: another goroutine may have started this channel while
+	// factory was running above (factory is called unlocked). Stop the old
+	// state before overwriting so its adapter / long connection doesn't leak.
+	if existing, ok := s.channels[channel.ID]; ok {
+		s.stopChannelLocked(channel.ID, existing)
+	}
 	s.channels[channel.ID] = &channelState{
 		Channel:      channel,
 		Adapter:      adapter,
@@ -876,8 +1189,16 @@ func (s *Service) startChannelInternal(channel *IMChannel, factory AdapterFactor
 func (s *Service) StopChannel(channelID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.stopLeaderRetryLocked(channelID)
 	if cs, ok := s.channels[channelID]; ok {
 		s.stopChannelLocked(channelID, cs)
+	}
+}
+
+func (s *Service) stopLeaderRetryLocked(channelID string) {
+	if retry, ok := s.leaderRetries[channelID]; ok {
+		retry.cancel()
+		delete(s.leaderRetries, channelID)
 	}
 }
 
@@ -916,8 +1237,8 @@ func (s *Service) tryAcquireWSLeader(channelID string) bool {
 	key := RedisKeyLeader + channelID
 	ok, err := s.redis.SetNX(context.Background(), key, s.instanceID, wsLeaderTTL).Result()
 	if err != nil {
-		logger.Warnf(context.Background(), "[IM] Redis leader election failed for %s: %v, assuming leader", channelID, err)
-		return true // Redis error: proceed anyway to avoid channel getting stuck
+		logger.Warnf(context.Background(), "[IM] Redis leader election failed for %s: %v; connection will retry without taking leadership", channelID, err)
+		return false
 	}
 	return ok
 }
@@ -960,8 +1281,49 @@ func (s *Service) wsLeaderRenewLoop(ctx context.Context, channelID string) {
 			result, err := script.Run(ctx, s.redis, []string{key}, s.instanceID, wsLeaderTTL.Milliseconds()).Int64()
 			if err != nil || result == 0 {
 				logger.Warnf(context.Background(),
-					"[IM] Lost leadership for channel %s, stopping adapter", channelID)
+					"[IM] Lost leadership for channel %s, stopping adapter and scheduling recovery", channelID)
+				s.handleWSLeadershipLoss(channelID)
+				return
+			}
+			// Still the leader — verify the channel is still active. A
+			// delete/disable is served by whichever instance got the HTTP
+			// request; without this check the leader would keep the long
+			// connection open until process restart. The renew interval
+			// bounds the worst-case lag.
+			ch, err := s.GetChannelByID(channelID)
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				logger.Infof(context.Background(),
+					"[IM] Channel %s deleted; leader stepping down", channelID)
 				s.StopChannel(channelID)
+				return
+			}
+			if err != nil {
+				// Transient DB error — don't stop a possibly-healthy channel
+				// on a DB hiccup. Skip this round; the next renewal re-checks.
+				logger.Warnf(context.Background(),
+					"[IM] DB check failed for channel %s during leader renewal: %v (skipping this round)", channelID, err)
+				continue
+			}
+			if !ch.Enabled {
+				logger.Infof(context.Background(),
+					"[IM] Channel %s disabled; leader stepping down", channelID)
+				s.StopChannel(channelID)
+				return
+			}
+			_, cached, running := s.GetChannelAdapter(channelID)
+			if !running {
+				return
+			}
+			if !sameChannelRuntimeConfig(cached, ch) {
+				logger.Infof(context.Background(),
+					"[IM] Channel %s config changed; rebuilding runtime", channelID)
+				// StartChannel synchronously stops the old runtime, releases its
+				// lease, and then competes to start the fresh configuration. Return
+				// because the old renewal context has been cancelled.
+				if err := s.StartChannel(ch); err != nil && !s.stopped.Load() {
+					logger.Warnf(context.Background(),
+						"[IM] Rebuild changed channel %s failed: %v", channelID, err)
+				}
 				return
 			}
 		case <-ctx.Done():
@@ -970,11 +1332,53 @@ func (s *Service) wsLeaderRenewLoop(ctx context.Context, channelID string) {
 	}
 }
 
+// handleWSLeadershipLoss tears down the adapter that no longer owns its lease
+// and puts the enabled channel back into the existing takeover loop. The retry
+// loop re-reads the durable channel row before reconnecting, so a concurrent
+// delete, disable, or config update cannot resurrect a stale runtime.
+func (s *Service) handleWSLeadershipLoss(channelID string) {
+	_, channel, running := s.GetChannelAdapter(channelID)
+	if !running || channel == nil {
+		return
+	}
+
+	s.StopChannel(channelID)
+	if s.stopped.Load() {
+		return
+	}
+	s.scheduleWSLeaderRetry(channel)
+}
+
+func (s *Service) scheduleWSLeaderRetry(channel *IMChannel) {
+	retryCtx, cancel := context.WithCancel(context.Background())
+	state := &leaderRetryState{cancel: cancel}
+	s.mu.Lock()
+	if existing, ok := s.leaderRetries[channel.ID]; ok {
+		existing.cancel()
+	}
+	if s.stopped.Load() {
+		s.mu.Unlock()
+		cancel()
+		return
+	}
+	s.leaderRetries[channel.ID] = state
+	s.mu.Unlock()
+	go s.wsLeaderRetryLoop(retryCtx, channel, state)
+}
+
 // wsLeaderRetryLoop periodically tries to acquire the WebSocket leader lock.
-// When it succeeds, it starts the channel adapter.
-func (s *Service) wsLeaderRetryLoop(channel *IMChannel) {
+// When it succeeds, it starts the channel adapter. A per-channel retry state
+// ensures repeated config events cannot accumulate duplicate retry goroutines.
+func (s *Service) wsLeaderRetryLoop(ctx context.Context, channel *IMChannel, state *leaderRetryState) {
 	ticker := time.NewTicker(wsLeaderRetryInterval)
 	defer ticker.Stop()
+	defer func() {
+		s.mu.Lock()
+		if s.leaderRetries[channel.ID] == state {
+			delete(s.leaderRetries, channel.ID)
+		}
+		s.mu.Unlock()
+	}()
 
 	for {
 		select {
@@ -984,6 +1388,34 @@ func (s *Service) wsLeaderRetryLoop(channel *IMChannel) {
 				return
 			}
 			if s.tryAcquireWSLeader(channel.ID) {
+				// Re-check the DB before starting: the channel may have been
+				// deleted or disabled on another instance while we waited for
+				// leadership. The in-memory `channel` is a startup snapshot and
+				// won't reflect that, so without this guard we'd resurrect a
+				// stopped channel (and reopen its long connection).
+				fresh, err := s.GetChannelByID(channel.ID)
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					// Channel was actually deleted — give up for good.
+					s.releaseWSLeader(channel.ID)
+					logger.Infof(context.Background(),
+						"[IM] Channel %s deleted while waiting for leadership; aborting leader takeover", channel.ID)
+					return
+				}
+				if err != nil {
+					// Transient DB error — don't make a destructive decision.
+					// Release the lock for this round and retry on the next tick.
+					s.releaseWSLeader(channel.ID)
+					logger.Warnf(context.Background(),
+						"[IM] DB check failed for channel %s during leader takeover: %v (will retry)", channel.ID, err)
+					continue
+				}
+				if !fresh.Enabled {
+					s.releaseWSLeader(channel.ID)
+					logger.Infof(context.Background(),
+						"[IM] Channel %s disabled while waiting for leadership; aborting leader takeover", channel.ID)
+					return
+				}
+				channel = fresh // use latest config (credentials/mode may have changed)
 				logger.Infof(context.Background(),
 					"[IM] Acquired leadership for channel %s, starting adapter", channel.ID)
 				s.mu.RLock()
@@ -998,6 +1430,8 @@ func (s *Service) wsLeaderRetryLoop(channel *IMChannel) {
 				}
 				return
 			}
+		case <-ctx.Done():
+			return
 		case <-s.stopCh:
 			return
 		}
@@ -1123,6 +1557,68 @@ func (s *Service) GetChannelAdapter(channelID string) (Adapter, *IMChannel, bool
 		return nil, nil, false
 	}
 	return cs.Adapter, cs.Channel, true
+}
+
+// EnsureChannelAdapter loads the durable channel row before serving a webhook
+// callback. This prevents a replica that missed an invalidation event from
+// verifying or processing the callback with stale credentials/configuration.
+func (s *Service) EnsureChannelAdapter(channelID string) (Adapter, *IMChannel, error) {
+	fresh, err := s.GetChannelByID(channelID)
+	if err != nil {
+		// A deleted channel may still exist in this replica's runtime map. Do
+		// not tear down a healthy runtime on a transient database failure.
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			s.StopChannel(channelID)
+		}
+		return nil, nil, err
+	}
+	if !fresh.Enabled {
+		s.StopChannel(channelID)
+		return nil, fresh, ErrChannelDisabled
+	}
+
+	adapter, cached, ok := s.GetChannelAdapter(channelID)
+	if !ok || !sameChannelRuntimeConfig(cached, fresh) {
+		if err := s.StartChannel(fresh); err != nil {
+			return nil, fresh, err
+		}
+		adapter, cached, ok = s.GetChannelAdapter(channelID)
+		if !ok {
+			return nil, fresh, fmt.Errorf("channel adapter is not active on this instance")
+		}
+	}
+	return adapter, cached, nil
+}
+
+// sameChannelRuntimeConfig compares every field that affects adapter creation
+// or message routing. It intentionally does not compare UpdatedAt: PostgreSQL
+// timestamp precision can differ from the in-memory value assigned by GORM,
+// which would otherwise rebuild webhook adapters on every callback.
+func sameChannelRuntimeConfig(cached, fresh *IMChannel) bool {
+	if cached == nil || fresh == nil {
+		return false
+	}
+	return cached.ID == fresh.ID &&
+		cached.TenantID == fresh.TenantID &&
+		cached.AgentID == fresh.AgentID &&
+		cached.Platform == fresh.Platform &&
+		cached.Enabled == fresh.Enabled &&
+		cached.Mode == fresh.Mode &&
+		cached.OutputMode == fresh.OutputMode &&
+		cached.KnowledgeBaseID == fresh.KnowledgeBaseID &&
+		cached.SessionMode == fresh.SessionMode &&
+		equalChannelCredentials(cached.Credentials, fresh.Credentials)
+}
+
+func equalChannelCredentials(left, right types.JSON) bool {
+	var leftValue, rightValue any
+	if err := json.Unmarshal(left, &leftValue); err != nil {
+		return string(left) == string(right)
+	}
+	if err := json.Unmarshal(right, &rightValue); err != nil {
+		return false
+	}
+	return reflect.DeepEqual(leftValue, rightValue)
 }
 
 // GetChannelByID loads a channel from the database.
@@ -1263,7 +1759,7 @@ func (s *Service) HandleMessage(ctx context.Context, msg *IncomingMessage, chann
 		return fmt.Errorf("get tenant: %w", err)
 	}
 	sessionCtx := context.WithValue(ctx, types.TenantInfoContextKey, tenant)
-	sessionCtx = withIMIdentity(sessionCtx, tenantID)
+	sessionCtx = withIMIdentity(sessionCtx, tenantID, channelID, msg)
 
 	// 2. Resolve or create a WeKnora session
 	channelSession, err := s.resolveSession(sessionCtx, msg, tenantID, agentID, channelID, channel.SessionMode)
@@ -1439,7 +1935,7 @@ func (s *Service) executeQARequest(req *qaRequest) {
 	}
 
 	reply := &ReplyMessage{
-		Content: formatIMOutboundAnswer(ctx, answer, req.tenant, s.defaultFileSvc),
+		Content: formatIMOutboundAnswer(ctx, answer, req.tenant, s.defaultFileSvc, s.storageResolver),
 		IsFinal: true,
 	}
 	if err := req.adapter.SendReply(ctx, req.msg, reply); err != nil {
@@ -1896,6 +2392,11 @@ func (s *Service) handleMessageStream(ctx context.Context, msg *IncomingMessage,
 
 		agentCompleteFinalAnswer string
 		streamedAny              bool
+
+		// mcpAuthServices collects OAuth services that need out-of-band
+		// authorization (IM cannot resolve the in-conversation prompt).
+		mcpAuthServices []imMCPAuthService
+		mcpAuthSeen     = make(map[string]bool)
 	)
 	closeDone := func() { closeOnce.Do(func() { close(done) }) }
 	closeComplete := func() { completeOnce.Do(func() { close(completeDone) }) }
@@ -2100,6 +2601,23 @@ func (s *Service) handleMessageStream(ctx context.Context, msg *IncomingMessage,
 		return nil
 	})
 
+	// An OAuth-enabled MCP service the IM user has not authorized yet. IM cannot
+	// resolve the in-conversation prompt, so collect the service name and append
+	// an authorization notice to the final reply (deduped per service).
+	eventBus.On(event.EventMCPOAuthRequired, func(_ context.Context, evt event.Event) error {
+		data, ok := evt.Data.(event.MCPOAuthRequiredData)
+		if !ok {
+			return nil
+		}
+		bufMu.Lock()
+		if !mcpAuthSeen[data.ServiceID] {
+			mcpAuthSeen[data.ServiceID] = true
+			mcpAuthServices = append(mcpAuthServices, imMCPAuthService{ID: data.ServiceID, Name: data.ServiceName})
+		}
+		bufMu.Unlock()
+		return nil
+	})
+
 	// Determine whether to use agent mode (already set above for event handlers).
 	requestID := uuid.New().String()
 
@@ -2172,7 +2690,7 @@ func (s *Service) handleMessageStream(ctx context.Context, msg *IncomingMessage,
 			displaySource = displaySource[:cut]
 		}
 
-		display := cleanIMContent(ctx, displaySource, tenant, s.defaultFileSvc)
+		display := cleanIMContent(ctx, displaySource, tenant, s.defaultFileSvc, s.storageResolver)
 		if err := streamer.UpdateStreamContent(ctx, msg, streamID, display); err != nil {
 			logger.Warnf(ctx, "[IM] UpdateStreamContent failed: %v", err)
 		}
@@ -2208,9 +2726,10 @@ loop:
 	answer := resolvedAnswer
 	finalErr := qaErr
 	noVisibleContent := !streamedAny && strings.TrimSpace(resolvedAnswer) == ""
+	authServices := append([]imMCPAuthService(nil), mcpAuthServices...)
 	bufMu.Unlock()
 
-	finalDisplay := cleanIMContent(ctx, FormatIMFinalFromParts(parts), tenant, s.defaultFileSvc)
+	finalDisplay := cleanIMContent(ctx, FormatIMFinalFromParts(parts), tenant, s.defaultFileSvc, s.storageResolver)
 	if noVisibleContent || finalDisplay == "" {
 		fallback := "抱歉，我暂时无法回答这个问题。"
 		if finalErr != nil {
@@ -2220,6 +2739,10 @@ loop:
 		if answer == "" {
 			answer = fallback
 		}
+	}
+	if notice := s.buildIMMCPAuthNotice(ctx, authServices); notice != "" {
+		finalDisplay = appendIMAuthNotice(finalDisplay, notice)
+		answer = appendIMAuthNotice(answer, notice)
 	}
 
 	if err := streamer.FinalizeStream(ctx, msg, streamID, finalDisplay); err != nil {
@@ -2253,7 +2776,7 @@ func (s *Service) fallbackNonStream(ctx context.Context, msg *IncomingMessage, s
 		answer = "抱歉，处理您的问题时出现了异常，请稍后再试。"
 	}
 
-	return adapter.SendReply(ctx, msg, &ReplyMessage{Content: formatIMOutboundAnswer(ctx, answer, tenant, s.defaultFileSvc), IsFinal: true})
+	return adapter.SendReply(ctx, msg, &ReplyMessage{Content: formatIMOutboundAnswer(ctx, answer, tenant, s.defaultFileSvc, s.storageResolver), IsFinal: true})
 }
 
 // runQA executes the WeKnora QA pipeline and returns the full answer text.
@@ -2269,6 +2792,8 @@ func (s *Service) runQA(ctx context.Context, session *types.Session, query strin
 	var answerMu sync.Mutex
 	var answerBuilder strings.Builder
 	var qaErr error
+	var mcpAuthServices []imMCPAuthService
+	mcpAuthSeen := make(map[string]bool)
 	done := make(chan struct{})
 	completeDone := make(chan struct{})
 	var closeOnce sync.Once
@@ -2301,6 +2826,22 @@ func (s *Service) runQA(ctx context.Context, session *types.Session, query strin
 		answerMu.Unlock()
 		closeDone()
 		closeComplete()
+		return nil
+	})
+
+	// Collect OAuth services that need out-of-band authorization (IM cannot
+	// resolve the in-conversation prompt); appended to the answer below.
+	eventBus.On(event.EventMCPOAuthRequired, func(_ context.Context, evt event.Event) error {
+		data, ok := evt.Data.(event.MCPOAuthRequiredData)
+		if !ok {
+			return nil
+		}
+		answerMu.Lock()
+		if !mcpAuthSeen[data.ServiceID] {
+			mcpAuthSeen[data.ServiceID] = true
+			mcpAuthServices = append(mcpAuthServices, imMCPAuthService{ID: data.ServiceID, Name: data.ServiceName})
+		}
+		answerMu.Unlock()
 		return nil
 	})
 
@@ -2404,6 +2945,7 @@ func (s *Service) runQA(ctx context.Context, session *types.Session, query strin
 	answerMu.Lock()
 	answer := answerBuilder.String()
 	qaError := qaErr
+	authServices := append([]imMCPAuthService(nil), mcpAuthServices...)
 	answerMu.Unlock()
 
 	if answer == "" && qaError != nil {
@@ -2411,6 +2953,9 @@ func (s *Service) runQA(ctx context.Context, session *types.Session, query strin
 	}
 	if answer == "" {
 		answer = "抱歉，我暂时无法回答这个问题。"
+	}
+	if notice := s.buildIMMCPAuthNotice(ctx, authServices); notice != "" {
+		answer = appendIMAuthNotice(answer, notice)
 	}
 
 	// Update assistant message with the full answer (including citation tags for web rendering).
@@ -2498,6 +3043,7 @@ func (s *Service) CreateChannel(channel *IMChannel) error {
 			logger.Warnf(context.Background(), "[IM] Created channel %s but failed to start: %v", channel.ID, err)
 		}
 	}
+	s.publishChannelConfigChange(channel.ID)
 	return nil
 }
 
@@ -2534,6 +3080,7 @@ func (s *Service) UpdateChannel(channel *IMChannel) error {
 			logger.Warnf(context.Background(), "[IM] Updated channel %s but failed to restart: %v", channel.ID, err)
 		}
 	}
+	s.publishChannelConfigChange(channel.ID)
 	return nil
 }
 
@@ -2546,19 +3093,22 @@ func (s *Service) DeleteChannelsByAgent(agentID string, tenantID uint64) error {
 		Find(&channels).Error; err != nil {
 		return err
 	}
-	for i := range channels {
-		s.StopChannel(channels[i].ID)
-	}
 	if len(channels) == 0 {
 		return nil
 	}
-	return s.db.Where("agent_id = ? AND tenant_id = ? AND deleted_at IS NULL", agentID, tenantID).
-		Delete(&IMChannel{}).Error
+	if err := s.db.Where("agent_id = ? AND tenant_id = ? AND deleted_at IS NULL", agentID, tenantID).
+		Delete(&IMChannel{}).Error; err != nil {
+		return err
+	}
+	for i := range channels {
+		s.StopChannel(channels[i].ID)
+		s.publishChannelConfigChange(channels[i].ID)
+	}
+	return nil
 }
 
 // DeleteChannel soft-deletes a channel and stops it. Only deletes if the channel belongs to the given tenant.
 func (s *Service) DeleteChannel(channelID string, tenantID uint64) error {
-	s.StopChannel(channelID)
 	result := s.db.Where("id = ? AND tenant_id = ?", channelID, tenantID).Delete(&IMChannel{})
 	if result.Error != nil {
 		return result.Error
@@ -2566,6 +3116,8 @@ func (s *Service) DeleteChannel(channelID string, tenantID uint64) error {
 	if result.RowsAffected == 0 {
 		return fmt.Errorf("channel not found")
 	}
+	s.StopChannel(channelID)
+	s.publishChannelConfigChange(channelID)
 	return nil
 }
 
@@ -2586,6 +3138,7 @@ func (s *Service) ToggleChannel(channelID string, tenantID uint64) (*IMChannel, 
 	} else {
 		s.StopChannel(channelID)
 	}
+	s.publishChannelConfigChange(channelID)
 	return &ch, nil
 }
 
@@ -2678,7 +3231,7 @@ func (s *Service) processFileToKnowledgeBase(ctx context.Context, msg *IncomingM
 	tenant, err := s.tenantService.GetTenantByID(ctx, tenantID)
 	if err != nil {
 		logger.Errorf(ctx, "[IM] Failed to get tenant %d for file processing: %v", tenantID, err)
-		s.sendFileResult(ctx, adapter, msg, msg.FileName, false, "获取租户信息失败", channel)
+		s.sendFileResult(ctx, adapter, msg, msg.FileName, false, "获取空间信息失败", channel)
 		return
 	}
 	kbCtx := context.WithValue(ctx, types.TenantIDContextKey, tenantID)

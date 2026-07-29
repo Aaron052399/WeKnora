@@ -13,6 +13,7 @@ export interface UseChatStreamHandlerOptions {
   isAgentStreamSession: () => boolean
   scrollToBottom: (force?: boolean) => void
   onReplyComplete?: (content: string) => void
+  onTurnComplete?: (message: ChatMessage) => void
   onError?: (message: string) => void
   /** Main chat: keep the last incomplete message reactive for continue-stream. */
   preserveIncompleteStreamReactive?: boolean
@@ -42,6 +43,7 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
     isAgentStreamSession,
     scrollToBottom,
     onReplyComplete,
+    onTurnComplete,
     onError,
     preserveIncompleteStreamReactive = false,
     isFirstEnter,
@@ -259,7 +261,8 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
     const events: ChatMessage[] = []
 
     if (agentSteps && Array.isArray(agentSteps) && agentSteps.length > 0) {
-      agentSteps.forEach((step: ChatMessage) => {
+      agentSteps.forEach((rawStep) => {
+        const step = rawStep as ChatMessage
         const stepTimestamp = step.timestamp ? new Date(String(step.timestamp)).getTime() : 0
         const toolCalls = step.tool_calls
         const hasToolCalls = toolCalls && Array.isArray(toolCalls) && toolCalls.length > 0
@@ -595,6 +598,41 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
         }
         break
       }
+      case 'mcp_oauth_required': {
+        if (!message.agentEventStream) message.agentEventStream = []
+        const d = dataPayload || {}
+        ;(message.agentEventStream as ChatMessage[]).push({
+          type: 'mcp_oauth_required',
+          pending_id: d.pending_id,
+          service_id: d.service_id,
+          service_name: d.service_name,
+          mcp_tool_name: d.mcp_tool_name,
+          timeout_seconds: d.timeout_seconds,
+          requested_at: d.requested_at,
+          tool_call_id: d.tool_call_id,
+          resolved: false,
+        })
+        break
+      }
+      case 'mcp_oauth_resolved': {
+        const d = dataPayload || {}
+        const pid = d.pending_id
+        const sid = d.service_id
+        const list = message.agentEventStream as ChatMessage[] | undefined
+        // Resolve the matching card; also clear any other still-pending cards
+        // for the same service (parallel tool calls dedup to a single auth).
+        list?.forEach((e) => {
+          if (e.type !== 'mcp_oauth_required' || e.resolved) return
+          if (e.pending_id === pid || (sid && e.service_id === sid && d.authorized)) {
+            e.resolved = true
+            e.authorized = d.authorized
+            e.resolve_reason = d.reason
+            e.timed_out = d.timed_out
+            e.canceled = d.canceled
+          }
+        })
+        break
+      }
       case 'tool_call': {
         if (dataPayload?.tool_name === 'final_answer') break
         if (message.agentEventStream) {
@@ -772,6 +810,7 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
         isReplying.value = false
         message.is_completed = true
         onReplyComplete?.(String(message.content || ''))
+        onTurnComplete?.(message)
         fullContent.value = ''
         currentAssistantMessageId.value = ''
         if (message.agentEventStream) {
@@ -967,6 +1006,10 @@ export function useChatStreamHandler(options: UseChatStreamHandlerOptions) {
       currentAssistantMessageId.value = ''
     }
     updateAssistantSession(obj)
+    if (data.done) {
+      const completed = resolveActiveAssistantMessage(data) || obj
+      onTurnComplete?.(completed)
+    }
   }
 
   return {

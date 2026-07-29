@@ -58,6 +58,15 @@ python main.py --version              # 显示版本信息
 
 ## 安装为 Python 包
 
+### 从 PyPI 安装
+
+```bash
+pip install weknora-mcp
+```
+
+> PyPI 包名为 **`weknora-mcp`**（请勿与第三方包 `weknora-mcp-server` 混淆）。
+> 安装后命令行入口仍为 `weknora-mcp-server` / `weknora-server`。
+
 ### 开发模式安装
 ```bash
 pip install -e .
@@ -96,9 +105,9 @@ python test_module.py
 
 该 MCP 服务器提供以下工具：
 
-### 租户管理
-- `create_tenant` - 创建新租户
-- `list_tenants` - 列出所有租户
+### 空间管理
+- `create_tenant` - 创建新空间
+- `list_tenants` - 列出所有空间
 
 ### 知识库管理
 - `create_knowledge_base` - 创建知识库

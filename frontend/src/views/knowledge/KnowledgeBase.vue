@@ -2,7 +2,6 @@
 import { ref, onMounted, onUnmounted, watch, reactive, computed, nextTick } from "vue";
 import { MessagePlugin } from "tdesign-vue-next";
 import DocContent from "@/components/doc-content.vue";
-import KnowledgeProcessingTimeline from "@/components/knowledge-processing-timeline.vue";
 import useKnowledgeBase from '@/hooks/useKnowledgeBase';
 import { useRoute, useRouter } from 'vue-router';
 import EmptyKnowledge from '@/components/empty-knowledge.vue';
@@ -40,11 +39,11 @@ import {
 import { knowledgeSpansPayloadHasTrace } from '@/utils/knowledgeTrace';
 import FAQEntryManager from './components/FAQEntryManager.vue';
 import DocumentListView from './components/DocumentListView.vue';
+import DocumentCardView from './components/DocumentCardView.vue';
 import DocumentBatchBar from './components/DocumentBatchBar.vue';
 import KbUploadSourceDropdown from './components/KbUploadSourceDropdown.vue';
 import TagEditDialog from './components/TagEditDialog.vue';
 import KbTagManageDrawer from './components/KbTagManageDrawer.vue';
-import { useTagChipsOverflow } from '@/composables/useTagChipsOverflow';
 import type { KnowledgeProcessOverrides } from '@/types/knowledgeProcess';
 import { useUploadConfirmStore, type UploadConfirmResult } from '@/stores/uploadConfirm';
 import WikiBrowser from './wiki/WikiBrowser.vue';
@@ -56,8 +55,6 @@ import {
 } from './wikiStatusRefresh';
 import { listMoveTargets, moveKnowledge, getKnowledgeMoveProgress } from '@/api/knowledge-base';
 import { useI18n } from 'vue-i18n';
-import { formatStringDate } from '@/utils';
-import { formatFileSize } from '@/utils/files';
 import { useMarqueeSelect } from '@/hooks/useMarqueeSelect';
 import type { ParserEngineInfo } from '@/api/system';
 const route = useRoute();
@@ -157,6 +154,10 @@ onUnmounted(() => {
 })
 const missingStorageEngine = computed(() => {
   if (!kbInfo.value || isFAQ.value) return false
+  // storage_backend_id is authoritative; storage_provider_config.provider is a
+  // compatibility projection for older clients. Either being present means the
+  // KB has a bound storage instance and uploads should not be blocked.
+  if (kbInfo.value.storage_backend_id) return false
   const spc = kbInfo.value.storage_provider_config
   return !spc || !spc.provider
 })
@@ -281,6 +282,9 @@ const canManage = computed(() => {
   return orgStore.canManageKB(kbId.value, false);
 });
 
+// The activity feed exposes owner-side actor and configuration summaries.
+// It lives in KB settings (KnowledgeBaseEditorModal) for Owner/Admin in the home tenant.
+
 // Can mutate knowledge (move / batch-delete): the backend gate for these
 // two endpoints is g.Contributor(), so the caller MUST be Contributor+
 // in their tenant on top of having KB edit permission. Without the extra
@@ -298,6 +302,16 @@ const canMutateKnowledge = computed(() => {
 
 // Effective permission: from direct org share list or from GET /knowledge-bases/:id (e.g. agent-visible KB)
 const effectiveKBPermission = computed(() => orgStore.getKBPermission(kbId.value) || kbInfo.value?.my_permission || '');
+
+// Downloading returns the original source file, which is intentionally more
+// restrictive than viewing parsed content or using the preview tab. A tenant
+// Viewer can never download; for cross-tenant KBs the effective share
+// permission must additionally be Editor or Admin.
+const canDownloadKnowledge = computed(() => {
+  if (!authStore.hasRole('contributor')) return false;
+  const permission = effectiveKBPermission.value;
+  return !permission || permission === 'owner' || permission === 'admin' || permission === 'editor';
+});
 
 const knowledgeList = ref<Array<{ id: string; name: string; type?: string }>>([]);
 let { cardList, total, moreIndex, details, getKnowled, delKnowledge, openMore, onVisibleChange: _onVisibleChange, getCardDetails, getfDetails } = useKnowledgeBase(kbId.value)
@@ -333,17 +347,6 @@ function clearTraceAvailabilityCache() {
 // UI should treat the row as "in flight" rather than terminal.
 function isParseInFlight(status?: string): boolean {
   return isKnowledgeParseInFlight(status);
-}
-
-// Status line shown on the card body while parse is still in flight.
-function inFlightCardStatusText(item: KnowledgeCard): string {
-  if (item.parse_status === 'finalizing') {
-    if (item.summary_status === 'pending' || item.summary_status === 'processing') {
-      return t('knowledgeBase.generatingSummary');
-    }
-    return t('knowledgeBase.statusFinalizing');
-  }
-  return t('knowledgeBase.parsingInProgress');
 }
 
 function isTraceMenuVisible(item: KnowledgeCard): boolean {
@@ -512,8 +515,8 @@ const tagPage = ref(1);
 const tagHasMore = ref(false);
 const tagLoadingMore = ref(false);
 const tagTotal = ref(0);
-let tagSearchDebounce: ReturnType<typeof setTimeout> | null = null;
-let docSearchDebounce: ReturnType<typeof setTimeout> | null = null;
+let tagSearchDebounce: number | null = null;
+let docSearchDebounce: number | null = null;
 const docSearchKeyword = ref('');
 const selectedFileType = ref('');
 const fileTypeOptions = computed(() => [
@@ -542,6 +545,9 @@ const parseStatusOptions = computed(() => [
   { label: t('knowledgeBase.parseStatusProcessing'), value: 'processing' },
   { label: t('knowledgeBase.parseStatusCompleted'), value: 'completed' },
   { label: t('knowledgeBase.parseStatusFailed'), value: 'failed' },
+  { label: t('knowledgeBase.parseStatusCancelled'), value: 'cancelled' },
+  { label: t('knowledgeBase.parseStatusFinalizing'), value: 'finalizing' },
+  { label: t('knowledgeBase.parseStatusDraft'), value: 'draft' },
 ]);
 const selectedSource = ref('');
 // Source filter combines ingestion channels and the "manual"/"url" virtual
@@ -631,13 +637,6 @@ const isTagFilterActive = (tagId: string) => selectedTagIds.value.includes(tagId
 const tagEditDialogVisible = ref(false);
 const tagEditTarget = ref<KnowledgeCard | null>(null);
 
-const {
-  setupTagChipsObserver,
-  getTagLimit,
-  hasTagOverflow,
-  getOverflowCount,
-} = useTagChipsOverflow('tagItemId');
-
 function openTagEditDialog(item: KnowledgeCard) {
   tagEditTarget.value = item;
   tagEditDialogVisible.value = true;
@@ -661,43 +660,6 @@ const getTagName = (tagId?: string | number) => {
   const key = String(tagId);
   return tagMap.value[key]?.name || '';
 };
-
-const formatDocTime = (time?: string) => {
-  if (!time) return '--'
-  const formatted = formatStringDate(new Date(time))
-  return formatted.slice(2, 16) // "YY-MM-DD HH:mm"
-}
-
-const channelLabelMap: Record<string, string> = {
-  web: 'knowledgeBase.channelWeb',
-  api: 'knowledgeBase.channelApi',
-  browser_extension: 'knowledgeBase.channelBrowserExtension',
-  wechat: 'knowledgeBase.channelWechat',
-  wecom: 'knowledgeBase.channelWecom',
-  feishu: 'knowledgeBase.channelFeishu',
-  dingtalk: 'knowledgeBase.channelDingtalk',
-  slack: 'knowledgeBase.channelSlack',
-  im: 'knowledgeBase.channelIm',
-};
-
-const getChannelLabel = (channel: string) => {
-  const key = channelLabelMap[channel];
-  return key ? t(key) : t('knowledgeBase.channelUnknown');
-};
-
-// 获取知识条目的显示类型
-const getKnowledgeType = (item: any) => {
-  if (item.type === 'url') {
-    return t('knowledgeBase.typeURL') || 'URL';
-  }
-  if (item.type === 'manual') {
-    return t('knowledgeBase.typeManual');
-  }
-  if (item.file_type) {
-    return item.file_type.toUpperCase();
-  }
-  return '--';
-}
 
 const loadKnowledgeFiles = (kbIdValue: string): Promise<void> => {
   if (!kbIdValue) return Promise.resolve();
@@ -835,7 +797,10 @@ const onTagManageChanged = (payload?: { deletedTagId?: string }) => {
       await loadKnowledgeFiles(kbId.value);
       await loadTags(kbId.value, true);
     })();
+    return;
   }
+  resetPage();
+  loadKnowledgeFiles(kbId.value);
 };
 
 const handleKnowledgeTagChange = async (knowledgeId: string, tagIds: string[]) => {
@@ -961,7 +926,7 @@ watch(selectedTagIds, (newVal, oldVal) => {
 watch(tagSearchQuery, (newVal, oldVal) => {
   if (newVal === oldVal) return;
   if (tagSearchDebounce) {
-    clearTimeout(tagSearchDebounce);
+    window.clearTimeout(tagSearchDebounce);
   }
   tagSearchDebounce = window.setTimeout(() => {
     if (kbId.value) {
@@ -974,7 +939,7 @@ watch(tagSearchQuery, (newVal, oldVal) => {
 watch(docSearchKeyword, (newVal, oldVal) => {
   if (newVal === oldVal) return;
   if (docSearchDebounce) {
-    clearTimeout(docSearchDebounce);
+    window.clearTimeout(docSearchDebounce);
   }
   docSearchDebounce = window.setTimeout(() => {
     if (kbId.value) {
@@ -1026,6 +991,16 @@ const handleOpenURLImportDialog = (event: CustomEvent) => {
       uploadSourceRef.value?.openUrlDialog();
     }
   }
+};
+
+// Global file drops are captured by the platform shell. Route them back into
+// the same confirmation flow as the page upload button so tags and per-batch
+// processing settings are never skipped.
+const handleKnowledgeFileDrop = (event: CustomEvent) => {
+  const eventKbId = event.detail?.kbId;
+  const files = Array.isArray(event.detail?.files) ? event.detail.files : [];
+  if (eventKbId !== kbId.value || isFAQ.value || files.length === 0) return;
+  handleUploadSourceFiles(files);
 };
 
 // Auto-open document detail when navigated with ?knowledge_id=xxx.
@@ -1081,12 +1056,14 @@ onMounted(() => {
 
   window.addEventListener('knowledgeFileUploaded', handleFileUploaded as EventListener);
   window.addEventListener('openURLImportDialog', handleOpenURLImportDialog as EventListener);
+  window.addEventListener('weknora:knowledge-file-drop', handleKnowledgeFileDrop as EventListener);
   window.addEventListener('weknora:open-knowledge', handleOpenKnowledgeEvent as EventListener);
 });
 
 onUnmounted(() => {
   window.removeEventListener('knowledgeFileUploaded', handleFileUploaded as EventListener);
   window.removeEventListener('openURLImportDialog', handleOpenURLImportDialog as EventListener);
+  window.removeEventListener('weknora:knowledge-file-drop', handleKnowledgeFileDrop as EventListener);
   window.removeEventListener('weknora:open-knowledge', handleOpenKnowledgeEvent as EventListener);
   stopMovePoll();
   if (timeout !== null) {
@@ -1224,45 +1201,6 @@ const openCardDetails = (item: KnowledgeCard) => {
 const openSourceDoc = (knowledgeId: string) => {
   isCardDetails.value = true;
   getCardDetails({ id: knowledgeId });
-};
-
-// 悬停知识卡片时跟随鼠标显示详情气泡
-const hoveredCardItem = ref<KnowledgeCard | null>(null);
-const cardPopoverPos = ref({ x: 0, y: 0 });
-const CARD_POPOVER_OFFSET = 16;
-const cardHoverShowDelay = 300;
-let cardHoverTimer: ReturnType<typeof setTimeout> | null = null;
-
-const onCardMouseEnter = (ev: MouseEvent, item: KnowledgeCard) => {
-  if (cardHoverTimer) {
-    clearTimeout(cardHoverTimer);
-    cardHoverTimer = null;
-  }
-  cardHoverTimer = setTimeout(() => {
-    cardHoverTimer = null;
-    hoveredCardItem.value = item;
-    cardPopoverPos.value = {
-      x: ev.clientX + CARD_POPOVER_OFFSET,
-      y: ev.clientY + CARD_POPOVER_OFFSET,
-    };
-  }, cardHoverShowDelay);
-};
-
-const onCardMouseMove = (ev: MouseEvent) => {
-  if (hoveredCardItem.value) {
-    cardPopoverPos.value = {
-      x: ev.clientX + CARD_POPOVER_OFFSET,
-      y: ev.clientY + CARD_POPOVER_OFFSET,
-    };
-  }
-};
-
-const onCardMouseLeave = () => {
-  if (cardHoverTimer) {
-    clearTimeout(cardHoverTimer);
-    cardHoverTimer = null;
-  }
-  hoveredCardItem.value = null;
 };
 
 const closeCardMoreMenu = (index: number) => {
@@ -1481,14 +1419,16 @@ const showUploadResultMessages = (
 
 const executeUploadBatch = async (
   files: File[],
-  options: { processConfig?: KnowledgeProcessOverrides } = {},
+  options: { processConfig?: KnowledgeProcessOverrides; tagIds?: string[] } = {},
 ) => {
   const targetKbId = kbId.value;
   if (!targetKbId || files.length === 0) {
     return { successCount: 0, failCount: files.length };
   }
 
-  const tagIdsToUpload = selectedTagIds.value.length > 0 ? [...selectedTagIds.value] : undefined;
+  const tagIdsToUpload = options.tagIds && options.tagIds.length > 0
+    ? [...options.tagIds]
+    : undefined;
   let successCount = 0;
   let failCount = 0;
   const totalCount = files.length;
@@ -1553,14 +1493,18 @@ const executeUploadBatch = async (
   return { successCount, failCount };
 };
 
-const executeUrlImport = async (url: string, processConfig?: KnowledgeProcessOverrides) => {
+const executeUrlImport = async (
+  url: string,
+  processConfig?: KnowledgeProcessOverrides,
+  tagIds?: string[],
+) => {
   const targetKbId = kbId.value;
   if (!targetKbId) {
     MessagePlugin.error(t('error.missingKbId'));
     return;
   }
 
-  const tagIdsToUpload = selectedTagIds.value.length > 0 ? [...selectedTagIds.value] : undefined;
+  const tagIdsToUpload = tagIds && tagIds.length > 0 ? [...tagIds] : undefined;
   try {
     const responseData: any = await createKnowledgeFromURL(targetKbId, {
       url,
@@ -1602,6 +1546,7 @@ const handleUploadConfirmResult = async (result: UploadConfirmResult) => {
   const files = result.files || [];
   const urls = result.urls || [];
   const processConfig = result.processConfig;
+  const tagIds = result.tagIds || [];
 
   if (files.length > 0) {
     const hasFolderPaths = files.some((file) => {
@@ -1611,11 +1556,11 @@ const handleUploadConfirmResult = async (result: UploadConfirmResult) => {
     if (hasFolderPaths) {
       MessagePlugin.info(t('knowledgeBase.uploadingFolder', { total: files.length }));
     }
-    await executeUploadBatch(files, { processConfig });
+    await executeUploadBatch(files, { processConfig, tagIds });
   }
 
   for (const url of urls) {
-    await executeUrlImport(url, processConfig);
+    await executeUrlImport(url, processConfig, tagIds);
   }
 };
 
@@ -1626,6 +1571,7 @@ const openUploadConfirmDialog = async (files: File[], urls: string[] = []) => {
     const result = await uploadConfirmStore.open({
       mode: 'file',
       kbInfo: kbInfo.value,
+      tagIds: [...selectedTagIds.value],
       files,
       urls,
       acceptFileTypes: acceptFileTypes.value,
@@ -1806,6 +1752,18 @@ const getDoc = (page: number) => {
   getfDetails(details.id, page)
 };
 
+const syncDocumentSummaryState = (state: { id?: string; summary_status?: string; description?: string }) => {
+  if (!state?.id) return;
+  const card = cardList.value.find((item: KnowledgeCard) => item.id === state.id);
+  if (!card) return;
+  if (typeof state.summary_status === 'string' && state.summary_status) {
+    card.summary_status = state.summary_status;
+  }
+  if (typeof state.description === 'string') {
+    card.description = state.description;
+  }
+};
+
 const toggleSelectRow = (id: string, checked: boolean, shiftKey?: boolean) => {
   const items = cardList.value || [];
   const idx = items.findIndex((i: KnowledgeCard) => i.id === id);
@@ -1902,14 +1860,6 @@ const openKnowledgeItem = (item: KnowledgeCard) => {
   openCardDetails(item);
 };
 
-const onCardClick = (item: KnowledgeCard) => {
-  if (batchMode.value) {
-    onCardGridCheckboxChange(item.id, !selectedIds.value.has(item.id));
-    return;
-  }
-  openKnowledgeItem(item);
-};
-
 const confirmBatchDelete = async () => {
   if (batchDeleting.value || batchReparsing.value || selectedIds.value.size === 0) return;
   const ids = Array.from(selectedIds.value);
@@ -1953,9 +1903,27 @@ const confirmCancelParseKnowledge = async (item: KnowledgeCard) => {
   }
 };
 
+// Bridge card-view actions back to existing per-card handlers.
+const handleCardAction = (
+  action: 'edit' | 'reparse' | 'cancel-parse' | 'move' | 'delete' | 'view-trace' | 'batch-manage',
+  item: KnowledgeCard,
+) => {
+  const idx = (cardList.value || []).findIndex((i: KnowledgeCard) => i.id === item.id);
+  if (action === 'edit') return handleManualEdit(idx, item);
+  if (action === 'reparse') {
+    if (isParseInFlight(item.parse_status)) return onReparseMenuClick(idx, item);
+    return confirmRebuildKnowledge(idx, item);
+  }
+  if (action === 'cancel-parse') return confirmCancelParseKnowledge(item);
+  if (action === 'move') return handleMoveKnowledge(item);
+  if (action === 'delete') return confirmDeleteKnowledge(idx, item);
+  if (action === 'view-trace') return handleViewTrace(idx, item);
+  if (action === 'batch-manage') return handleEnterBatchFromCard(item);
+};
+
 // Bridge list-view actions back to existing per-card handlers.
 const handleListAction = (
-  action: 'edit' | 'reparse' | 'cancel-parse' | 'move' | 'delete',
+  action: 'edit' | 'reparse' | 'cancel-parse' | 'move' | 'delete' | 'view-trace' | 'batch-manage',
   item: KnowledgeCard,
 ) => {
   const idx = (cardList.value || []).findIndex((i: KnowledgeCard) => i.id === item.id);
@@ -1964,6 +1932,8 @@ const handleListAction = (
   if (action === 'cancel-parse') return confirmCancelParseKnowledge(item);
   if (action === 'move') return handleMoveKnowledge(item);
   if (action === 'delete') return confirmDeleteKnowledge(idx, item);
+  if (action === 'view-trace') return handleViewTrace(idx, item);
+  if (action === 'batch-manage') return handleEnterBatchFromCard(item);
 };
 
 // Clear selection on filter/tag/kb change to avoid acting on hidden items.
@@ -2136,6 +2106,7 @@ async function createNewSession(value: string): Promise<void> {
                     <t-icon name="search" size="16px" />
                   </template>
                 </t-input>
+                <div class="doc-filter-bar__filters">
                 <t-popup v-model:visible="tagFilterPanelVisible" trigger="click" placement="bottom-left"
                   overlay-class-name="tag-filter-popup" :overlay-inner-style="{ padding: 0 }">
                   <template #content>
@@ -2265,26 +2236,29 @@ async function createNewSession(value: string): Promise<void> {
                     </template>
                   </t-date-range-picker>
                 </div>
-                <div class="doc-view-toggle" role="group" :aria-label="$t('knowledgeBase.viewModeToggle')">
-                  <t-tooltip :content="$t('knowledgeBase.viewModeGrid')" placement="top">
-                    <button type="button" class="doc-view-toggle-btn" :class="{ active: viewMode === 'grid' }"
-                      @click="viewMode = 'grid'" :aria-pressed="viewMode === 'grid'">
-                      <t-icon name="view-module" size="16px" />
-                    </button>
-                  </t-tooltip>
-                  <t-tooltip :content="$t('knowledgeBase.viewModeList')" placement="top">
-                    <button type="button" class="doc-view-toggle-btn" :class="{ active: viewMode === 'list' }"
-                      @click="viewMode = 'list'" :aria-pressed="viewMode === 'list'">
-                      <t-icon name="view-list" size="16px" />
-                    </button>
-                  </t-tooltip>
                 </div>
-                <div v-if="canEdit" class="doc-filter-actions">
-                  <KbUploadSourceDropdown ref="uploadSourceRef" :accept-file-types="acceptFileTypes"
-                    :supported-file-types="[...supportedFileTypes]" include-manual trigger-icon="file-add"
-                    trigger-class="content-bar-icon-btn" data-guide="kb-detail-add-doc"
-                    :tooltip="t('knowledgeBase.addDocument')" placement="bottom-right" @files="handleUploadSourceFiles"
-                    @url="handleUploadSourceUrl" @manual="handleManualCreate" />
+                <div class="doc-filter-bar__trailing">
+                  <div class="doc-view-toggle" role="group" :aria-label="$t('knowledgeBase.viewModeToggle')">
+                    <t-tooltip :content="$t('knowledgeBase.viewModeGrid')" placement="top">
+                      <button type="button" class="doc-view-toggle-btn" :class="{ active: viewMode === 'grid' }"
+                        @click="viewMode = 'grid'" :aria-pressed="viewMode === 'grid'">
+                        <t-icon name="view-module" size="16px" />
+                      </button>
+                    </t-tooltip>
+                    <t-tooltip :content="$t('knowledgeBase.viewModeList')" placement="top">
+                      <button type="button" class="doc-view-toggle-btn" :class="{ active: viewMode === 'list' }"
+                        @click="viewMode = 'list'" :aria-pressed="viewMode === 'list'">
+                        <t-icon name="view-list" size="16px" />
+                      </button>
+                    </t-tooltip>
+                  </div>
+                  <div v-if="canEdit" class="doc-filter-actions">
+                    <KbUploadSourceDropdown ref="uploadSourceRef" :accept-file-types="acceptFileTypes"
+                      :supported-file-types="[...supportedFileTypes]" include-manual trigger-icon="file-add"
+                      trigger-class="content-bar-icon-btn" data-guide="kb-detail-add-doc"
+                      :tooltip="t('knowledgeBase.addDocument')" placement="bottom-right" @files="handleUploadSourceFiles"
+                      @url="handleUploadSourceUrl" @manual="handleManualCreate" />
+                  </div>
                 </div>
               </div>
               <div class="doc-scroll-container"
@@ -2310,314 +2284,50 @@ async function createNewSession(value: string): Promise<void> {
                   </div>
                 </div>
                 <template v-else-if="cardList.length && viewMode === 'grid'">
-                  <div class="doc-card-list doc-card-list-animated">
-                    <!-- 现有文档卡片 -->
-                    <div class="knowledge-card"
-                      :class="{ 'is-selected': selectedIds.has(item.id), 'batch-mode': batchMode }"
-                      :data-select-id="item.id" v-for="(item, index) in cardList" :key="item.id"
-                      @click="onCardClick(item)" @mouseenter="onCardMouseEnter($event, item)"
-                      @mousemove="onCardMouseMove($event)" @mouseleave="onCardMouseLeave">
-                      <div class="card-content">
-                        <div class="card-content-nav">
-                          <div v-if="canEdit && batchMode" class="card-nav-check" @click.stop>
-                            <t-checkbox class="card-select-checkbox" size="small" :checked="selectedIds.has(item.id)"
-                              :title="item.file_name"
-                              @change="(checked, ctx) => onCardGridCheckboxChange(item.id, checked, ctx)" />
-                          </div>
-                          <span class="card-content-title" :title="item.file_name">{{ item.file_name }}</span>
-                          <t-popup v-if="canEdit" v-model="item.isMore" overlayClassName="card-more"
-                            :on-visible-change="(v: boolean) => onCardMoreVisibleChange(v, item)" trigger="click"
-                            destroy-on-close placement="bottom-right">
-                            <div variant="outline" class="more-wrap" @click.stop="openMore(index)"
-                              :class="[moreIndex == index ? 'active-more' : '']">
-                              <img class="more-icon" src="@/assets/img/more.png" alt="" />
-                            </div>
-                            <template #content>
-                              <!-- Normal menu -->
-                              <div v-if="moveMenuMode === 'normal'" class="card-menu">
-                                <div v-if="item.type === 'manual'" class="card-menu-item"
-                                  @click.stop="handleManualEdit(index, item)">
-                                  <t-icon class="icon" name="edit" />
-                                  <span>{{ t('knowledgeBase.editDocument') }}</span>
-                                </div>
-                                <div v-if="isTraceMenuVisible(item)" class="card-menu-item"
-                                  @click.stop="handleViewTrace(index, item)">
-                                  <t-icon class="icon" name="chart-bar" />
-                                  <span>{{ t('knowledgeStages.viewTrace') }}</span>
-                                </div>
-                                <div v-if="isParseInFlight(item.parse_status)" class="card-menu-item"
-                                  @click.stop="onReparseMenuClick(index, item)">
-                                  <t-icon class="icon" name="refresh" />
-                                  <span>{{ t('knowledgeBase.rebuildDocument') }}</span>
-                                </div>
-                                <div v-else class="card-menu-item" @click.stop="confirmRebuildKnowledge(index, item)">
-                                  <t-icon class="icon" name="refresh" />
-                                  <span>{{ t('knowledgeBase.rebuildDocument') }}</span>
-                                </div>
-                                <t-popconfirm v-if="isParseInFlight(item.parse_status)" theme="warning"
-                                  :content="t('knowledgeBase.cancelParseConfirmBody', { title: item.file_name || item.title || item.id })"
-                                  :confirm-btn="{ content: t('knowledgeBase.cancelParse'), theme: 'danger' }"
-                                  :cancel-btn="{ content: t('common.cancel') }" placement="left"
-                                  @confirm="confirmCancelParseKnowledge(item)">
-                                  <div class="card-menu-item danger" @click.stop>
-                                    <t-icon class="icon" name="close-circle" />
-                                    <span>{{ t('knowledgeBase.cancelParse') }}</span>
-                                  </div>
-                                </t-popconfirm>
-                                <div v-if="canMutateKnowledge" class="card-menu-item"
-                                  @click.stop="handleMoveKnowledge(item)">
-                                  <t-icon class="icon" name="swap" />
-                                  <span>{{ t('knowledgeBase.moveDocument') }}</span>
-                                </div>
-                                <div v-if="canMutateKnowledge" class="card-menu-item"
-                                  @click.stop="handleEnterBatchFromCard(item)">
-                                  <t-icon class="icon" name="queue" />
-                                  <span>{{ t('menu.batchManage') }}</span>
-                                </div>
-                                <t-popconfirm theme="warning"
-                                  :content="t('knowledgeBase.confirmDeleteDocument', { fileName: item.file_name || '' })"
-                                  :confirm-btn="{ content: t('knowledgeBase.confirmDelete'), theme: 'danger' }"
-                                  :cancel-btn="{ content: t('common.cancel') }" placement="left"
-                                  @confirm="confirmDeleteKnowledge(index, item)">
-                                  <div class="card-menu-item danger" @click.stop>
-                                    <t-icon class="icon" name="delete" />
-                                    <span>{{ t('knowledgeBase.deleteDocument') }}</span>
-                                  </div>
-                                </t-popconfirm>
-                              </div>
-
-                              <!-- Move: target KB list -->
-                              <div v-else-if="moveMenuMode === 'targets'" class="card-menu move-menu">
-                                <div class="move-menu-header" @click.stop="handleMoveBack">
-                                  <t-icon name="chevron-left" size="16px" />
-                                  <span>{{ t('knowledgeBase.moveToKnowledgeBase') }}</span>
-                                </div>
-                                <div v-if="moveTargetsLoading" class="move-menu-loading">
-                                  <t-loading size="small" />
-                                </div>
-                                <div v-else-if="moveTargetKbs.length === 0" class="move-menu-empty">
-                                  {{ t('knowledgeBase.moveNoTargets') }}
-                                </div>
-                                <template v-else>
-                                  <div v-for="kb in moveTargetKbs" :key="kb.id" class="card-menu-item"
-                                    @click.stop="handleMoveSelectTarget(kb)">
-                                    <t-icon class="icon" name="root-list" />
-                                    <span class="move-target-name">{{ kb.name }}</span>
-                                    <span v-if="kb.knowledge_count !== undefined" class="move-target-count">{{
-                                      kb.knowledge_count }}</span>
-                                  </div>
-                                </template>
-                              </div>
-
-                              <!-- Move: confirm with mode selection -->
-                              <div v-else-if="moveMenuMode === 'confirm'" class="card-menu move-menu">
-                                <div class="move-menu-header" @click.stop="handleMoveBack">
-                                  <t-icon name="chevron-left" size="16px" />
-                                  <span>{{ t('knowledgeBase.moveConfirmTitle') }}</span>
-                                </div>
-                                <div class="move-confirm-body">
-                                  <div class="move-target-info">
-                                    <t-icon name="arrow-right" size="14px" />
-                                    <span>{{ moveSelectedTargetName }}</span>
-                                  </div>
-                                  <div class="move-mode-item" :class="{ active: moveMode === 'reuse_vectors' }"
-                                    @click.stop="moveMode = 'reuse_vectors'">
-                                    <t-radio :checked="moveMode === 'reuse_vectors'" />
-                                    <div class="move-mode-text">
-                                      <span class="move-mode-label">{{ t('knowledgeBase.moveModeReuseVectors') }}</span>
-                                      <span class="move-mode-desc">{{ t('knowledgeBase.moveModeReuseVectorsDesc')
-                                        }}</span>
-                                    </div>
-                                  </div>
-                                  <div class="move-mode-item" :class="{ active: moveMode === 'reparse' }"
-                                    @click.stop="moveMode = 'reparse'">
-                                    <t-radio :checked="moveMode === 'reparse'" />
-                                    <div class="move-mode-text">
-                                      <span class="move-mode-label">{{ t('knowledgeBase.moveModeReparse') }}</span>
-                                      <span class="move-mode-desc">{{ t('knowledgeBase.moveModeReparseDesc') }}</span>
-                                    </div>
-                                  </div>
-                                  <div class="move-confirm-actions">
-                                    <t-button size="small" variant="outline" @click.stop="handleMoveBack">{{
-                                      t('common.cancel') }}</t-button>
-                                    <t-button size="small" theme="primary" :loading="moveSubmitting"
-                                      @click.stop="handleMoveConfirm">{{
-                                        t('knowledgeBase.moveConfirm') }}</t-button>
-                                  </div>
-                                </div>
-                              </div>
-                            </template>
-                          </t-popup>
-                        </div>
-                        <div v-if="isParseInFlight(item.parse_status)" class="card-analyze card-analyze-trace">
-                          <t-icon name="loading" class="card-analyze-loading"></t-icon>
-                          <span class="card-analyze-txt card-analyze-trace-link" role="button" tabindex="0"
-                            :title="t('knowledgeStages.viewTrace')" @click.stop="handleViewTrace(index, item)"
-                            @keydown.enter.stop="handleViewTrace(index, item)"
-                            @keydown.space.prevent.stop="handleViewTrace(index, item)">{{
-                              inFlightCardStatusText(item) }}</span>
-                          <button type="button" class="card-analyze-trace-btn" :title="t('knowledgeStages.viewTrace')"
-                            :aria-label="t('knowledgeStages.viewTrace')" @click.stop="handleViewTrace(index, item)">
-                            <t-icon name="chart-line" />
-                          </button>
-                        </div>
-                        <div v-else-if="item.parse_status === 'failed'" class="card-analyze failure card-analyze-trace">
-                          <t-icon name="close-circle" class="card-analyze-loading failure"></t-icon>
-                          <span class="card-analyze-txt failure card-analyze-trace-link" role="button" tabindex="0"
-                            :title="t('knowledgeStages.viewTrace')" @click.stop="handleViewTrace(index, item)"
-                            @keydown.enter.stop="handleViewTrace(index, item)"
-                            @keydown.space.prevent.stop="handleViewTrace(index, item)">{{
-                              t('knowledgeBase.parsingFailed') }}</span>
-                          <button type="button" class="card-analyze-trace-btn" :title="t('knowledgeStages.viewTrace')"
-                            :aria-label="t('knowledgeStages.viewTrace')" @click.stop="handleViewTrace(index, item)">
-                            <t-icon name="chart-bar" />
-                          </button>
-                        </div>
-                        <div v-else-if="item.parse_status === 'draft'" class="card-draft">
-                          <t-tag size="small" theme="warning" variant="light-outline">{{ t('knowledgeBase.draft')
-                            }}</t-tag>
-                          <span class="card-draft-tip">{{ t('knowledgeBase.draftTip') }}</span>
-                        </div>
-                        <div
-                          v-else-if="item.parse_status === 'completed' && (item.summary_status === 'pending' || item.summary_status === 'processing')"
-                          class="card-analyze">
-                          <t-icon name="loading" class="card-analyze-loading"></t-icon>
-                          <span class="card-analyze-txt">{{ t('knowledgeBase.generatingSummary') }}</span>
-                        </div>
-                        <div v-else-if="item.parse_status === 'completed'" class="card-content-txt">
-                          {{ item.description }}
-                        </div>
-                      </div>
-                      <div class="card-bottom">
-                        <span class="card-time">{{ formatDocTime(item.updated_at) }}</span>
-                        <div class="card-bottom-right">
-                          <div v-if="tagList.length" class="card-tag-selector" @click.stop>
-                            <!-- 可编辑模式：点击打开弹窗 -->
-                            <template v-if="canEdit">
-                              <template v-if="(item.tags || []).length > 0">
-                                <t-tooltip v-if="hasTagOverflow(item.id, (item.tags || []).length)"
-                                  :content="(item.tags || []).map((t: any) => t.name).join(', ')" placement="top">
-                                  <div class="card-tag-chips"
-                                    :ref="(el: any) => setupTagChipsObserver(el, item.id, (item.tags || []).length)"
-                                    @click="openTagEditDialog(item)">
-                                    <t-tag v-for="tag in (item.tags || []).slice(0, getTagLimit(item.id))" :key="tag.id"
-                                      size="small" variant="light-outline" class="card-tag-chip">
-                                      <span class="tag-text">{{ tag.name }}</span>
-                                    </t-tag>
-                                    <span class="card-tag-overflow">+{{ getOverflowCount(item.id, (item.tags ||
-                                      []).length) }}</span>
-                                  </div>
-                                </t-tooltip>
-                                <div v-else class="card-tag-chips"
-                                  :ref="(el: any) => setupTagChipsObserver(el, item.id, (item.tags || []).length)"
-                                  @click="openTagEditDialog(item)">
-                                  <t-tag v-for="tag in (item.tags || []).slice(0, getTagLimit(item.id))" :key="tag.id"
-                                    size="small" variant="light-outline" class="card-tag-chip">
-                                    <span class="tag-text">{{ tag.name }}</span>
-                                  </t-tag>
-                                </div>
-                              </template>
-                              <span v-else class="card-tag-add" @click="openTagEditDialog(item)">
-                                <t-icon name="add" size="12px" />
-                                <span>{{ t('knowledgeBase.tagLabel') }}</span>
-                              </span>
-                            </template>
-                            <!-- 只读模式 -->
-                            <template v-else-if="(item.tags || []).length > 0">
-                              <t-tooltip v-if="hasTagOverflow(item.id, (item.tags || []).length)"
-                                :content="(item.tags || []).map((t: any) => t.name).join(', ')" placement="top">
-                                <div class="card-tag-chips"
-                                  :ref="(el: any) => setupTagChipsObserver(el, item.id, (item.tags || []).length)">
-                                  <t-tag v-for="tag in (item.tags || []).slice(0, getTagLimit(item.id))" :key="tag.id"
-                                    size="small" variant="light-outline" class="card-tag-chip">
-                                    <span class="tag-text">{{ tag.name }}</span>
-                                  </t-tag>
-                                  <span class="card-tag-overflow">+{{ getOverflowCount(item.id, (item.tags ||
-                                    []).length) }}</span>
-                                </div>
-                              </t-tooltip>
-                              <div v-else class="card-tag-chips"
-                                :ref="(el: any) => setupTagChipsObserver(el, item.id, (item.tags || []).length)">
-                                <t-tag v-for="tag in (item.tags || []).slice(0, getTagLimit(item.id))" :key="tag.id"
-                                  size="small" variant="light-outline" class="card-tag-chip">
-                                  <span class="tag-text">{{ tag.name }}</span>
-                                </t-tag>
-                              </div>
-                            </template>
-                          </div>
-                          <div class="card-type">
-                            <span>{{ getKnowledgeType(item) }}</span>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                  <!-- 悬停卡片时跟随鼠标的详情气泡 -->
-                  <Teleport to="body">
-                    <div v-show="hoveredCardItem" class="knowledge-card-hover-popover"
-                      :style="{ left: cardPopoverPos.x + 'px', top: cardPopoverPos.y + 'px' }">
-                      <template v-if="hoveredCardItem">
-                        <div class="card-popover-title">{{ hoveredCardItem.file_name }}</div>
-                        <div v-if="isParseInFlight(hoveredCardItem.parse_status)" class="card-popover-status parsing">
-                          <KnowledgeProcessingTimeline :knowledge-id="hoveredCardItem.id"
-                            :parse-status="hoveredCardItem.parse_status" :auto-poll="false" :compact="true" />
-                        </div>
-                        <div v-else-if="hoveredCardItem.parse_status === 'failed'" class="card-popover-status failure">
-                          <KnowledgeProcessingTimeline :knowledge-id="hoveredCardItem.id"
-                            :parse-status="hoveredCardItem.parse_status" :auto-poll="false" :compact="true" />
-                        </div>
-                        <div v-else-if="hoveredCardItem.parse_status === 'draft'" class="card-popover-status draft">
-                          {{ t('knowledgeBase.draft') }}
-                        </div>
-                        <template v-else>
-                          <div v-if="hoveredCardItem.description" class="card-popover-desc">{{
-                            hoveredCardItem.description }}</div>
-                          <div v-if="(hoveredCardItem as any).source" class="card-popover-source"
-                            :title="(hoveredCardItem as any).source">
-                            <t-icon name="link" size="12px" /> {{ (hoveredCardItem as any).source }}
-                          </div>
-                          <div class="card-popover-extra">
-                            <span v-if="(hoveredCardItem as any).created_at" class="card-popover-created">
-                              {{ t('knowledgeBase.createdAt') }}：{{ formatDocTime((hoveredCardItem as any).created_at)
-                              }}
-                            </span>
-                            <span v-if="formatFileSize((hoveredCardItem as any).file_size)" class="card-popover-size">
-                              {{ formatFileSize((hoveredCardItem as any).file_size) }}
-                            </span>
-                          </div>
-                        </template>
-                        <div class="card-popover-meta">
-                          <span class="card-popover-time">{{ t('knowledgeBase.updatedAt') }}：{{
-                            formatDocTime(hoveredCardItem.updated_at)
-                            }}</span>
-                          <span v-if="(hoveredCardItem as any).channel && (hoveredCardItem as any).channel !== 'web'"
-                            class="card-popover-channel">{{ getChannelLabel((hoveredCardItem as any).channel) }}</span>
-                          <div
-                            v-if="(hoveredCardItem as any).tags && (hoveredCardItem as any).tags.length > 0"
-                            class="card-popover-tags"
-                          >
-                            <t-tag
-                              v-for="tag in (hoveredCardItem as any).tags"
-                              :key="tag.id"
-                              size="small"
-                              variant="light-outline"
-                              class="card-popover-tag-chip"
-                            >
-                              <span class="tag-text">{{ tag.name }}</span>
-                            </t-tag>
-                          </div>
-                          <span class="card-popover-type">{{ getKnowledgeType(hoveredCardItem) }}</span>
-                        </div>
-                        <div class="card-popover-hint">{{ t('knowledgeBase.clickToViewFull') }}</div>
-                      </template>
-                    </div>
-                  </Teleport>
+                  <DocumentCardView
+                    :items="cardList"
+                    :selected-ids="selectedIds"
+                    :batch-mode="batchMode"
+                    :can-edit="canEdit"
+                    :can-mutate-knowledge="canMutateKnowledge"
+                    :trace-available-by-id="traceAvailableById"
+                    :tag-list="tagList"
+                    :move-menu-mode="moveMenuMode"
+                    :move-target-kbs="moveTargetKbs"
+                    :move-targets-loading="moveTargetsLoading"
+                    :move-selected-target-name="moveSelectedTargetName"
+                    :move-mode="moveMode"
+                    :move-submitting="moveSubmitting"
+                    @open="(item: any) => openKnowledgeItem(item)"
+                    @toggle-checkbox="onCardGridCheckboxChange"
+                    @menu-visible-change="(visible: boolean, item: any) => onCardMoreVisibleChange(visible, item)"
+                    @action="(action: any, item: any) => handleCardAction(action, item)"
+                    @tag-edit="(item: any) => openTagEditDialog(item)"
+                    @move-select-target="(kb: any) => handleMoveSelectTarget(kb)"
+                    @move-back="handleMoveBack"
+                    @move-confirm="handleMoveConfirm"
+                    @update:move-mode="(mode: any) => moveMode = mode"
+                  />
                 </template>
                 <template v-else-if="cardList.length && viewMode === 'list'">
                   <DocumentListView :items="cardList" :selected-ids="selectedIds" :tag-list="tagList"
-                    :can-edit="canEdit" @open="(item: any) => openKnowledgeItem(item)" @toggle-row="toggleSelectRow"
+                    :can-edit="canEdit" :can-mutate-knowledge="canMutateKnowledge"
+                    :trace-visible-ids="traceAvailableById"
+                    :move-menu-mode="moveMenuMode"
+                    :move-target-kbs="moveTargetKbs"
+                    :move-targets-loading="moveTargetsLoading"
+                    :move-selected-target-name="moveSelectedTargetName"
+                    :move-mode="moveMode"
+                    :move-submitting="moveSubmitting"
+                    @open="(item: any) => openKnowledgeItem(item)" @toggle-row="toggleSelectRow"
                     @toggle-all="toggleSelectAll" @action="(action: any, item: any) => handleListAction(action, item)"
-                    @tag-edit="(item: any) => openTagEditDialog(item)" />
+                    @probe-trace="(item: any) => probeTraceAvailable(item)"
+                    @tag-edit="(item: any) => openTagEditDialog(item)"
+                    @move-select-target="(kb: any) => handleMoveSelectTarget(kb)"
+                    @move-back="handleMoveBack"
+                    @move-confirm="handleMoveConfirm"
+                    @update:move-mode="(mode: any) => moveMode = mode"
+                    @reset-move-state="moveMenuMode = 'normal'" />
                 </template>
                 <template v-else-if="!docListLoading">
                   <div class="doc-empty-state">
@@ -2637,7 +2347,8 @@ async function createNewSession(value: string): Promise<void> {
 
       <!-- DocContent drawer (shared by documents tab and wiki source refs) -->
       <DocContent ref="docContentRef" :visible="isCardDetails" :details="details" :canEditKB="canEdit"
-        @closeDoc="closeDoc" @getDoc="getDoc">
+        :canDownloadKB="canDownloadKnowledge" :kbId="kbId"
+        @closeDoc="closeDoc" @getDoc="getDoc" @summaryStateChange="syncDocumentSummaryState">
       </DocContent>
     </div>
   </template>
@@ -2662,6 +2373,7 @@ async function createNewSession(value: string): Promise<void> {
     @open-manage="openTagManageFromEditDialog" />
 
   <KbTagManageDrawer
+    v-if="!isFAQ"
     v-model:visible="tagManageDrawerVisible"
     :kb-id="kbId"
     :is-faq="isFAQ"
@@ -3016,10 +2728,61 @@ async function createNewSession(value: string): Promise<void> {
 .doc-filter-bar {
   padding: 0 0 12px 0;
   flex-shrink: 0;
-  display: flex;
-  gap: 12px;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-areas:
+    'search trailing'
+    'filters filters';
+  gap: 8px 12px;
   align-items: center;
-  flex-wrap: wrap;
+
+  .doc-search-input {
+    grid-area: search;
+    min-width: 0;
+    width: 100%;
+  }
+
+  &__filters {
+    grid-area: filters;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(0, 0, 0, 0.15) transparent;
+
+    &::-webkit-scrollbar {
+      height: 4px;
+    }
+
+    &::-webkit-scrollbar-thumb {
+      background-color: rgba(0, 0, 0, 0.15);
+      border-radius: 2px;
+    }
+  }
+
+  &__trailing {
+    grid-area: trailing;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+
+  @media (min-width: 1280px) {
+    display: flex;
+    flex-direction: row;
+    flex-wrap: nowrap;
+    gap: 12px;
+
+    &__filters {
+      flex: 0 1 auto;
+      overflow-x: visible;
+    }
+  }
 
   .doc-filter-field {
     width: 140px;
@@ -3105,9 +2868,11 @@ async function createNewSession(value: string): Promise<void> {
     }
   }
 
-  .doc-search-input {
-    flex: 1 1 220px;
-    min-width: 220px;
+  @media (min-width: 1280px) {
+    .doc-search-input {
+      flex: 1 1 220px;
+      min-width: 220px;
+    }
   }
 
   .doc-type-select {
@@ -4145,6 +3910,13 @@ async function createNewSession(value: string): Promise<void> {
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
   font-family: var(--app-font-family);
   transition: opacity 0.15s ease;
+  will-change: transform;
+
+  /* 防止气泡内容抖动 */
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+  transform: translateZ(0);
+  -webkit-transform: translateZ(0);
 
   .card-popover-title {
     font-size: 14px;

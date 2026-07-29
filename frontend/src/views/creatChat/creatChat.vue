@@ -139,13 +139,7 @@ const fetchSuggestedQuestions = async () => {
     try {
         const agentId = settingsStore.selectedAgentId;
         if (!agentId) return;
-        const selectedKBs = settingsStore.getSelectedKnowledgeBases();
-        const selectedFiles = settingsStore.getSelectedFiles();
-        const res = await getSuggestedQuestions(agentId, {
-            knowledge_base_ids: selectedKBs.length > 0 ? selectedKBs : undefined,
-            knowledge_ids: selectedFiles.length > 0 ? selectedFiles : undefined,
-            limit: 6,
-        });
+        const res = await getSuggestedQuestions(agentId, settingsStore.getSuggestedQuestionsParams());
         if (fetchId === suggestedQuestionsFetchId) {
             sqCardsRevealed.value = false;
             sqRenderKey.value++;
@@ -169,10 +163,19 @@ const debouncedFetch = () => {
     debounceTimer = setTimeout(() => { fetchSuggestedQuestions(); }, 300);
 };
 
-// 监听 Agent / 知识库 / 文件切换
-watch(() => settingsStore.selectedAgentId, debouncedFetch);
-watch(() => settingsStore.settings.selectedKnowledgeBases, debouncedFetch, { deep: true });
-watch(() => settingsStore.settings.selectedFiles, debouncedFetch, { deep: true });
+// 监听 Agent / 知识库 / 文件 / 标签 / MCP / Skill @mention
+watch(
+    () => ({
+        agentId: settingsStore.selectedAgentId,
+        kbs: settingsStore.settings.selectedKnowledgeBases,
+        files: settingsStore.settings.selectedFiles,
+        tags: settingsStore.settings.selectedTags,
+        mcps: settingsStore.settings.selectedMCPServices,
+        skills: settingsStore.settings.selectedSkills,
+    }),
+    debouncedFetch,
+    { deep: true },
+);
 
 onMounted(() => { fetchSuggestedQuestions(); });
 
@@ -253,7 +256,7 @@ const handleKBEditorSuccess = (kbId: string) => {
     flex-flow: column;
     align-items: center;
     width: 100%;
-    max-width: 800px;
+    max-width: 960px;
     gap: 24px;
 
     :deep(.answers-input) {
@@ -302,7 +305,7 @@ const handleKBEditorSuccess = (kbId: string) => {
 }
 
 .suggested-questions-container {
-    max-width: 800px;
+    max-width: 960px;
     margin: 0;
     padding: 0 16px;
     transition: height 0.35s @suggested-ease;

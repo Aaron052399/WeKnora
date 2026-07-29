@@ -61,7 +61,7 @@ func (h *MCPServiceHandler) CreateMCPService(c *gin.Context) {
 	tenantID := c.GetUint64(types.TenantIDContextKey.String())
 	if tenantID == 0 {
 		logger.Error(ctx, "Tenant ID is empty")
-		c.Error(errors.NewBadRequestError("Tenant ID cannot be empty"))
+		c.Error(errors.NewBadRequestError("Workspace ID cannot be empty"))
 		return
 	}
 	service.TenantID = tenantID
@@ -85,13 +85,13 @@ func (h *MCPServiceHandler) CreateMCPService(c *gin.Context) {
 	// construction — no runtime redaction needed.
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
-		"data":    dto.NewMCPServiceResponse(&service),
+		"data":    dto.NewMCPServiceResponse(ctx, &service),
 	})
 }
 
 // ListMCPServices godoc
 // @Summary      获取MCP服务列表
-// @Description  获取当前租户的所有MCP服务
+// @Description  获取当前空间的所有MCP服务
 // @Tags         MCP服务
 // @Accept       json
 // @Produce      json
@@ -106,7 +106,7 @@ func (h *MCPServiceHandler) ListMCPServices(c *gin.Context) {
 	tenantID := c.GetUint64(types.TenantIDContextKey.String())
 	if tenantID == 0 {
 		logger.Error(ctx, "Tenant ID is empty")
-		c.Error(errors.NewBadRequestError("Tenant ID cannot be empty"))
+		c.Error(errors.NewBadRequestError("Workspace ID cannot be empty"))
 		return
 	}
 
@@ -119,7 +119,7 @@ func (h *MCPServiceHandler) ListMCPServices(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
-		"data":    dto.NewMCPServiceResponses(services),
+		"data":    dto.NewMCPServiceResponses(ctx, services),
 	})
 }
 
@@ -142,7 +142,7 @@ func (h *MCPServiceHandler) GetMCPService(c *gin.Context) {
 	tenantID := c.GetUint64(types.TenantIDContextKey.String())
 	if tenantID == 0 {
 		logger.Error(ctx, "Tenant ID is empty")
-		c.Error(errors.NewBadRequestError("Tenant ID cannot be empty"))
+		c.Error(errors.NewBadRequestError("Workspace ID cannot be empty"))
 		return
 	}
 
@@ -158,7 +158,7 @@ func (h *MCPServiceHandler) GetMCPService(c *gin.Context) {
 	// so the cross-tenant builtin list does not leak per-tenant config.
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
-		"data":    dto.NewMCPServiceResponse(service),
+		"data":    dto.NewMCPServiceResponse(ctx, service),
 	})
 }
 
@@ -182,7 +182,7 @@ func (h *MCPServiceHandler) UpdateMCPService(c *gin.Context) {
 	tenantID := c.GetUint64(types.TenantIDContextKey.String())
 	if tenantID == 0 {
 		logger.Error(ctx, "Tenant ID is empty")
-		c.Error(errors.NewBadRequestError("Tenant ID cannot be empty"))
+		c.Error(errors.NewBadRequestError("Workspace ID cannot be empty"))
 		return
 	}
 
@@ -303,6 +303,11 @@ func (h *MCPServiceHandler) UpdateMCPService(c *gin.Context) {
 		if authType, ok := authConfig["auth_type"].(string); ok {
 			service.AuthConfig.AuthType = types.MCPAuthType(authType)
 		}
+		// api_key_header is non-secret structural config (header name for the
+		// api_key strategy); flows through the main PUT like custom_headers.
+		if apiKeyHeader, ok := authConfig["api_key_header"].(string); ok {
+			service.AuthConfig.APIKeyHeader = apiKeyHeader
+		}
 		if scopes, ok := authConfig["scopes"].([]interface{}); ok {
 			list := make([]string, 0, len(scopes))
 			for _, s := range scopes {
@@ -346,7 +351,7 @@ func (h *MCPServiceHandler) UpdateMCPService(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
-		"data":    dto.NewMCPServiceResponse(stored),
+		"data":    dto.NewMCPServiceResponse(ctx, stored),
 	})
 }
 
@@ -369,7 +374,7 @@ func (h *MCPServiceHandler) DeleteMCPService(c *gin.Context) {
 	tenantID := c.GetUint64(types.TenantIDContextKey.String())
 	if tenantID == 0 {
 		logger.Error(ctx, "Tenant ID is empty")
-		c.Error(errors.NewBadRequestError("Tenant ID cannot be empty"))
+		c.Error(errors.NewBadRequestError("Workspace ID cannot be empty"))
 		return
 	}
 
@@ -405,7 +410,7 @@ func (h *MCPServiceHandler) TestMCPService(c *gin.Context) {
 	tenantID := c.GetUint64(types.TenantIDContextKey.String())
 	if tenantID == 0 {
 		logger.Error(ctx, "Tenant ID is empty")
-		c.Error(errors.NewBadRequestError("Tenant ID cannot be empty"))
+		c.Error(errors.NewBadRequestError("Workspace ID cannot be empty"))
 		return
 	}
 
@@ -450,7 +455,7 @@ func (h *MCPServiceHandler) GetMCPServiceTools(c *gin.Context) {
 	tenantID := c.GetUint64(types.TenantIDContextKey.String())
 	if tenantID == 0 {
 		logger.Error(ctx, "Tenant ID is empty")
-		c.Error(errors.NewBadRequestError("Tenant ID cannot be empty"))
+		c.Error(errors.NewBadRequestError("Workspace ID cannot be empty"))
 		return
 	}
 
@@ -486,7 +491,7 @@ func (h *MCPServiceHandler) GetMCPServiceResources(c *gin.Context) {
 	tenantID := c.GetUint64(types.TenantIDContextKey.String())
 	if tenantID == 0 {
 		logger.Error(ctx, "Tenant ID is empty")
-		c.Error(errors.NewBadRequestError("Tenant ID cannot be empty"))
+		c.Error(errors.NewBadRequestError("Workspace ID cannot be empty"))
 		return
 	}
 
@@ -509,7 +514,7 @@ func (h *MCPServiceHandler) ListMCPToolApprovals(c *gin.Context) {
 	serviceID := secutils.SanitizeForLog(c.Param("id"))
 	tenantID := c.GetUint64(types.TenantIDContextKey.String())
 	if tenantID == 0 {
-		c.Error(errors.NewBadRequestError("Tenant ID cannot be empty"))
+		c.Error(errors.NewBadRequestError("Workspace ID cannot be empty"))
 		return
 	}
 	if h.mcpToolApprovalService == nil {
@@ -560,7 +565,7 @@ func (h *MCPServiceHandler) SetMCPToolApproval(c *gin.Context) {
 	toolName := c.Param("tool_name")
 	tenantID := c.GetUint64(types.TenantIDContextKey.String())
 	if tenantID == 0 {
-		c.Error(errors.NewBadRequestError("Tenant ID cannot be empty"))
+		c.Error(errors.NewBadRequestError("Workspace ID cannot be empty"))
 		return
 	}
 	if h.mcpToolApprovalService == nil {
@@ -606,7 +611,7 @@ func (h *MCPServiceHandler) ResolveToolApproval(c *gin.Context) {
 	pendingID := c.Param("pending_id")
 	tenantID := c.GetUint64(types.TenantIDContextKey.String())
 	if tenantID == 0 {
-		c.Error(errors.NewBadRequestError("Tenant ID cannot be empty"))
+		c.Error(errors.NewBadRequestError("Workspace ID cannot be empty"))
 		return
 	}
 	if h.toolApprovalGate == nil {
@@ -640,23 +645,23 @@ func (h *MCPServiceHandler) ResolveToolApproval(c *gin.Context) {
 		c.Error(errors.NewBadRequestError("decision must be approve or reject"))
 		return
 	}
-	userID, _ := c.Get(types.UserIDContextKey.String())
-	userIDStr, _ := userID.(string)
-	// Reject calls without an authenticated user up front. The gate's
-	// per-user authorization is fail-close, but surfacing 401 here gives
+	principal, _ := types.PrincipalFromContext(ctx)
+	gateUserID := principal.StorageID()
+	// Reject calls without an authenticated principal up front. The gate's
+	// per-principal authorization is fail-close, but surfacing 401 here gives
 	// a clearer signal that auth middleware did not populate the context.
-	if strings.TrimSpace(userIDStr) == "" {
+	if strings.TrimSpace(gateUserID) == "" {
 		c.Error(errors.NewUnauthorizedError("authenticated user required to resolve tool approval"))
 		return
 	}
-	if err := h.toolApprovalGate.Resolve(tenantID, userIDStr, pendingID, dec); err != nil {
+	if err := h.toolApprovalGate.Resolve(tenantID, gateUserID, pendingID, dec); err != nil {
 		switch {
 		case stderrors.Is(err, approval.ErrPendingNotFound):
 			c.Error(errors.NewNotFoundError("pending approval not found or already completed"))
 		case stderrors.Is(err, approval.ErrAlreadyResolved):
 			c.Error(errors.NewBadRequestError("pending approval already resolved (timeout / cancel raced your action)"))
 		case stderrors.Is(err, approval.ErrTenantMismatch):
-			c.Error(errors.NewBadRequestError("tenant mismatch"))
+			c.Error(errors.NewBadRequestError("workspace mismatch"))
 		case stderrors.Is(err, approval.ErrUserMismatch):
 			c.Error(errors.NewBadRequestError("user mismatch: only the session owner may resolve this approval"))
 		default:

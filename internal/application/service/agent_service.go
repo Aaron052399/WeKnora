@@ -43,6 +43,47 @@ func dedupStrings(in []string) []string {
 	return out
 }
 
+// agentHasKnowledgeScope reports whether the agent has any KB retrieval scope for
+// this turn. Tag-only @mentions populate SearchTargets (with TagIDs) but leave
+// KnowledgeBases / KnowledgeIDs empty — those must still count as in-scope.
+func agentHasKnowledgeScope(config *types.AgentConfig) bool {
+	if config == nil {
+		return false
+	}
+	return types.HasKnowledgeRetrievalScope(
+		config.SearchTargets,
+		config.KnowledgeBases,
+		config.KnowledgeIDs,
+	)
+}
+
+// knowledgeBaseIDsForPrompt returns KB IDs to show in runtime_context metadata.
+// Prefer explicit KnowledgeBases; fall back to deduped IDs from SearchTargets.
+func knowledgeBaseIDsForPrompt(config *types.AgentConfig) []string {
+	if config == nil {
+		return nil
+	}
+	if len(config.KnowledgeBases) > 0 {
+		return config.KnowledgeBases
+	}
+	if len(config.SearchTargets) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(config.SearchTargets))
+	out := make([]string, 0, len(config.SearchTargets))
+	for _, target := range config.SearchTargets {
+		if target == nil || target.KnowledgeBaseID == "" {
+			continue
+		}
+		if _, ok := seen[target.KnowledgeBaseID]; ok {
+			continue
+		}
+		seen[target.KnowledgeBaseID] = struct{}{}
+		out = append(out, target.KnowledgeBaseID)
+	}
+	return out
+}
+
 // agentService implements agent-related business logic
 type agentService struct {
 	cfg                   *config.Config
@@ -60,6 +101,7 @@ type agentService struct {
 	webSearchStateService interfaces.WebSearchStateService
 	wikiPageService       interfaces.WikiPageService
 	tenantService         interfaces.TenantService
+	storageResolver       interfaces.StorageBackendResolver
 	toolApprovalGate      approval.MCPApproval
 }
 
@@ -80,6 +122,7 @@ func NewAgentService(
 	webSearchStateService interfaces.WebSearchStateService,
 	wikiPageService interfaces.WikiPageService,
 	tenantService interfaces.TenantService,
+	storageResolver interfaces.StorageBackendResolver,
 	toolApprovalGate approval.MCPApproval,
 ) interfaces.AgentService {
 	return &agentService{
@@ -98,6 +141,7 @@ func NewAgentService(
 		webSearchStateService: webSearchStateService,
 		wikiPageService:       wikiPageService,
 		tenantService:         tenantService,
+		storageResolver:       storageResolver,
 		toolApprovalGate:      toolApprovalGate,
 	}
 }
@@ -111,7 +155,7 @@ func (s *agentService) CreateAgentEngine(
 	chatModel chat.Chat,
 	rerankModel rerank.Reranker,
 	eventBus *event.EventBus,
-	sessionID string,
+	sessionID, assistantMessageID string,
 ) (interfaces.AgentEngine, error) {
 	logger.Infof(ctx, "Creating agent engine with custom EventBus")
 
@@ -131,7 +175,7 @@ func (s *agentService) CreateAgentEngine(
 	if err := s.registerTools(ctx, toolRegistry, config, rerankModel, chatModel, sessionID); err != nil {
 		return nil, fmt.Errorf("failed to register tools: %w", err)
 	}
-	s.registerMCPTools(ctx, toolRegistry, config)
+	s.registerMCPTools(ctx, toolRegistry, config, eventBus, sessionID, assistantMessageID)
 
 	// 3. Resolve knowledge base and selected document metadata
 	kbInfos, selectedDocs := s.resolveKBAndDocInfos(ctx, config)
@@ -149,6 +193,12 @@ func (s *agentService) CreateAgentEngine(
 		systemPromptTemplate,
 	)
 	engine.SetAppConfig(s.cfg)
+	pinnedMCP := s.resolvePinnedMCPServiceInfos(ctx, config)
+	s.attachPinnedMCPToolNames(toolRegistry, pinnedMCP)
+	engine.SetPinnedMentions(
+		pinnedMCP,
+		s.resolvePinnedSkillInfos(config),
+	)
 
 	// Set VLM image describer for MCP tool result image analysis.
 	// When an MCP tool returns images, the engine uses VLM to generate text descriptions
@@ -185,6 +235,8 @@ func (s *agentService) registerMCPTools(
 	ctx context.Context,
 	toolRegistry *tools.ToolRegistry,
 	config *types.AgentConfig,
+	eventBus *event.EventBus,
+	sessionID, assistantMessageID string,
 ) {
 	tenantID := uint64(0)
 	if tid, ok := types.TenantIDFromContext(ctx); ok {
@@ -206,7 +258,11 @@ func (s *agentService) registerMCPTools(
 	var mcpServices []*types.MCPService
 	var err error
 
-	if mcpMode == "selected" && len(config.MCPServices) > 0 {
+	if mcpMode == "selected" {
+		if len(config.MCPServices) == 0 {
+			logger.Infof(ctx, "MCP services disabled by agent config (mode: selected, no services)")
+			return
+		}
 		mcpServices, err = s.mcpServiceService.ListMCPServicesByIDs(ctx, tenantID, config.MCPServices)
 		if err != nil {
 			logger.Warnf(ctx, "Failed to list selected MCP services: %v", err)
@@ -228,10 +284,25 @@ func (s *agentService) registerMCPTools(
 		}
 	}
 	if len(enabledServices) > 0 {
-		if err := tools.RegisterMCPTools(ctx, toolRegistry, enabledServices, s.mcpManager, s.toolApprovalGate); err != nil {
+		var regCtx *tools.MCPOAuthSession
+		if eventBus != nil && sessionID != "" && assistantMessageID != "" {
+			regCtx = &tools.MCPOAuthSession{
+				EventBus:               eventBus,
+				SessionID:              sessionID,
+				AssistantMessageID:     assistantMessageID,
+				ApprovalCtx:            ctx,
+				AuthWaitTimeoutSeconds: config.MCPAuthWaitTimeout,
+			}
+		}
+		registered, err := tools.RegisterMCPTools(
+			ctx, toolRegistry, enabledServices, s.mcpManager, s.toolApprovalGate, regCtx,
+		)
+		if err != nil {
 			logger.Warnf(ctx, "Failed to register MCP tools: %v", err)
+		} else if registered == 0 {
+			logger.Warnf(ctx, "No MCP tools registered from %d enabled service(s)", len(enabledServices))
 		} else {
-			logger.Infof(ctx, "Registered MCP tools from %d enabled services", len(enabledServices))
+			logger.Infof(ctx, "Registered %d MCP tool(s) from %d enabled service(s)", registered, len(enabledServices))
 		}
 	}
 }
@@ -241,11 +312,12 @@ func (s *agentService) resolveKBAndDocInfos(
 	ctx context.Context,
 	config *types.AgentConfig,
 ) ([]*agent.KnowledgeBaseInfo, []*agent.SelectedDocumentInfo) {
-	kbInfos, err := s.getKnowledgeBaseInfos(ctx, config.KnowledgeBases)
+	kbIDs := knowledgeBaseIDsForPrompt(config)
+	kbInfos, err := s.getKnowledgeBaseInfos(ctx, kbIDs)
 	if err != nil {
 		logger.Warnf(ctx, "Failed to get knowledge base details, using IDs only: %v", err)
-		kbInfos = make([]*agent.KnowledgeBaseInfo, 0, len(config.KnowledgeBases))
-		for _, kbID := range config.KnowledgeBases {
+		kbInfos = make([]*agent.KnowledgeBaseInfo, 0, len(kbIDs))
+		for _, kbID := range kbIDs {
 			kbInfos = append(kbInfos, &agent.KnowledgeBaseInfo{
 				ID:          kbID,
 				Name:        kbID,
@@ -368,10 +440,13 @@ func (s *agentService) registerTools(
 	}
 
 	// ---- Capability detection from SearchTargets ----
-	var hasVectorKB, hasWikiKB bool
+	var hasVectorKB bool
 	var wikiKBIDs []string
-	var wikiScopes []tools.WikiScope
+	wikiRoutes := tools.NewWikiRouteResolver()
 	for _, target := range config.SearchTargets {
+		if target == nil || target.KnowledgeBaseID == "" {
+			continue
+		}
 		kb, err := s.knowledgeBaseService.GetKnowledgeBaseByIDOnly(ctx, target.KnowledgeBaseID)
 		if err != nil {
 			continue
@@ -380,21 +455,23 @@ func (s *agentService) registerTools(
 			hasVectorKB = true
 		}
 		if kb.IsWikiEnabled() {
-			hasWikiKB = true
 			wikiKBIDs = append(wikiKBIDs, kb.ID)
-			// When the user @mentioned specific documents, carry the document
-			// whitelist into the wiki scope so wiki_search / wiki_read_page
-			// only surface pages whose SourceRefs intersect the pinned docs.
-			scope := tools.WikiScope{KnowledgeBaseID: kb.ID}
-			if target.Type == types.SearchTargetTypeKnowledge && len(target.KnowledgeIDs) > 0 {
-				scope.KnowledgeIDs = append([]string(nil), target.KnowledgeIDs...)
-			}
-			wikiScopes = append(wikiScopes, scope)
 		}
 	}
+	wikiKBIDs = dedupStrings(wikiKBIDs)
+	wikiScopes := tools.NewWikiScopesFromSearchTargets(config.SearchTargets, wikiKBIDs)
+	// Narrow to the KBs that survived scope resolution. Build a fresh slice
+	// rather than truncating in place, so the argument passed above can never
+	// be overwritten through a shared backing array.
+	scopedWikiKBIDs := make([]string, 0, len(wikiScopes))
+	for _, scope := range wikiScopes {
+		scopedWikiKBIDs = append(scopedWikiKBIDs, scope.KnowledgeBaseID)
+	}
+	wikiKBIDs = scopedWikiKBIDs
+	hasWikiKB := len(wikiKBIDs) > 0
 
-	// Filter out knowledge base tools if no knowledge bases or knowledge IDs are configured
-	hasKnowledge := len(config.KnowledgeBases) > 0 || len(config.KnowledgeIDs) > 0
+	// Filter out knowledge base tools if no knowledge scope is configured for this turn.
+	hasKnowledge := agentHasKnowledgeScope(config)
 	if !hasKnowledge {
 		filteredTools := make([]string, 0)
 		kbTools := map[string]bool{
@@ -529,7 +606,8 @@ func (s *agentService) registerTools(
 		case tools.ToolListKnowledgeChunks:
 			toolToRegister = tools.NewListKnowledgeChunksTool(s.knowledgeService, s.chunkService, config.SearchTargets)
 		case tools.ToolQueryKnowledgeGraph:
-			toolToRegister = tools.NewQueryKnowledgeGraphTool(s.knowledgeBaseService)
+			toolToRegister = tools.NewQueryKnowledgeGraphTool(s.knowledgeBaseService, config.SearchTargets).
+				WithKnowledgeScope(s.knowledgeService)
 		case tools.ToolGetDocumentInfo:
 			toolToRegister = tools.NewGetDocumentInfoTool(s.knowledgeService, s.chunkService, config.SearchTargets)
 		case tools.ToolDatabaseQuery:
@@ -551,34 +629,39 @@ func (s *agentService) registerTools(
 			logger.Infof(ctx, "Registered web_fetch tool for session: %s", sessionID)
 
 		case tools.ToolDataAnalysis:
-			toolToRegister = tools.NewDataAnalysisTool(s.knowledgeBaseService, s.knowledgeService, s.tenantService, s.fileService, s.duckdb, sessionID)
+			toolToRegister = tools.NewDataAnalysisTool(s.knowledgeBaseService, s.knowledgeService, s.tenantService, s.fileService, s.duckdb, sessionID, s.storageResolver).
+				WithSearchTargets(config.SearchTargets)
 			logger.Infof(ctx, "Registered data_analysis tool for session: %s", sessionID)
 
 		case tools.ToolDataSchema:
-			toolToRegister = tools.NewDataSchemaTool(s.knowledgeService, s.chunkService.GetRepository())
+			toolToRegister = tools.NewDataSchemaTool(s.knowledgeService, s.chunkService.GetRepository()).
+				WithSearchTargets(config.SearchTargets)
 			logger.Infof(ctx, "Registered data_schema tool")
 
 		// Wiki tools — only registered when wiki KBs are detected
 		case tools.ToolWikiReadPage:
-			toolToRegister = tools.NewWikiReadPageTool(s.wikiPageService, wikiScopes)
+			toolToRegister = tools.NewWikiReadPageTool(s.wikiPageService, s.knowledgeService, wikiScopes, wikiRoutes)
 		case tools.ToolWikiSearch:
-			toolToRegister = tools.NewWikiSearchTool(s.wikiPageService, wikiScopes)
+			toolToRegister = tools.NewWikiSearchTool(s.wikiPageService, s.knowledgeService, wikiScopes, wikiRoutes)
 		case tools.ToolWikiReadSourceDoc:
-			toolToRegister = tools.NewWikiReadSourceDocTool(s.knowledgeService, s.chunkService)
+			toolToRegister = tools.NewWikiReadSourceDocTool(s.knowledgeService, s.chunkService, config.SearchTargets)
 		case tools.ToolWikiFlagIssue:
-			toolToRegister = tools.NewWikiFlagIssueTool(s.wikiPageService, wikiKBIDs)
+			toolToRegister = tools.NewWikiFlagIssueTool(s.wikiPageService, wikiKBIDs, wikiRoutes).
+				WithKnowledgeScope(s.knowledgeService, config.SearchTargets)
 		case tools.ToolWikiReadIssue:
 			toolToRegister = tools.NewWikiReadIssueTool(s.wikiPageService, wikiKBIDs)
 		case tools.ToolWikiUpdateIssue:
 			toolToRegister = tools.NewWikiUpdateIssueTool(s.wikiPageService, wikiKBIDs)
 		case tools.ToolWikiWritePage:
-			toolToRegister = tools.NewWikiWritePageTool(s.wikiPageService, wikiKBIDs, s.knowledgeService)
+			toolToRegister = tools.NewWikiWritePageTool(s.wikiPageService, wikiKBIDs, s.knowledgeService, wikiRoutes).
+				WithSearchTargets(config.SearchTargets)
 		case tools.ToolWikiReplaceText:
-			toolToRegister = tools.NewWikiReplaceTextTool(s.wikiPageService, wikiKBIDs, s.knowledgeService)
+			toolToRegister = tools.NewWikiReplaceTextTool(s.wikiPageService, wikiKBIDs, s.knowledgeService, wikiRoutes).
+				WithSearchTargets(config.SearchTargets)
 		case tools.ToolWikiRenamePage:
-			toolToRegister = tools.NewWikiRenamePageTool(s.wikiPageService, wikiKBIDs)
+			toolToRegister = tools.NewWikiRenamePageTool(s.wikiPageService, wikiKBIDs, wikiRoutes)
 		case tools.ToolWikiDeletePage:
-			toolToRegister = tools.NewWikiDeletePageTool(s.wikiPageService, wikiKBIDs)
+			toolToRegister = tools.NewWikiDeletePageTool(s.wikiPageService, wikiKBIDs, wikiRoutes)
 
 		default:
 			logger.Warnf(ctx, "Unknown tool: %s", toolName)
@@ -651,7 +734,7 @@ func (s *agentService) getKnowledgeBaseInfos(ctx context.Context, kbIDs []string
 			pageResult, err := s.knowledgeService.ListFAQEntries(ctx, kbID, &types.Pagination{
 				Page:     1,
 				PageSize: 10,
-			}, 0, "", "", "")
+			}, nil, 0, "", "", "")
 			if err == nil && pageResult != nil {
 				docCount = int(pageResult.Total)
 				if entries, ok := pageResult.Data.([]*types.FAQEntry); ok {
@@ -798,4 +881,105 @@ func (s *agentService) getSelectedDocumentInfos(ctx context.Context, knowledgeID
 
 	logger.Infof(ctx, "Loaded %d selected documents metadata for prompt", len(selectedDocs))
 	return selectedDocs, nil
+}
+
+func (s *agentService) resolvePinnedMCPServiceInfos(
+	ctx context.Context,
+	config *types.AgentConfig,
+) []*agent.PinnedMCPServiceInfo {
+	if len(config.PinnedMCPServiceIDs) == 0 || s.mcpServiceService == nil {
+		return nil
+	}
+	tenantID := uint64(0)
+	if tid, ok := types.TenantIDFromContext(ctx); ok {
+		tenantID = tid
+	}
+	if tenantID == 0 {
+		return fallbackPinnedMCPInfos(config.PinnedMCPServiceIDs)
+	}
+
+	services, err := s.mcpServiceService.ListMCPServicesByIDs(ctx, tenantID, config.PinnedMCPServiceIDs)
+	if err != nil {
+		logger.Warnf(ctx, "Failed to resolve pinned MCP services: %v", err)
+		return fallbackPinnedMCPInfos(config.PinnedMCPServiceIDs)
+	}
+	byID := make(map[string]*types.MCPService, len(services))
+	for _, svc := range services {
+		if svc != nil {
+			byID[svc.ID] = svc
+		}
+	}
+	result := make([]*agent.PinnedMCPServiceInfo, 0, len(config.PinnedMCPServiceIDs))
+	for _, id := range config.PinnedMCPServiceIDs {
+		if id == "" {
+			continue
+		}
+		if svc, ok := byID[id]; ok {
+			result = append(result, &agent.PinnedMCPServiceInfo{
+				ID:          svc.ID,
+				Name:        svc.Name,
+				Description: svc.Description,
+			})
+			continue
+		}
+		result = append(result, &agent.PinnedMCPServiceInfo{ID: id, Name: id})
+	}
+	return result
+}
+
+func (s *agentService) attachPinnedMCPToolNames(
+	registry *tools.ToolRegistry,
+	pinned []*agent.PinnedMCPServiceInfo,
+) {
+	if registry == nil || len(pinned) == 0 {
+		return
+	}
+	byService := tools.MCPToolNamesByServiceID(registry)
+	for _, info := range pinned {
+		if info == nil || info.ID == "" {
+			continue
+		}
+		info.ToolNames = append([]string(nil), byService[info.ID]...)
+	}
+}
+
+func fallbackPinnedMCPInfos(ids []string) []*agent.PinnedMCPServiceInfo {
+	result := make([]*agent.PinnedMCPServiceInfo, 0, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		result = append(result, &agent.PinnedMCPServiceInfo{ID: id, Name: id})
+	}
+	return result
+}
+
+func (s *agentService) resolvePinnedSkillInfos(config *types.AgentConfig) []*agent.PinnedSkillInfo {
+	if len(config.PinnedSkillNames) == 0 {
+		return nil
+	}
+
+	descByName := make(map[string]string)
+	if len(config.SkillDirs) > 0 {
+		loader := skills.NewLoader(config.SkillDirs)
+		if metadata, err := loader.DiscoverSkills(); err == nil {
+			for _, meta := range metadata {
+				if meta != nil {
+					descByName[meta.Name] = meta.Description
+				}
+			}
+		}
+	}
+
+	result := make([]*agent.PinnedSkillInfo, 0, len(config.PinnedSkillNames))
+	for _, name := range config.PinnedSkillNames {
+		if name == "" {
+			continue
+		}
+		result = append(result, &agent.PinnedSkillInfo{
+			Name:        name,
+			Description: descByName[name],
+		})
+	}
+	return result
 }

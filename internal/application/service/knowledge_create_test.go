@@ -39,6 +39,15 @@ func (r *createKnowledgeFileRepoStub) CreateKnowledge(ctx context.Context, knowl
 	return r.createErr
 }
 
+// GetKnowledgeTags is invoked by setAndAttachKnowledgeTags after create even
+// when no tags were supplied; a fresh knowledge has none, so return empty.
+func (r *createKnowledgeFileRepoStub) GetKnowledgeTags(
+	ctx context.Context,
+	knowledgeIDs []string,
+) (map[string][]*types.KnowledgeTag, error) {
+	return map[string][]*types.KnowledgeTag{}, nil
+}
+
 type createKnowledgeFileKBServiceStub struct {
 	interfaces.KnowledgeBaseService
 
@@ -136,7 +145,7 @@ func TestCreateKnowledgeFromFileDoesNotPersistWhenStorageSaveFails(t *testing.T)
 		nil,
 		nil,
 		"",
-		"",
+		nil,
 		"",
 		nil,
 	)
@@ -167,7 +176,7 @@ func TestCreateKnowledgeFromFilePersistsStoredFilePathOnCreate(t *testing.T) {
 		nil,
 		nil,
 		"",
-		"",
+		nil,
 		"",
 		nil,
 	)
@@ -180,6 +189,49 @@ func TestCreateKnowledgeFromFilePersistsStoredFilePathOnCreate(t *testing.T) {
 	require.Equal(t, 1, repo.createCalls)
 	require.NotNil(t, repo.createdKnowledge)
 	require.Equal(t, "stored/"+knowledge.ID, repo.createdKnowledge.FilePath)
+	require.Equal(t, 1, task.calls)
+}
+
+func TestCreateKnowledgeFromImageFallsBackWhenLegacyStorageConfigIsIncomplete(t *testing.T) {
+	t.Parallel()
+
+	repo := &createKnowledgeFileRepoStub{}
+	fileSvc := &createKnowledgeFileServiceStub{}
+	task := &createKnowledgeTaskEnqueuerStub{}
+	kb := &types.KnowledgeBase{
+		ID:        "kb-1",
+		VLMConfig: types.VLMConfig{Enabled: true, ModelID: "vlm-1"},
+	}
+	kb.SetStorageProvider("cos")
+	svc := &knowledgeService{
+		repo:      repo,
+		kbService: &createKnowledgeFileKBServiceStub{kb: kb},
+		fileSvc:   fileSvc,
+		task:      task,
+	}
+	ctx := context.WithValue(newCreateKnowledgeFileContext(), types.TenantInfoContextKey, &types.Tenant{
+		StorageEngineConfig: &types.StorageEngineConfig{
+			DefaultProvider: "cos",
+			COS:             &types.COSEngineConfig{SecretID: "incomplete"},
+		},
+	})
+
+	knowledge, err := svc.CreateKnowledgeFromFile(
+		ctx,
+		"kb-1",
+		newMultipartFileHeader(t, "image.png", "image bytes"),
+		nil,
+		nil,
+		"",
+		nil,
+		"",
+		nil,
+	)
+
+	require.NoError(t, err)
+	require.NotNil(t, knowledge)
+	require.Equal(t, 1, fileSvc.saveCalls)
+	require.Equal(t, 1, repo.createCalls)
 	require.Equal(t, 1, task.calls)
 }
 
@@ -201,7 +253,7 @@ func TestCreateKnowledgeFromFileDeletesStoredFileWhenCreateFails(t *testing.T) {
 		nil,
 		nil,
 		"",
-		"",
+		nil,
 		"",
 		nil,
 	)
@@ -239,7 +291,7 @@ func TestCreateKnowledgeFromFile_PersistsProcessOverrides(t *testing.T) {
 		map[string]string{"source": "test"},
 		nil,
 		"",
-		"",
+		nil,
 		"",
 		overrides,
 	)

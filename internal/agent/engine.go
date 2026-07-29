@@ -15,6 +15,7 @@ import (
 	appconfig "github.com/Tencent/WeKnora/internal/config"
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/logger"
+	"github.com/Tencent/WeKnora/internal/modelcontext"
 	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/tracing/langfuse"
 	"github.com/Tencent/WeKnora/internal/types"
@@ -38,6 +39,8 @@ type AgentEngine struct {
 	eventBus             *event.EventBus
 	knowledgeBasesInfo   []*KnowledgeBaseInfo      // Detailed knowledge base information for prompt
 	selectedDocs         []*SelectedDocumentInfo   // User-selected documents (via @ mention)
+	pinnedMCPServices    []*PinnedMCPServiceInfo   // User @mentioned MCP services for this turn
+	pinnedSkills         []*PinnedSkillInfo        // User @mentioned skills for this turn
 	sessionID            string                    // Session ID for logging and event emission
 	systemPromptTemplate string                    // System prompt template (optional, uses default if empty)
 	skillsManager        *skills.Manager           // Skills manager for Progressive Disclosure (optional)
@@ -47,6 +50,7 @@ type AgentEngine struct {
 	memoryConsolidator   *agentmemory.Consolidator // Memory consolidator for LLM-powered summarization (optional)
 	lastUsage            types.TokenUsage          // Token usage from the most recent LLM call
 	lastSentMsgCount     int                       // Number of messages sent in the most recent LLM call
+	modelContext         *modelcontext.Registry    // single request-local boundary for every model handle
 }
 
 // ImageDescriberFunc generates a text description of an image.
@@ -81,6 +85,7 @@ func NewAgentEngine(
 		sessionID:            sessionID,
 		systemPromptTemplate: systemPromptTemplate,
 		tokenEstimator:       tokenEst,
+		modelContext:         modelcontext.NewRegistry(config.CitationsEnabled()),
 	}
 
 	// Initialize memory consolidator if context window management is configured
@@ -91,6 +96,33 @@ func NewAgentEngine(
 	}
 
 	return engine
+}
+
+// SetPinnedMentions sets per-turn @mention scope for MCP services and skills.
+func (e *AgentEngine) SetPinnedMentions(mcpServices []*PinnedMCPServiceInfo, skills []*PinnedSkillInfo) {
+	e.pinnedMCPServices = mcpServices
+	e.pinnedSkills = skills
+}
+
+func (e *AgentEngine) systemPromptOptions(ctx context.Context) *BuildSystemPromptOptions {
+	opts := &BuildSystemPromptOptions{
+		Language: types.LanguageNameFromContext(ctx),
+		Config:   e.appConfig,
+	}
+	if e.skillsManager != nil && e.skillsManager.IsEnabled() {
+		opts.SkillsMetadata = e.skillsManager.GetAllMetadata()
+	}
+	return opts
+}
+
+func (e *AgentEngine) buildSystemPrompt(ctx context.Context) string {
+	prompt := BuildSystemPromptWithOptions(
+		e.knowledgeBasesInfo,
+		e.config.WebSearchEnabled,
+		e.systemPromptOptions(ctx),
+		e.systemPromptTemplate,
+	)
+	return strings.TrimRight(prompt, " \t\r\n") + e.modelContext.ProtocolPrompt()
 }
 
 // NewAgentEngineWithSkills creates a new agent engine with skills support
@@ -220,34 +252,7 @@ func (e *AgentEngine) Execute(
 
 	// Build system prompt using progressive RAG prompt
 	// If skills are enabled, include skills metadata (Level 1 - Progressive Disclosure)
-	// Extract user language from context for prompt placeholder
-	language := types.LanguageNameFromContext(ctx)
-	var systemPrompt string
-	if e.skillsManager != nil && e.skillsManager.IsEnabled() {
-		skillsMetadata := e.skillsManager.GetAllMetadata()
-		systemPrompt = BuildSystemPromptWithOptions(
-			e.knowledgeBasesInfo,
-			e.config.WebSearchEnabled,
-			e.selectedDocs,
-			&BuildSystemPromptOptions{
-				SkillsMetadata: skillsMetadata,
-				Language:       language,
-				Config:         e.appConfig,
-			},
-			e.systemPromptTemplate,
-		)
-	} else {
-		systemPrompt = BuildSystemPromptWithOptions(
-			e.knowledgeBasesInfo,
-			e.config.WebSearchEnabled,
-			e.selectedDocs,
-			&BuildSystemPromptOptions{
-				Language: language,
-				Config:   e.appConfig,
-			},
-			e.systemPromptTemplate,
-		)
-	}
+	systemPrompt := e.buildSystemPrompt(ctx)
 	logger.Debugf(ctx, "[Agent] SystemPrompt: %d chars", len(systemPrompt))
 
 	// Initialize messages with history

@@ -3,24 +3,19 @@
     <div v-if="session?.isRagMode" class="rag-answer-stack">
       <RagPipelineProgress :session="session" embedded-mode />
       <AgentStreamDisplay v-if="session?.isAgentMode" :session="session" :session-id="sessionId" :user-query="userQuery"
-        rag-mode :embedded-mode="embeddedMode" :embed-channel-id="embedChannelId" :embed-token="embedToken" />
+        rag-mode :embedded-mode="embeddedMode" :embed-channel-id="embedChannelId" :embed-token="embedToken"
+        :embed-session-sig="embedSessionSig" :embed-visitor-id="embedVisitorId" />
     </div>
     <template v-else>
       <DocInfo v-if="session?.knowledge_references?.length" :session="session" embedded-mode />
       <AgentStreamDisplay v-if="session?.isAgentMode" :session="session" :session-id="sessionId" :user-query="userQuery"
-        :embedded-mode="embeddedMode" :embed-channel-id="embedChannelId" :embed-token="embedToken" />
+        :embedded-mode="embeddedMode" :embed-channel-id="embedChannelId" :embed-token="embedToken"
+        :embed-session-sig="embedSessionSig" :embed-visitor-id="embedVisitorId" />
     </template>
     <DeepThink v-if="session?.showThink && !session?.isAgentMode" :deep-session="session" />
     <div v-if="!session?.hideContent && !session?.isAgentMode" ref="parentMd">
       <div v-if="hasActualContent" class="content-wrapper">
         <div class="ai-markdown-template markdown-content" v-stable-html="renderedHTML" />
-      </div>
-      <div v-if="hasActualContent && !session?.is_completed" class="loading-indicator">
-        <div class="loading-typing">
-          <span></span>
-          <span></span>
-          <span></span>
-        </div>
       </div>
     </div>
     <Teleport to="body">
@@ -107,6 +102,8 @@ const props = withDefaults(
     embeddedMode?: boolean
     embedChannelId?: string
     embedToken?: string
+    embedSessionSig?: string
+    embedVisitorId?: string
   }>(),
   {
     content: '',
@@ -116,6 +113,8 @@ const props = withDefaults(
     embeddedMode: true,
     embedChannelId: '',
     embedToken: '',
+    embedSessionSig: '',
+    embedVisitorId: '',
   },
 )
 
@@ -128,6 +127,9 @@ const { float: citationFloat, rebind: rebindCitations } = useEmbedCitationPopove
   parentMd,
   embedChannelIdRef,
   embedTokenRef,
+  {
+    getKnowledgeReferences: () => props.session?.knowledge_references,
+  },
 )
 
 let citationCloseTimer: number | null = null
@@ -243,49 +245,6 @@ onMounted(() => {
   // Do not add element-level Markdown rules here; update the shared mixin.
   .chat-markdown-typography();
   .chat-citation-pills();
-}
-
-.loading-indicator {
-  padding: 8px 0;
-}
-
-.loading-typing {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-
-  span {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--embed-primary, var(--td-brand-color));
-    animation: typingBounce 1.4s ease-in-out infinite;
-
-    &:nth-child(1) {
-      animation-delay: 0s;
-    }
-
-    &:nth-child(2) {
-      animation-delay: 0.2s;
-    }
-
-    &:nth-child(3) {
-      animation-delay: 0.4s;
-    }
-  }
-}
-
-@keyframes typingBounce {
-
-  0%,
-  60%,
-  100% {
-    transform: translateY(0);
-  }
-
-  30% {
-    transform: translateY(-8px);
-  }
 }
 
 .embed-citation-float {

@@ -7,7 +7,8 @@ import { MessagePlugin } from "tdesign-vue-next";
 import { useSettingsStore } from '@/stores/settings';
 import { useUIStore } from '@/stores/ui';
 import { useMenuStore } from '@/stores/menu';
-import { listKnowledgeBases, searchKnowledge, batchQueryKnowledge } from '@/api/knowledge-base';
+import { listKnowledgeBases, searchKnowledge, batchQueryKnowledge, listKnowledgeTags } from '@/api/knowledge-base';
+import { listMCPServices, type MCPService } from '@/api/mcp-service';
 import { stopSession } from '@/api/chat';
 import { useOrganizationStore } from '@/stores/organization';
 import KnowledgeBaseSelector from './KnowledgeBaseSelector.vue';
@@ -18,6 +19,7 @@ import { getRootZoom, rectToCssPx, cssViewportSize } from '@/utils/zoom';
 import { type ModelConfig } from '@/api/model';
 import { type CustomAgent, BUILTIN_QUICK_ANSWER_ID, BUILTIN_SMART_REASONING_ID } from '@/api/agent';
 import { useChatResourcesStore } from '@/stores/chatResources';
+import { useEditorResourcesStore } from '@/stores/editorResources';
 import { useI18n } from 'vue-i18n';
 import AttachmentUpload, { type AttachmentFile } from './AttachmentUpload.vue';
 import {
@@ -27,6 +29,11 @@ import {
   type ScopeCapabilities,
 } from '@/utils/tool-capabilities';
 import {
+  isAgentWebSearchEnabled,
+  isAgentWebSearchReady,
+  isTenantWebSearchReady,
+} from '@/utils/agentWebSearch';
+import {
   getAgentNotReadyReasonKeys,
   resolveAgentNotReadySection,
   resolveAgentNotReadyHighlight,
@@ -34,6 +41,7 @@ import {
   type AgentNotReadyReasonKey,
 } from '@/utils/agent-readiness';
 import { formatLocalizedList } from '@/utils/format-list';
+import type { MentionItem, MentionItemType, MentionRequestItem } from '@/types/mention';
 
 const route = useRoute();
 const router = useRouter();
@@ -42,6 +50,7 @@ const uiStore = useUIStore();
 const orgStore = useOrganizationStore();
 const menuStore = useMenuStore();
 const chatResources = useChatResourcesStore();
+const editorResources = useEditorResourcesStore();
 const {
   agents,
   disabledOwnAgentIds,
@@ -174,7 +183,7 @@ const isCustomAgent = computed(() => {
 // 判断是否有智能体配置（包括内置智能体）
 const hasAgentConfig = computed(() => {
   const agent = selectedAgent.value;
-  // 共享智能体的 config 来自源租户，直接使用 agent.config，避免被本租户同 ID 的 builtin 覆盖
+  // 共享智能体的 config 来自源空间，直接使用 agent.config，避免被本空间同 ID 的 builtin 覆盖
   const sourceTenantId = settingsStore.selectedAgentSourceTenantId;
   if (agent?.is_builtin && !sourceTenantId) {
     const builtinAgent = agents.value.find(a => a.id === agent.id);
@@ -212,7 +221,7 @@ const agentKBSelectionMode = computed(() => {
 // 共享智能体下的知识库列表（来自 listKnowledgeBases(agent_id)），用于已选知识库展示与 org 角标
 const sharedAgentKbList = ref<Array<{ id: string; name: string; type?: string; knowledge_count?: number; chunk_count?: number }>>([]);
 
-// 当智能体改变时，模型、网络搜索、可@知识库列表均跟随新智能体配置
+// 当智能体改变时，模型、可@知识库列表均跟随新智能体配置；网络搜索由用户主动开启
 // 知识库：用新智能体配置的列表替换当前选中，使已选与可@列表一致（含共享智能体）
 watch([selectedAgentId, agentKnowledgeBases, agentKBSelectionMode], ([newAgentId, newAgentKbs, newKbMode], [oldAgentId]) => {
   if (settingsStore._isApplyingSessionState) return;
@@ -254,20 +263,15 @@ watch([selectedAgentId, () => settingsStore.selectedAgentSourceTenantId], async 
   }
 }, { immediate: true });
 
-// 智能体是否启用了网络搜索
-const agentWebSearchEnabled = computed(() => {
-  if (!hasAgentConfig.value) return null; // null 表示不受智能体控制
-  return currentAgentConfig.value?.web_search_enabled ?? true;
+// 智能体是否启用了网络搜索（仅显式开启才算支持）
+const isWebSearchEnabledByAgent = computed(() => {
+  if (!hasAgentConfig.value) return null;
+  return isAgentWebSearchEnabled(currentAgentConfig.value);
 });
 
-const agentWebSearchProviderId = computed(() => {
-  if (!hasAgentConfig.value) return '';
-  return currentAgentConfig.value?.web_search_provider_id || '';
-});
-
-// 网络搜索是否被智能体禁用（只读状态）- 只有明确设置为 false 时才禁用
+// 网络搜索是否被智能体禁用
 const isWebSearchDisabledByAgent = computed(() => {
-  return hasAgentConfig.value && agentWebSearchEnabled.value === false;
+  return hasAgentConfig.value && isWebSearchEnabledByAgent.value !== true;
 });
 
 // 知识库选择是否被智能体锁定
@@ -283,6 +287,12 @@ const isKnowledgeBaseLockedByAgent = computed(() => {
 const isKnowledgeBaseDisabledByAgent = computed(() => {
   if (!hasAgentConfig.value) return false;
   return agentKBSelectionMode.value === 'none';
+});
+const isMentionDisabled = computed(() => {
+  if (settingsStore.isAgentStreamMode && isKnowledgeBaseDisabledByAgent.value) {
+    return agentMCPSelectionMode.value === 'none' && agentSkillsSelectionMode.value === 'none';
+  }
+  return isKnowledgeBaseLockedByAgent.value && !settingsStore.isAgentStreamMode;
 });
 
 // 智能体配置的模型 ID
@@ -301,6 +311,71 @@ const agentSupportedFileTypes = computed(() => {
 const agentAllowedTools = computed<string[]>(() => {
   if (!hasAgentConfig.value) return [];
   return currentAgentConfig.value?.allowed_tools || [];
+});
+
+type SelectionMode = 'all' | 'selected' | 'none';
+const normalizeSelectionMode = (mode?: string): SelectionMode => {
+  return mode === 'all' || mode === 'selected' || mode === 'none' ? mode : 'none';
+};
+
+const agentMCPSelectionMode = computed<SelectionMode>(() => {
+  if (!settingsStore.isAgentStreamMode || !hasAgentConfig.value) return 'none';
+  return normalizeSelectionMode(currentAgentConfig.value?.mcp_selection_mode);
+});
+
+const agentMCPServiceIds = computed<string[]>(() => {
+  if (agentMCPSelectionMode.value !== 'selected') return [];
+  return currentAgentConfig.value?.mcp_services || [];
+});
+
+const isMCPAllowedByAgent = (service: MCPService) => {
+  if (!settingsStore.isAgentStreamMode || !service.enabled) return false;
+  const mode = agentMCPSelectionMode.value;
+  if (mode === 'none') return false;
+  if (mode === 'selected') return agentMCPServiceIds.value.includes(service.id);
+  return true;
+};
+
+const agentSkillsSelectionMode = computed<SelectionMode>(() => {
+  if (!settingsStore.isAgentStreamMode || !hasAgentConfig.value) return 'none';
+  return normalizeSelectionMode(currentAgentConfig.value?.skills_selection_mode);
+});
+
+const agentSelectedSkills = computed<string[]>(() => {
+  if (agentSkillsSelectionMode.value !== 'selected') return [];
+  return currentAgentConfig.value?.selected_skills || [];
+});
+
+const isSkillAllowedByAgent = (skillName: string) => {
+  if (!settingsStore.isAgentStreamMode || !editorResources.skillsAvailable) return false;
+  const mode = agentSkillsSelectionMode.value;
+  if (mode === 'none') return false;
+  if (mode === 'selected') return agentSelectedSkills.value.includes(skillName);
+  return true;
+};
+
+// 切换智能体时清理不允许的 MCP / Skill @mention
+watch([selectedAgentId, agentMCPSelectionMode, agentSkillsSelectionMode], ([newAgentId], [oldAgentId]) => {
+  if (settingsStore._isApplyingSessionState) return;
+  if (newAgentId === oldAgentId || oldAgentId === undefined) return;
+
+  const mcpMode = agentMCPSelectionMode.value;
+  if (mcpMode === 'none') {
+    settingsStore.settings.selectedMCPServices = [];
+  } else if (mcpMode === 'selected') {
+    const allowed = new Set(agentMCPServiceIds.value);
+    settingsStore.settings.selectedMCPServices = (settingsStore.settings.selectedMCPServices || [])
+      .filter(id => allowed.has(id));
+  }
+
+  const skillsMode = agentSkillsSelectionMode.value;
+  if (skillsMode === 'none') {
+    settingsStore.settings.selectedSkills = [];
+  } else if (skillsMode === 'selected') {
+    const allowed = new Set(agentSelectedSkills.value);
+    settingsStore.settings.selectedSkills = (settingsStore.settings.selectedSkills || [])
+      .filter(name => allowed.has(name));
+  }
 });
 
 // 从 KB 对象里抽能力位，优先用 backend 显式的 capabilities 字段；否则回退到 indexing_strategy，
@@ -358,6 +433,15 @@ const isImageUploadEnabledByAgent = computed(() => {
   return currentAgentConfig.value?.image_upload_enabled === true;
 });
 
+// Input 工具栏：仅当智能体已启用且搜索引擎可用时才显示
+const showWebSearchButton = computed(() => {
+  if (!hasAgentConfig.value) {
+    return isTenantWebSearchReady(webSearchProviders.value);
+  }
+  return isAgentWebSearchReady(currentAgentConfig.value, webSearchProviders.value);
+});
+const showImageUploadButton = computed(() => isImageUploadEnabledByAgent.value);
+
 // 模型选择是否被智能体锁定 - 已移除锁定逻辑，允许用户自由切换模型
 const isModelLockedByAgent = computed(() => {
   return false;
@@ -366,16 +450,19 @@ const isModelLockedByAgent = computed(() => {
 // Mention related state
 const showMention = ref(false);
 const mentionQuery = ref("");
-const mentionItems = ref<Array<{ id: string; name: string; type: 'kb' | 'file'; kbType?: 'document' | 'faq'; count?: number; kbName?: string; orgName?: string; kbId?: string }>>([]);
+const mentionItems = ref<MentionItem[]>([]);
 /** 文件 ID -> 知识库 ID（用于批量查询时传 kb_id，支持共享知识库下的文档） */
 const fileIdToKbId = ref<Record<string, string>>({});
+const mcpServices = ref<MCPService[]>([]);
 const mentionActiveIndex = ref(0);
 const mentionStyle = ref<Record<string, string>>({});
 const textareaRef = ref<any>(null); // Ref to t-textarea component
+const mentionSelectorRef = ref<any>(null);
 const mentionStartPos = ref(0);
 const isComposing = ref(false);
 const isMentionTriggeredByButton = ref(false);
 const mentionHasMore = ref(false);
+const mentionGroupCounts = ref<Partial<Record<MentionItemType, number>>>({});
 // 当前 @ 会话可见的 KB ID 集合（含工具兼容性过滤），分页加载文件时复用，
 // 避免 append 请求把不兼容 KB 的文件漏进来。`null` 表示"不受限制"（非智能体场景）
 const mentionAllowedKbIds = ref<Set<string> | null>(null);
@@ -417,8 +504,11 @@ const isAgentEnabled = computed(() => settingsStore.isAgentEnabled);
 const isWebSearchEnabled = computed(() => settingsStore.isWebSearchEnabled);
 const selectedKbIds = computed(() => settingsStore.settings.selectedKnowledgeBases || []);
 const selectedFileIds = computed(() => settingsStore.settings.selectedFiles || []);
+const selectedTags = computed(() => settingsStore.settings.selectedTags || []);
+const selectedMCPServiceIds = computed(() => settingsStore.settings.selectedMCPServices || []);
+const selectedSkillNames = computed(() => settingsStore.settings.selectedSkills || []);
 
-// 已就绪的知识库（来自租户级缓存）
+// 已就绪的知识库（来自空间级缓存）
 const knowledgeBases = computed(() => chatResources.validKnowledgeBases);
 const fileList = ref<Array<{ id: string; name: string }>>([]);
 
@@ -461,6 +551,35 @@ const selectedFiles = computed(() => {
   });
 });
 
+const skillMentionItems = computed<MentionItem[]>(() => {
+  return selectedSkillNames.value
+    .filter((name: string) => isSkillAllowedByAgent(name))
+    .map((name: string) => {
+    const skill = editorResources.skills.find(s => s.name === name);
+    return {
+      id: name,
+      name: skill?.name || name,
+      type: 'skill' as const,
+      skillName: name,
+      description: skill?.description || '',
+    };
+  });
+});
+
+const selectedMCPItems = computed<MentionItem[]>(() => {
+  return selectedMCPServiceIds.value
+    .map((id: string) => mcpServices.value.find(service => service.id === id))
+    .filter((svc): svc is MCPService => !!svc && isMCPAllowedByAgent(svc))
+    .map((svc) => {
+      return {
+        id: svc.id,
+        name: svc.name,
+        type: 'mcp' as const,
+        description: svc.description || '',
+      };
+    });
+});
+
 // 合并所有选中项（用于输入框内显示）
 // 现在智能体配置的知识库也在 store 中，统一从 selectedKbs 获取
 const allSelectedItems = computed(() => {
@@ -501,17 +620,47 @@ const allSelectedItems = computed(() => {
   // 智能体配置的放在前面
   const agentConfiguredKbs = allKbs.filter(kb => kb.isAgentConfigured);
   const userSelectedKbs = allKbs.filter(kb => !kb.isAgentConfigured);
+  const tags = selectedTags.value.map((tag: any) => ({
+    id: tag.id,
+    name: tag.name,
+    type: 'tag' as const,
+    kbId: tag.kbId,
+    kbName: tag.kbName,
+    description: tag.kbName || '',
+    isAgentConfigured: false,
+  }));
 
-  return [...agentConfiguredKbs, ...userSelectedKbs, ...files];
+  return [...agentConfiguredKbs, ...userSelectedKbs, ...files, ...tags, ...selectedMCPItems.value, ...skillMentionItems.value];
 });
 
 // 移除选中项（智能体配置的项也可以移除）
-const removeSelectedItem = (item: { id: string; type: 'kb' | 'file'; isAgentConfigured?: boolean }) => {
+const removeSelectedItem = (item: MentionItem) => {
   if (item.type === 'kb') {
     settingsStore.removeKnowledgeBase(item.id);
-  } else {
+  } else if (item.type === 'file') {
     settingsStore.removeFile(item.id);
+  } else if (item.type === 'tag') {
+    settingsStore.removeTag(item.id, item.kbId);
+  } else if (item.type === 'mcp') {
+    settingsStore.removeMCPService(item.id);
+  } else if (item.type === 'skill') {
+    settingsStore.removeSkill(item.skillName || item.id);
   }
+};
+
+const getMentionIcon = (item: MentionItem) => {
+  switch (item.type) {
+    case 'file': return 'file';
+    case 'tag': return 'tag';
+    case 'mcp': return 'tools';
+    case 'skill': return 'bookmark';
+    default: return 'folder';
+  }
+};
+
+const getMentionChipClass = (item: MentionItem) => {
+  if (item.type === 'kb') return item.kbType === 'faq' ? 'mention-chip--faq' : 'mention-chip--kb';
+  return `mention-chip--${item.type}`;
 };
 
 // 使用 computed 从 store 读取，并通过 setter 同步回 store
@@ -637,17 +786,24 @@ const loadFiles = async () => {
   }
 };
 
+const loadMCPServices = async () => {
+  try {
+    mcpServices.value = await listMCPServices();
+  } catch (error) {
+    console.error('Failed to load MCP services:', error);
+    mcpServices.value = [];
+  }
+};
+
 watch(selectedFileIds, () => {
   loadFiles();
 }, { immediate: true });
 
 const isWebSearchConfigured = computed(() => {
-  const agentProviderId = agentWebSearchProviderId.value;
-  if (agentProviderId) {
-    return webSearchProviders.value.some(p => p.id === agentProviderId);
+  if (hasAgentConfig.value) {
+    return isAgentWebSearchReady(currentAgentConfig.value, webSearchProviders.value);
   }
-
-  return webSearchProviders.value.some(p => p.is_default);
+  return isTenantWebSearchReady(webSearchProviders.value);
 });
 
 const loadWebSearchConfig = async (force = false) => {
@@ -676,9 +832,9 @@ const loadAgents = async (force = false) => {
   }
 };
 
-// 默认选中的 builtin（builtin-quick-answer）也可能被当前租户管理员停用。
-// 列表加载完后做一次纠偏：若当前选中的是本租户停用的 agent（仅限「我的/builtin」，
-// 共享智能体由源租户决定，本地停用列表不适用），按 智能推理 → 快速问答 →
+// 默认选中的 builtin（builtin-quick-answer）也可能被当前空间管理员停用。
+// 列表加载完后做一次纠偏：若当前选中的是本空间停用的 agent（仅限「我的/builtin」，
+// 共享智能体由源空间决定，本地停用列表不适用），按 智能推理 → 快速问答 →
 // 第一个可用 的顺序兜底切换。全部都被停用时保持原选择不动（极端场景，UI 仍会
 // 在 enabledAgents 过滤后显示空，由用户在智能体页恢复任意一个）。
 const ensureSelectedAgentNotDisabled = () => {
@@ -707,7 +863,7 @@ const ensureSelectedAgentNotDisabled = () => {
   }
 }
 
-// 对话下拉中展示的「我的」智能体（排除当前租户已停用的）
+// 对话下拉中展示的「我的」智能体（排除当前空间已停用的）
 const enabledAgents = computed(() =>
   agents.value.filter(a => !disabledOwnAgentIds.value.includes(a.id))
 );
@@ -792,7 +948,7 @@ const ensureModelSelection = () => {
 
 // 智能体身份或其数据到位时，把对话模型同步到智能体配置的 model_id。
 // 修复场景：导航离开再返回时，initChatModelSelection 会用 localStorage 的 lastPick
-// 覆盖共享智能体绑定的源租户 model_id，UI 显示「未配置」——此时需要拉回 agent 模型。
+// 覆盖共享智能体绑定的源空间 model_id，UI 显示「未配置」——此时需要拉回 agent 模型。
 // 但若用户在本页手动改过模型（lastPick 与 agent 默认不同且当前选中即为 lastPick），
 // 则保留用户选择，避免 creatChat → chat 跳转后把模型 B 冲回智能体默认 A。
 watch(
@@ -865,7 +1021,7 @@ const selectedModel = computed(() => {
   return availableModels.value.find(model => model.id === selectedModelId.value);
 });
 
-// 模型展示名：本租户列表中有则用名称；若为共享智能体且其 model_id 不在本租户列表中则显示“共享智能体配置的模型”
+// 模型展示名：本空间列表中有则用名称；若为共享智能体且其 model_id 不在本空间列表中则显示“共享智能体配置的模型”
 const selectedModelDisplayName = computed(() => {
   if (selectedModel.value) return modelDisplayName(selectedModel.value);
   if (!selectedModelId.value) return t('input.notConfigured');
@@ -998,14 +1154,17 @@ const loadMentionItems = async (q: string, resetIndex = true, append = false) =>
     mentionOffset.value = 0;
   }
 
-  // 根据智能体的 kb_selection_mode 过滤知识库；选中共享智能体时使用该租户下的知识库，否则使用本租户 + 共享给自己的
+  // 根据智能体的 kb_selection_mode 过滤知识库；选中共享智能体时使用该空间下的知识库，否则使用本空间 + 共享给自己的
   let kbItems: any[] = [];
+  let tagItems: MentionItem[] = [];
+  let mcpItems: MentionItem[] = [];
+  let skillItems: MentionItem[] = [];
   if (!append) {
     let availableKbs: any[];
     const sourceTenantId = settingsStore.selectedAgentSourceTenantId;
     const agentId = selectedAgentId.value;
     if (sourceTenantId && agentId) {
-      // 共享智能体：按 agent_id 拉取该智能体配置的知识库范围（后端从共享关系解析租户）
+      // 共享智能体：按 agent_id 拉取该智能体配置的知识库范围（后端从共享关系解析空间）
       try {
         const list = await chatResources.ensureAgentKnowledgeBases(agentId);
         const orgLabel = sharedAgentOrgName.value || '';
@@ -1088,14 +1247,82 @@ const loadMentionItems = async (q: string, resetIndex = true, append = false) =>
     const kbs = availableKbs.filter((kb: any) =>
       !q || (kb.name && kb.name.toLowerCase().includes(q.toLowerCase()))
     );
-    kbItems = kbs.map((kb: any) => ({
-      id: kb.id,
-      name: kb.name,
-      type: 'kb' as const,
-      kbType: kb.type || 'document',
-      count: kb.type === 'faq' ? (kb.chunk_count || 0) : (kb.knowledge_count || 0),
-      orgName: kb.org_name || sharedAgentOrgName.value || undefined
+    kbItems = await Promise.all(kbs.map(async (kb: any) => {
+      const kbType = kb.type || 'document';
+      let count = kbType === 'faq' ? Number(kb.chunk_count || 0) : Number(kb.knowledge_count || 0);
+      if (!count) {
+        const detail = await chatResources.fetchKnowledgeBaseById(kb.id);
+        if (detail) {
+          count = detail.type === 'faq'
+            ? Number(detail.chunk_count || 0)
+            : Number(detail.knowledge_count || 0);
+        }
+      }
+      return {
+        id: kb.id,
+        name: kb.name,
+        type: 'kb' as const,
+        kbType: kbType === 'faq' ? 'faq' as const : 'document' as const,
+        count,
+        orgName: kb.org_name || sharedAgentOrgName.value || undefined
+      };
     }));
+    mentionGroupCounts.value.kb = kbItems.length;
+
+    const tagKeyword = q.trim();
+    const tagSources = availableKbs;
+    try {
+      const tagResults = await Promise.all(tagSources.map(async (kb: any) => {
+        const res: any = await listKnowledgeTags(kb.id, { page: 1, page_size: 20, keyword: tagKeyword || undefined });
+        const payload = res?.data ?? res;
+        const list = Array.isArray(payload?.data) ? payload.data : (Array.isArray(payload) ? payload : []);
+        return list.map((tag: any) => ({
+          id: tag.id,
+          name: tag.name,
+          type: 'tag' as const,
+          kbId: kb.id,
+          kbName: kb.name,
+        }));
+      }));
+      tagItems = tagResults.flat();
+      mentionGroupCounts.value.tag = tagItems.length;
+    } catch (e) {
+      console.error('[Mention] listKnowledgeTags error:', e);
+      tagItems = [];
+    }
+
+    const mcpMode = agentMCPSelectionMode.value;
+    if (mcpMode !== 'none') {
+      mcpItems = mcpServices.value
+        .filter(service => isMCPAllowedByAgent(service))
+        .filter(service => !q || service.name?.toLowerCase().includes(q.toLowerCase()) || (service.description || '').toLowerCase().includes(q.toLowerCase()))
+        .map(service => ({
+          id: service.id,
+          name: service.name,
+          type: 'mcp' as const,
+          description: service.description || '',
+        }));
+    }
+
+    const skillsMode = agentSkillsSelectionMode.value;
+    if (skillsMode !== 'none') {
+      await editorResources.ensureSkills();
+      skillItems = editorResources.skills
+        .filter(skill => isSkillAllowedByAgent(skill.name))
+        .map(skill => ({
+          id: skill.name,
+          name: skill.name,
+          type: 'skill' as const,
+          skillName: skill.name,
+          description: skill.description || '',
+        }))
+        .filter(skill => {
+          if (!q) return true;
+          const keyword = q.toLowerCase();
+          return skill.name.toLowerCase().includes(keyword)
+            || (skill.description || '').toLowerCase().includes(keyword);
+        });
+    }
   }
 
   // Fetch Files from API
@@ -1131,6 +1358,8 @@ const loadMentionItems = async (q: string, resetIndex = true, append = false) =>
       console.log('[Mention] searchKnowledge response:', res);
       if (res.data && Array.isArray(res.data)) {
         let files = res.data;
+        const rawTotal = typeof res.total === 'number' ? res.total : undefined;
+        const apiPageSize = res.data.length;
         // 按当前 @ 会话的兼容 KB 集合过滤：
         //   - 非智能体场景：`mentionAllowedKbIds` 为 null，跳过；
         //   - 智能体场景（含 shared agent）：'selected' 会把 ID 收敛到用户勾的 KB，
@@ -1163,6 +1392,14 @@ const loadMentionItems = async (q: string, resetIndex = true, append = false) =>
             orgName: fileOrgName || undefined
           };
         });
+        if (!append) {
+          const clientFiltered = !!mentionAllowedKbIds.value && fileItems.length < apiPageSize;
+          if (!clientFiltered && rawTotal != null) {
+            mentionGroupCounts.value.file = rawTotal;
+          } else {
+            delete mentionGroupCounts.value.file;
+          }
+        }
       }
       mentionHasMore.value = res.has_more || false;
       mentionOffset.value += fileItems.length;
@@ -1180,9 +1417,9 @@ const loadMentionItems = async (q: string, resetIndex = true, append = false) =>
     // Append file items to existing list
     mentionItems.value = [...mentionItems.value, ...fileItems];
   } else {
-    mentionItems.value = [...kbItems, ...fileItems];
+    mentionItems.value = [...kbItems, ...tagItems, ...mcpItems, ...skillItems, ...fileItems];
   }
-  console.log('[Mention] Total items:', mentionItems.value.length, { kbItems: kbItems.length, fileItems: fileItems.length });
+  console.log('[Mention] Total items:', mentionItems.value.length, { kbItems: kbItems.length, fileItems: fileItems.length, tagItems: tagItems.length, mcpItems: mcpItems.length, skillItems: skillItems.length });
 
   // Only reset index if query changed or explicitly requested
   if (resetIndex || q !== lastMentionQuery) {
@@ -1263,11 +1500,7 @@ const onInput = (val: string | InputEvent) => {
   } else {
     if (textBeforeCursor.endsWith('@')) {
       // 如果智能体禁用了知识库，不触发 @ 菜单
-      if (isKnowledgeBaseDisabledByAgent.value) {
-        return;
-      }
-      // 如果智能体锁定了知识库且不允许用户选择，也不触发 @ 菜单
-      if (isKnowledgeBaseLockedByAgent.value) {
+      if (isMentionDisabled.value) {
         return;
       }
 
@@ -1336,8 +1569,8 @@ const onCompositionEnd = (e: CompositionEvent) => {
 };
 
 const triggerMention = () => {
-  // 如果智能体锁定或禁用了知识库，不允许打开选择器
-  if (isKnowledgeBaseLockedByAgent.value) {
+  // 如果当前没有任何可提及资源，不允许打开选择器
+  if (isMentionDisabled.value) {
     const msgKey = isKnowledgeBaseDisabledByAgent.value ? 'input.kbDisabledByAgent' : 'input.kbLockedByAgent';
     MessagePlugin.warning(t(msgKey));
     return;
@@ -1401,6 +1634,14 @@ const onMentionSelect = (item: any) => {
     if (!fileList.value.find(f => f.id === item.id)) {
       fileList.value.push({ id: item.id, name: item.name });
     }
+  } else if (item.type === 'tag') {
+    if (item.kbId) {
+      settingsStore.addTag({ id: item.id, name: item.name, kbId: item.kbId, kbName: item.kbName });
+    }
+  } else if (item.type === 'mcp') {
+    settingsStore.addMCPService(item.id);
+  } else if (item.type === 'skill') {
+    settingsStore.addSkill(item.skillName || item.id);
   }
 
   const textarea = getTextareaEl();
@@ -1505,6 +1746,7 @@ onMounted(() => {
     loadWebSearchConfig(),
     loadChatModels(),
     loadAgents(),
+    loadMCPServices(),
   ]);
   window.addEventListener(CHAT_FILE_DROP_EVENT, handleChatFileDrop as EventListener);
 
@@ -1595,7 +1837,7 @@ watch([selectedKbIds, selectedFileIds], ([kbIds, fileIds]) => {
 }, { deep: true });
 
 const emit = defineEmits<{
-  (e: 'send-msg', query: string, modelId: string, mentionedItems: any[], imageFiles: File[], attachmentFiles: AttachmentFile[]): void;
+  (e: 'send-msg', query: string, modelId: string, mentionedItems: MentionRequestItem[], imageFiles: File[], attachmentFiles: AttachmentFile[]): void;
   (e: 'stop-generation'): void;
 }>();
 
@@ -1607,6 +1849,21 @@ const createSession = async (val: string) => {
   if (props.isReplying) {
     return MessagePlugin.error(t('input.messages.replying'));
   }
+  // Only block while the file is still uploading (no document ID yet). Once
+  // uploaded, sending is allowed even if parsing is still in progress: the
+  // backend shows a "parsing attachment" step on the timeline and waits.
+  const pendingAttachment = uploadedAttachments.value.find(item =>
+    item.status === 'uploading'
+  );
+  if (pendingAttachment) {
+    MessagePlugin.warning(t('chat.attachmentStillProcessing', { name: pendingAttachment.name }));
+    return;
+  }
+  const failedAttachment = uploadedAttachments.value.find(item => item.status === 'failed');
+  if (failedAttachment) {
+    MessagePlugin.error(failedAttachment.error || t('chat.attachmentParseFailed'));
+    return;
+  }
 
   // Embed 渠道由后端绑定 agent/KB，勿走平台侧 agent 列表与就绪校验
   if (props.embeddedMode) {
@@ -1614,6 +1871,19 @@ const createSession = async (val: string) => {
     if (textarea) textarea.blur();
     emit('send-msg', val, selectedModelId.value || '', [], [], []);
     clearvalue();
+    return;
+  }
+
+  // Images and non-embedded attachments both travel to the backend as
+  // `attachment_ids`, which enforces a combined cap (MaxTemporaryAttachmentsPerMessage).
+  // The per-picker limits (5 images / 5 attachments) are independent, so guard the
+  // merged total here to avoid a late 400 after the files are already uploaded.
+  const MAX_TOTAL_ATTACHMENTS = 5;
+  const combinedAttachmentCount =
+    uploadedImages.value.length +
+    uploadedAttachments.value.filter(item => item.status !== 'failed').length;
+  if (combinedAttachmentCount > MAX_TOTAL_ATTACHMENTS) {
+    MessagePlugin.warning(t('chat.attachmentTotalTooMany', { max: MAX_TOTAL_ATTACHMENTS }));
     return;
   }
 
@@ -1648,11 +1918,15 @@ const createSession = async (val: string) => {
     return;
   }
   // 获取@提及的知识库和文件信息
-  const mentionedItems = allSelectedItems.value.map(item => ({
+  const mentionedItems: MentionRequestItem[] = allSelectedItems.value.map(item => ({
     id: item.id,
     name: item.name,
     type: item.type,
-    kb_type: item.type === 'kb' ? (item.kbType || 'document') : undefined
+    kb_type: item.type === 'kb' ? (item.kbType || 'document') : undefined,
+    kb_id: item.kbId,
+    kb_name: item.kbName,
+    service_id: item.serviceId,
+    skill_name: item.skillName,
   }));
   const imageFiles = uploadedImages.value.map(img => img.file);
   const attachmentFiles = uploadedAttachments.value;
@@ -1850,16 +2124,8 @@ const handleSelectAgent = async (agent: CustomAgent, sourceTenantId?: string) =>
   settingsStore.selectAgent(agent.id, sourceTenantId);
   settingsStore.toggleAgent(!!isAgentType);
 
-  // 同步智能体的配置状态（含内置、自定义、共享智能体）：模型、网络搜索、知识库由 watch 同步
-  // 1. 同步网络搜索状态
-  const agentWebSearch = agent.config?.web_search_enabled;
-  if (agentWebSearch !== undefined) {
-    settingsStore.toggleWebSearch(agentWebSearch);
-  } else if (agent.is_builtin) {
-    // 内置智能体未配置时保留当前用户设置
-  }
-
-  // 2. 同步模型（选中的对话模型随智能体切换，含共享智能体）
+  // 同步模型（选中的对话模型随智能体切换，含共享智能体）。
+  // 网络搜索已由 selectAgent 重置为关闭，智能体配置只控制该开关是否可用。
   const agentModel = agent.config?.model_id;
   if (agentModel && agentModel.trim() !== '') {
     selectedModelId.value = agentModel;
@@ -1893,26 +2159,38 @@ const clearvalue = () => {
   query.value = "";
 }
 
+// Drop any pending images/attachments and stop their status polling. Used when
+// switching sessions: leftover documentIds belong to the previous session, so
+// keeping them would make polling 404 (falsely marking them failed) or send IDs
+// the new session does not own ("attachment ... not found in this session").
+const clearPendingUploads = () => {
+  uploadedImages.value.forEach(img => URL.revokeObjectURL(img.preview));
+  uploadedImages.value = [];
+  attachmentUploadRef.value?.clear();
+  uploadedAttachments.value = [];
+}
+
 const onKeydown = (val: string, event: { e: { preventDefault(): unknown; keyCode: number; shiftKey: any; ctrlKey: any; }; }) => {
   if (showMention.value) {
     if (event.e.keyCode === 38) { // Up
       event.e.preventDefault();
-      mentionActiveIndex.value = Math.max(0, mentionActiveIndex.value - 1);
+      mentionSelectorRef.value?.moveActive(-1);
       return;
     }
     if (event.e.keyCode === 40) { // Down
       event.e.preventDefault();
-      mentionActiveIndex.value = Math.min(mentionItems.value.length - 1, mentionActiveIndex.value + 1);
+      mentionSelectorRef.value?.moveActive(1);
       return;
     }
     if (event.e.keyCode === 13) { // Enter
       event.e.preventDefault();
-      if (mentionItems.value[mentionActiveIndex.value]) {
-        onMentionSelect(mentionItems.value[mentionActiveIndex.value]);
-      }
+      mentionSelectorRef.value?.confirmActive();
       return;
     }
     if (event.e.keyCode === 27) { // Esc
+      if (mentionSelectorRef.value?.leaveGroup()) {
+        return;
+      }
       showMention.value = false;
       return;
     }
@@ -1973,6 +2251,14 @@ const handleGoToWebSearchSettings = () => {
   if (route.path !== '/platform/settings') {
     router.push('/platform/settings');
   }
+};
+
+const handleGoToWebSearchConfig = () => {
+  if (hasAgentConfig.value && selectedAgent.value) {
+    handleGoToAgentSettings('websearch');
+    return;
+  }
+  handleGoToWebSearchSettings();
 };
 
 const handleGoToAgentSettings = (section?: string) => {
@@ -2103,7 +2389,7 @@ const toggleWebSearch = () => {
         href: '#',
         onClick: (e: Event) => {
           e.preventDefault();
-          handleGoToWebSearchSettings();
+          handleGoToWebSearchConfig();
         },
         style: 'color: var(--td-brand-color); text-decoration: none; font-weight: 500; cursor: pointer; align-self: flex-start;',
         onMouseenter: (e: Event) => {
@@ -2112,7 +2398,7 @@ const toggleWebSearch = () => {
         onMouseleave: (e: Event) => {
           (e.target as HTMLElement).style.textDecoration = 'none';
         }
-      }, t('input.goToSettings'))
+      }, t('input.goToAgentSettings'))
     ]);
     MessagePlugin.warning({
       content: () => messageContent,
@@ -2163,6 +2449,7 @@ const handleStop = async () => {
 
 onBeforeRouteUpdate((to, from, next) => {
   clearvalue()
+  clearPendingUploads()
   next()
 })
 
@@ -2191,19 +2478,20 @@ defineExpose({
       </div>
 
       <!-- 附件列表区域 (由 AttachmentUpload 组件渲染) -->
-      <AttachmentUpload ref="attachmentUploadRef" :max-files="5" :max-size="20"
+      <AttachmentUpload ref="attachmentUploadRef" :max-files="5"
+        :session-id="sessionId" :agent-id="selectedAgentId"
         @update:files="uploadedAttachments = $event" />
 
       <!-- 选中的知识库和文件标签（显示在输入框内顶部） -->
       <div v-if="allSelectedItems.length > 0" class="selected-tags-inline">
-        <span v-for="item in allSelectedItems" :key="item.id" class="mention-chip" :class="[
-          item.type === 'kb' ? (item.kbType === 'faq' ? 'mention-chip--faq' : 'mention-chip--kb') : 'mention-chip--file',
+        <span v-for="item in allSelectedItems" :key="`${item.type}:${item.id}`" class="mention-chip" :class="[
+          getMentionChipClass(item),
           { 'mention-chip--agent': item.isAgentConfigured }
         ]">
           <span class="mention-chip__icon-wrap" :class="{ 'has-org': item.org_name }">
             <span class="mention-chip__icon">
               <t-icon v-if="item.type === 'kb'" :name="item.kbType === 'faq' ? 'chat-bubble-help' : 'folder'" />
-              <t-icon v-else name="file" />
+              <t-icon v-else :name="getMentionIcon(item)" />
             </span>
             <span v-if="item.org_name" class="mention-chip__org-badge">
               <img :src="getImgSrc(item.type === 'file' ? 'organization-grey.svg' : 'organization-green.svg')"
@@ -2245,24 +2533,20 @@ defineExpose({
             :currentAgentId="selectedAgentId" :agents="enabledAgents" :all-models="allModels"
             @close="closeAgentModeSelector" @select="handleSelectAgent" @not-ready="handleAgentNotReady" />
 
-          <!-- WebSearch 开关按钮 -->
-          <t-tooltip placement="top" theme="light" :popupProps="{ overlayClassName: 'input-field-tooltip' }">
+          <!-- WebSearch 开关按钮（智能体未启用时不显示） -->
+          <t-tooltip v-if="showWebSearchButton" placement="top" theme="light"
+            :popupProps="{ overlayClassName: 'input-field-tooltip' }">
             <template #content>
-              <div v-if="isWebSearchDisabledByAgent" class="tooltip-with-link">
-                <span>{{ $t('input.webSearchDisabledByAgent') }}</span>
-                <a href="#" @click.prevent="handleGoToAgentSettings('websearch')">{{ $t('input.goToAgentSettings')
-                }}</a>
-              </div>
-              <span v-else-if="isWebSearchConfigured">{{ isWebSearchEnabled ? $t('input.webSearch.toggleOff') :
+              <span v-if="isWebSearchConfigured">{{ isWebSearchEnabled ? $t('input.webSearch.toggleOff') :
                 $t('input.webSearch.toggleOn') }}</span>
               <div v-else class="tooltip-with-link">
                 <span>{{ $t('input.webSearch.notConfigured') }}</span>
-                <a href="#" @click.prevent="handleGoToWebSearchSettings">{{ $t('input.goToSettings') }}</a>
+                <a href="#" @click.prevent="handleGoToWebSearchConfig">{{ $t('input.goToAgentSettings') }}</a>
               </div>
             </template>
             <div class="control-btn websearch-btn" :class="{
               'active': isWebSearchEnabled && isWebSearchConfigured,
-              'disabled': !isWebSearchConfigured || isWebSearchDisabledByAgent
+              'disabled': !isWebSearchConfigured
             }" @click.stop="toggleWebSearch">
               <svg width="18" height="18" viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg"
                 class="control-icon websearch-icon" :class="{ 'active': isWebSearchEnabled && isWebSearchConfigured }">
@@ -2277,19 +2561,15 @@ defineExpose({
             </div>
           </t-tooltip>
 
-          <!-- 图片上传按钮 -->
-          <t-tooltip placement="top" theme="light" :popupProps="{ overlayClassName: 'input-field-tooltip' }">
+          <!-- 图片上传按钮（智能体未启用时不显示） -->
+          <t-tooltip v-if="showImageUploadButton" placement="top" theme="light"
+            :popupProps="{ overlayClassName: 'input-field-tooltip' }">
             <template #content>
-              <div v-if="!isImageUploadEnabledByAgent" class="tooltip-with-link">
-                <span>{{ $t('input.imageUploadDisabledByAgent') }}</span>
-                <a href="#" @click.prevent="handleGoToAgentSettings('model')">{{ $t('input.goToAgentSettings') }}</a>
-              </div>
-              <span v-else>{{ $t('chat.imageUploadTooltip') }}</span>
+              <span>{{ $t('chat.imageUploadTooltip') }}</span>
             </template>
             <div class="control-btn image-upload-btn" :class="{
-              'active': uploadedImages.length > 0,
-              'disabled': !isImageUploadEnabledByAgent
-            }" @click.stop="isImageUploadEnabledByAgent && triggerImageUpload()">
+              'active': uploadedImages.length > 0
+            }" @click.stop="triggerImageUpload()">
               <svg width="18" height="18" viewBox="0 0 1024 1024" fill="currentColor" class="control-icon">
                 <path
                   d="M896 128H128c-35.3 0-64 28.7-64 64v640c0 35.3 28.7 64 64 64h768c35.3 0 64-28.7 64-64V192c0-35.3-28.7-64-64-64zM128 832V192h768l0.1 640H128z" />
@@ -2323,7 +2603,7 @@ defineExpose({
           <!-- @ 知识库/文件选择按钮 -->
           <t-tooltip placement="top" theme="light" :popupProps="{ overlayClassName: 'input-field-tooltip' }">
             <template #content>
-              <div v-if="isKnowledgeBaseDisabledByAgent" class="tooltip-with-link">
+              <div v-if="isMentionDisabled && isKnowledgeBaseDisabledByAgent" class="tooltip-with-link">
                 <span>{{ $t('input.kbDisabledByAgent') }}</span>
                 <a href="#" @click.prevent="handleGoToAgentSettings('knowledge')">{{ $t('input.goToAgentSettings')
                 }}</a>
@@ -2335,7 +2615,7 @@ defineExpose({
             </template>
             <div ref="atButtonRef" class="control-btn kb-btn" data-guide="chat-kb-mention" :class="{
               'active': allSelectedItems.length > 0,
-              'disabled': isKnowledgeBaseDisabledByAgent
+              'disabled': isMentionDisabled
             }" @click.stop @mousedown.prevent="triggerMention">
               <svg width="18" height="18" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg"
                 class="control-icon at-icon">
@@ -2418,8 +2698,8 @@ defineExpose({
 
     <!-- Mention Selector -->
     <Teleport to="body">
-      <MentionSelector :visible="showMention" :style="mentionStyle" :items="mentionItems" :hasMore="mentionHasMore"
-        :loading="mentionLoading" :emptyHint="mentionEmptyHint" v-model:activeIndex="mentionActiveIndex"
+      <MentionSelector ref="mentionSelectorRef" :visible="showMention" :style="mentionStyle" :items="mentionItems" :hasMore="mentionHasMore"
+        :loading="mentionLoading" :emptyHint="mentionEmptyHint" :query="mentionQuery" :group-counts="mentionGroupCounts" v-model:activeIndex="mentionActiveIndex"
         @select="onMentionSelect" @loadMore="loadMoreMentionItems" />
     </Teleport>
 
@@ -2464,7 +2744,7 @@ const getImgSrc = (url: string) => {
 .rich-input-container {
   position: relative;
   width: 100%;
-  max-width: 800px;
+  max-width: 960px;
   background: var(--td-bg-color-container, #FFF);
   border-radius: 12px;
   border: 1px solid var(--td-component-stroke, #dcdcdc);
@@ -2608,6 +2888,24 @@ const getImgSrc = (url: string) => {
 
 .mention-chip--file .mention-chip__icon-wrap {
   color: var(--td-text-color-secondary, #6b7280);
+}
+
+.mention-chip--tag,
+.mention-chip--mcp,
+.mention-chip--tool {
+  color: var(--td-text-color-primary);
+}
+
+.mention-chip--tag .mention-chip__icon-wrap {
+  color: #9f7aea;
+}
+
+.mention-chip--mcp .mention-chip__icon-wrap {
+  color: #0f766e;
+}
+
+.mention-chip--tool .mention-chip__icon-wrap {
+  color: #b7791f;
 }
 
 /* 智能体预配置：虚线边框区分 */
