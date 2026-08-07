@@ -271,6 +271,9 @@ func (s *sessionService) buildAgentConfig(
 		agentConfig.SystemPrompt = customAgent.Config.SystemPrompt
 	}
 
+	// Request-level system prompt overrides agent config
+	applyRequestSystemPromptToAgent(req, agentConfig)
+
 	logger.Infof(ctx, "Custom agent config applied: MaxIterations=%d, Temperature=%.2f, AllowedTools=%v, WebSearchEnabled=%v",
 		agentConfig.MaxIterations, agentConfig.Temperature, agentConfig.AllowedTools, agentConfig.WebSearchEnabled)
 

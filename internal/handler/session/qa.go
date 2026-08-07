@@ -62,6 +62,7 @@ type qaRequestContext struct {
 	// what the user had selected on the UI (not server-side resolutions).
 	reqAgentEnabled bool
 	reqAgentID      string
+	systemPrompt    string // 请求级系统提示词覆盖，优先级高于 agent 配置
 }
 
 // buildQARequest converts the qaRequestContext into a types.QARequest for service invocation.
@@ -84,6 +85,7 @@ func (rc *qaRequestContext) buildQARequest() *types.QARequest {
 		UserMessageID:       rc.userMessageID,
 		WebSearchEnabled:    rc.webSearchEnabled,
 		Attachments:         rc.attachments,
+		SystemPrompt:        rc.systemPrompt,
 	}
 }
 
@@ -374,6 +376,7 @@ func (h *Handler) parseQARequest(c *gin.Context, logPrefix string) (*qaRequestCo
 		reqAgentEnabled:       request.AgentEnabled,
 		reqAgentID:            request.AgentID,
 		resourceRewriter:      resourceRewriter,
+		systemPrompt:          request.SystemPrompt,
 	}
 
 	return reqCtx, &request, nil

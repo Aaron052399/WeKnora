@@ -21,4 +21,5 @@ type QARequest struct {
 	WebSearchEnabled    bool               // Whether web search is enabled for this request
 	QuotedContext       string             // Quoted message content from IM quote-reply (appended at LLM prompt stage, not used for retrieval)
 	Attachments         MessageAttachments // File attachments (processed and ready for prompt injection)
+	SystemPrompt        string             // Request-level system prompt override (takes priority over agent config)
 }
