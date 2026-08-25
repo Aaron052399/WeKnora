@@ -111,3 +111,8 @@ extract:
 tenant:
   # Enable cross-tenant access (can be enabled for intranet environments)
   enable_cross_tenant_access: false
+
+# Web search configuration
+web_search:
+  # 平台租户 ID：租户未配置 default web search provider 时，回退使用平台租户的 default provider
+  platform_tenant_id: 10000

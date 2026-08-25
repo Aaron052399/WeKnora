@@ -1101,4 +1101,6 @@ func loadPromptTemplates(configDir string) (*PromptTemplatesConfig, error) {
 // WebSearchConfig represents the web search configuration
 type WebSearchConfig struct {
 	Timeout int `yaml:"timeout" json:"timeout"` // 超时时间（秒）
+	// 平台租户 ID：租户未配置 default web search provider 时，回退使用平台租户的 default provider
+	PlatformTenantID int64 `yaml:"platform_tenant_id" json:"platform_tenant_id"`
 }

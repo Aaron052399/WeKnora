@@ -33,6 +33,11 @@ func (r *sharedAgentWebSearchRepo) GetDefault(_ context.Context, tenantID uint64
 	return r.defaultProvider, nil
 }
 
+func (r *sharedAgentWebSearchRepo) GetDefaultWithPlatform(_ context.Context, tenantID, _ uint64) (*types.WebSearchProviderEntity, error) {
+	r.defaultTenant = tenantID
+	return r.defaultProvider, nil
+}
+
 func (r *sharedAgentWebSearchRepo) List(context.Context, uint64) ([]*types.WebSearchProviderEntity, error) {
 	return nil, nil
 }

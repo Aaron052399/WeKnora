@@ -285,9 +285,13 @@ func (s *sessionService) buildAgentConfig(
 		}
 	}
 
-	// Resolve web search provider ID: agent-level > tenant default (is_default=true)
+	// Resolve web search provider ID: agent-level > tenant default (is_default=true) > platform default
 	if agentConfig.WebSearchProviderID == "" {
-		if defaultProvider, err := s.webSearchProviderRepo.GetDefault(ctx, tenantInfo.ID); err == nil && defaultProvider != nil {
+		var platformTenantID uint64
+		if s.cfg.WebSearch != nil {
+			platformTenantID = uint64(s.cfg.WebSearch.PlatformTenantID)
+		}
+		if defaultProvider, err := s.webSearchProviderRepo.GetDefaultWithPlatform(ctx, tenantInfo.ID, platformTenantID); err == nil && defaultProvider != nil {
 			agentConfig.WebSearchProviderID = defaultProvider.ID
 		}
 	}
