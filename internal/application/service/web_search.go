@@ -19,9 +19,10 @@ import (
 // It resolves provider configurations from the database and creates provider
 // instances on-demand via the infrastructure registry.
 type WebSearchService struct {
-	registry     *infra_web_search.Registry
-	providerRepo interfaces.WebSearchProviderRepository
-	timeout      int
+	registry         *infra_web_search.Registry
+	providerRepo     interfaces.WebSearchProviderRepository
+	timeout          int
+	platformTenantID uint64
 }
 
 // NewWebSearchService creates a new web search service.
@@ -36,10 +37,16 @@ func NewWebSearchService(
 		timeout = cfg.WebSearch.Timeout
 	}
 
+	var platformTenantID uint64
+	if cfg.WebSearch != nil {
+		platformTenantID = uint64(cfg.WebSearch.PlatformTenantID)
+	}
+
 	return &WebSearchService{
-		registry:     registry,
-		providerRepo: providerRepo,
-		timeout:      timeout,
+		registry:         registry,
+		providerRepo:     providerRepo,
+		timeout:          timeout,
+		platformTenantID: platformTenantID,
 	}, nil
 }
 
@@ -100,6 +107,14 @@ func (s *WebSearchService) resolveProvider(
 		entity, err := s.providerRepo.GetByID(ctx, tenantID, providerID)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load web search provider %s: %w", providerID, err)
+		}
+		// 本租户查不到时回退平台租户（与 GetDefaultWithPlatform 的 fallback 对齐）：
+		// agent 解析阶段可能拿到平台租户的 default provider，执行阶段必须能按同一 ID 查到。
+		if entity == nil && s.platformTenantID != 0 && s.platformTenantID != tenantID {
+			entity, err = s.providerRepo.GetByID(ctx, s.platformTenantID, providerID)
+			if err != nil {
+				return nil, fmt.Errorf("failed to load web search provider %s (platform tenant): %w", providerID, err)
+			}
 		}
 		if entity == nil {
 			return nil, fmt.Errorf("web search provider not found: %s", providerID)
