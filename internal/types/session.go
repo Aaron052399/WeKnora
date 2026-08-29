@@ -98,6 +98,15 @@ type Session struct {
 	// avoid a new migration; the shape used today is `SessionLastRequestState`.
 	LastRequestState *SessionLastRequestState `json:"last_request_state,omitempty" gorm:"column:agent_config;type:jsonb"`
 
+	// SandboxConfigID pins which sandbox config this session's CURRENT live
+	// sandbox was created on. Empty means no live sandbox;
+	// SandboxConfigIDGlobalDefault means the deployment-wide default config.
+	//
+	// This is an ephemeral pin that dies with the sandbox, not a permanent
+	// owner: sessions outlive sandboxes by months, so treating it as
+	// permanent would make "no session references this config" never true.
+	SandboxConfigID string `json:"sandbox_config_id,omitempty" gorm:"type:varchar(36)"`
+
 	// // Strategy configuration
 	// KnowledgeBaseID   string              `json:"knowledge_base_id"`                    // 关联的知识库ID
 	// MaxRounds         int                 `json:"max_rounds"`                           // 多轮保持轮数
@@ -166,7 +175,33 @@ func SessionRequiresAdminConsoleRead(s *Session, imPlatform string) bool {
 		strings.HasPrefix(s.UserID, PrincipalEmbedSession+":") {
 		return true
 	}
+	// Defence in depth for skill maintenance transcripts: the listing hides
+	// them, and this keeps a leaked session id from being opened by a
+	// non-admin who happens to own the row.
+	if IsSkillMaintenanceDescription(s.Description) {
+		return true
+	}
 	return strings.TrimSpace(imPlatform) != ""
+}
+
+// IsSkillMaintenanceDescription reports whether description is the reserved
+// prefix that hides skill-install sessions from the console list.
+func IsSkillMaintenanceDescription(description string) bool {
+	return strings.HasPrefix(description, SkillMaintenanceSessionMarker)
+}
+
+// SanitizeClientSessionDescription keeps the skill-maintenance marker off
+// client-writable descriptions. A row that is already a maintenance session
+// keeps its stored description so a PUT cannot un-hide it; any other row
+// drops a planted marker rather than accepting it.
+func SanitizeClientSessionDescription(incoming, existing string) string {
+	if IsSkillMaintenanceDescription(existing) {
+		return existing
+	}
+	if IsSkillMaintenanceDescription(incoming) {
+		return ""
+	}
+	return incoming
 }
 
 // SessionListQuery bundles the parameters for listing sessions.

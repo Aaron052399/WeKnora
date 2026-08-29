@@ -22,6 +22,16 @@ var executeSkillScriptTool = BaseTool{
 - Use this tool to run utility scripts bundled with a skill
 - Scripts are executed in an isolated sandbox for security
 - Only scripts from loaded skills can be executed
+- User-uploaded files are listed in the current ` + "`<sandbox_attachments>`" + `
+  block. Pass their absolute ` + "`/workspace/input/...`" + ` paths through
+  ` + "`args`" + ` when a script accepts an input file.
+- Treat ` + "`/workspace/input`" + ` as read-only. Write generated files only to
+  ` + "`$WEKNORA_SKILL_OUTPUT_DIR`" + ` so they can be collected for download.
+- Scripts reach the dependencies their install put beside them: Python runs
+  with the skill's own virtualenv interpreter, Node resolves the skill's
+  node_modules from the script's location. A failed import under a bare
+  ` + "`python3 -c`" + ` or ` + "`node -e`" + ` says nothing about whether this
+  tool can run the script.
 
 ## When to Use
 - When a skill's instructions reference a utility script (e.g., "Run scripts/analyze_form.py")
@@ -43,7 +53,7 @@ var executeSkillScriptTool = BaseTool{
 type ExecuteSkillScriptInput struct {
 	SkillName  string   `json:"skill_name" jsonschema:"Name of the skill containing the script"`
 	ScriptPath string   `json:"script_path" jsonschema:"Relative path to the script within the skill directory (e.g. scripts/analyze.py)"`
-	Args       []string `json:"args,omitempty" jsonschema:"Optional command-line arguments to pass to the script. Note: if using --file flag, you must provide an actual file path that exists in the skill directory. If you have data in memory (not a file), use the 'input' parameter instead."`
+	Args       []string `json:"args,omitempty" jsonschema:"Optional command-line arguments. For file flags, pass an absolute path from the current <sandbox_attachments> block (/workspace/input/...). For in-memory data, use input instead."`
 	Input      string   `json:"input,omitempty" jsonschema:"Optional input data to pass to the script via stdin. Use this when you have data in memory (e.g. JSON string) that the script should process. This is equivalent to piping data: echo 'data' | python script.py"`
 }
 
@@ -196,14 +206,16 @@ func (t *ExecuteSkillScriptTool) Execute(ctx context.Context, args json.RawMessa
 	success := result.IsSuccess()
 
 	resultData := map[string]interface{}{
-		"skill_name":  input.SkillName,
-		"script_path": input.ScriptPath,
-		"args":        input.Args,
-		"exit_code":   result.ExitCode,
-		"stdout":      result.Stdout,
-		"stderr":      result.Stderr,
-		"duration_ms": result.Duration.Milliseconds(),
-		"killed":      result.Killed,
+		"display_type": "shell_exec",
+		"command":      skillScriptCommand(input),
+		"skill_name":   input.SkillName,
+		"script_path":  input.ScriptPath,
+		"args":         input.Args,
+		"exit_code":    result.ExitCode,
+		"stdout":       result.Stdout,
+		"stderr":       result.Stderr,
+		"duration_ms":  result.Duration.Milliseconds(),
+		"killed":       result.Killed,
 	}
 
 	logger.Infof(ctx, "[Tool][ExecuteSkillScript] Script completed with exit code: %d", result.ExitCode)
@@ -222,6 +234,18 @@ func (t *ExecuteSkillScriptTool) Execute(ctx context.Context, args json.RawMessa
 			return ""
 		}(),
 	}, nil
+}
+
+func skillScriptCommand(input ExecuteSkillScriptInput) string {
+	parts := make([]string, 0, 1+len(input.Args))
+	switch {
+	case input.SkillName != "" && input.ScriptPath != "":
+		parts = append(parts, input.SkillName+"/"+input.ScriptPath)
+	case input.ScriptPath != "":
+		parts = append(parts, input.ScriptPath)
+	}
+	parts = append(parts, input.Args...)
+	return strings.Join(parts, " ")
 }
 
 // Cleanup releases any resources

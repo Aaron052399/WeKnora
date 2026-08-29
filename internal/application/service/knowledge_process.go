@@ -442,14 +442,11 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 		return insertChunks[i].ChunkIndex < insertChunks[j].ChunkIndex
 	})
 
-	// 仅为文本类型的Chunk设置前后关系（child chunks only, parents already linked above）
+	// Collect retrievable text chunks only. ParentChunkID only controls parent expansion after retrieval.
+	// When ParentChunkID is empty, retrieval keeps the standalone child content without loading a parent.
 	textChunks := make([]*types.Chunk, 0, len(chunks))
 	for _, chunk := range insertChunks {
-		if chunk.ChunkType == types.ChunkTypeText && chunk.ParentChunkID != "" {
-			// This is a child chunk in parent-child mode
-			textChunks = append(textChunks, chunk)
-		} else if chunk.ChunkType == types.ChunkTypeText && !hasParentChild {
-			// Normal flat chunk (no parent-child mode)
+		if chunk.ChunkType == types.ChunkTypeText {
 			textChunks = append(textChunks, chunk)
 		}
 	}
@@ -2343,26 +2340,35 @@ func (s *knowledgeService) RegenerateKnowledgeSummary(
 		return nil, err
 	}
 	if kb.NeedsEmbeddingModel() {
-		found := false
 		maxIndex := 0
-		summaryChunks := make([]*types.Chunk, 0, 1)
 		for _, chunk := range allChunks {
 			if chunk.ChunkIndex > maxIndex {
 				maxIndex = chunk.ChunkIndex
 			}
-			if chunk.ChunkType == types.ChunkTypeSummary {
-				chunk.Content = "# Summary\n" + summary
-				chunk.SourceContent = chunk.Content
-				chunk.IsEnabled = true
-				chunk.UpdatedAt = time.Now()
-				if err := s.chunkRepo.UpdateChunk(ctx, chunk); err != nil {
-					return nil, err
-				}
-				summaryChunks = append(summaryChunks, chunk)
-				found = true
-			}
 		}
-		if !found {
+		// allChunks holds text chunks only, so it can never carry the existing
+		// summary chunk. Scanning it for one always came up empty, which left
+		// every refresh appending a new summary chunk beside the stale one --
+		// and a stale summary stays enabled and indexed, so content the user
+		// edited out of the document kept being retrievable through it.
+		existingSummaries, err := s.chunkRepo.ListChunksByKnowledgeIDAndTypes(
+			ctx, tenantID, knowledgeID, []types.ChunkType{types.ChunkTypeSummary},
+		)
+		if err != nil {
+			return nil, err
+		}
+		summaryChunks := make([]*types.Chunk, 0, len(existingSummaries))
+		for _, chunk := range existingSummaries {
+			chunk.Content = "# Summary\n" + summary
+			chunk.SourceContent = chunk.Content
+			chunk.IsEnabled = true
+			chunk.UpdatedAt = time.Now()
+			if err := s.chunkRepo.UpdateChunk(ctx, chunk); err != nil {
+				return nil, err
+			}
+			summaryChunks = append(summaryChunks, chunk)
+		}
+		if len(summaryChunks) == 0 {
 			summaryChunk := &types.Chunk{
 				ID: uuid.NewString(), TenantID: tenantID, KnowledgeID: knowledge.ID,
 				KnowledgeBaseID: knowledge.KnowledgeBaseID, Content: "# Summary\n" + summary,
@@ -2976,6 +2982,10 @@ func (s *knowledgeService) UpdateImageInfo(
 			ChunkType:       types.ChunkTypeImageCaption,
 			ParentChunkID:   chunk.ID,
 			ImageInfo:       imageInfo,
+			// CreateChunks inserts with Select("*"), so the gorm default:true never
+			// applies -- an unset IsEnabled lands in the database as false and the
+			// chunk is silently excluded from retrieval and model context.
+			IsEnabled: true,
 		}
 		addChunk = append(addChunk, captionChunk)
 		logger.Infof(ctx, "Created new caption chunk ID: %s for image URL: %s", captionChunk.ID, image.OriginalURL)
@@ -2992,6 +3002,7 @@ func (s *knowledgeService) UpdateImageInfo(
 			ChunkType:       types.ChunkTypeImageOCR,
 			ParentChunkID:   chunk.ID,
 			ImageInfo:       imageInfo,
+			IsEnabled:       true,
 		}
 		addChunk = append(addChunk, ocrChunk)
 		logger.Infof(ctx, "Created new OCR chunk ID: %s for image URL: %s", ocrChunk.ID, image.OriginalURL)
@@ -3593,6 +3604,16 @@ func (s *knowledgeService) convert(
 	}
 	mergedOverrides := MergeParserEngineOverrides(tenantOverrides, uploadOverrides)
 	applyParserRuleOverrides(mergedOverrides, eff.ChunkingConfig, fileType)
+	if err := validateParserEngineOverrideURLs(mergedOverrides); err != nil {
+		logger.Errorf(ctx, "Parser endpoint rejected for SSRF protection: %v", err)
+		knowledge.ParseStatus = "failed"
+		knowledge.ErrorMessage = "Parser endpoint is not allowed for security reasons"
+		knowledge.UpdatedAt = time.Now()
+		s.repo.UpdateKnowledge(ctx, knowledge)
+		s.failStage(ctx, knowledge.ID, types.StageDocReader,
+			werrors.ErrCodeDocReaderParseFailed, knowledge.ErrorMessage, err)
+		return nil, nil
+	}
 
 	if isURL {
 		if err := secutils.ValidateURLForSSRF(payload.URL); err != nil {
@@ -3745,41 +3766,23 @@ func isLikelyRateLimitError(err error) bool {
 	return false
 }
 
-// Returns nil when the required service is unavailable.
-func (s *knowledgeService) resolveDocReader(ctx context.Context, engine, fileType string, isURL bool, overrides map[string]string) interfaces.DocReader {
-	switch engine {
-	case docparser.SimpleEngineName:
-		return &docparser.SimpleFormatReader{}
-	case docparser.WeKnoraCloudEngineName:
-		creds := s.tenantService.GetWeKnoraCloudCredentials(ctx)
-		if creds == nil {
-			logger.Warnf(ctx, "[resolveDocReader] WeKnoraCloud: no tenant credentials (fileType=%s)", fileType)
-			return nil
-		}
-		reader, err := docparser.NewWeKnoraCloudSignedDocumentReader(creds.AppID, creds.AppSecret)
-		if err != nil {
-			logger.Errorf(ctx, "[resolveDocReader] WeKnoraCloud reader init failed: %v", err)
-			return nil
-		}
-		return reader
-	case "mineru":
-		return docparser.NewMinerUReader(overrides)
-	case "mineru_cloud":
-		return docparser.NewMinerUCloudReader(overrides)
-	case "paddleocr_vl":
-		return docparser.NewPaddleOCRVLReader(overrides)
-	case "paddleocr_vl_cloud":
-		return docparser.NewPaddleOCRVLCloudReader(overrides)
-	case "builtin":
-		// 明确指定使用 builtin 引擎（docreader），不使用 simple format 兜底
-		return s.documentReader
-	default:
-		// 未指定引擎时的兜底逻辑：simple format 使用 Go 原生处理，其他使用 docreader
-		if !isURL && docparser.IsSimpleFormat(fileType) {
-			return &docparser.SimpleFormatReader{}
-		}
-		return s.documentReader
+// resolveDocReader picks the reader for one parse request. The engine catalog
+// itself lives in the docparser registry; this only supplies the dependencies
+// the service owns. Returns nil when the chosen engine cannot run — an
+// unconfigured cloud engine, a disconnected docreader — after logging why.
+func (s *knowledgeService) resolveDocReader(
+	ctx context.Context, engine, fileType string, isURL bool, overrides map[string]string,
+) interfaces.DocReader {
+	reader, err := docparser.NewReader(ctx, engine, fileType, isURL, docparser.ReaderDeps{
+		Overrides:               overrides,
+		Remote:                  s.documentReader,
+		WeKnoraCloudCredentials: s.tenantService.GetWeKnoraCloudCredentials,
+	})
+	if err != nil {
+		logger.Warnf(ctx, "[resolveDocReader] engine=%q fileType=%q unusable: %v", engine, fileType, err)
+		return nil
 	}
+	return reader
 }
 
 // failKnowledge marks knowledge as failed (only on last retry) and returns an error.

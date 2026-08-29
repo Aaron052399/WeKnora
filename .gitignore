@@ -64,3 +64,5 @@ docs/prompts-zh/fallback-prompt.md
 docs/prompts-zh/README.md
 docs/prompts-zh/system-prompt.md
 config/prompt_templates/intent_prompts.yaml.bak
+# Staging dir for the Docker sandbox self-check probe (removed after each run)
+.weknora-sandbox-check-*

@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Tencent/WeKnora/internal/application/repository"
 	"github.com/Tencent/WeKnora/internal/application/service"
@@ -28,8 +29,6 @@ import (
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	secutils "github.com/Tencent/WeKnora/internal/utils"
 	"github.com/gin-gonic/gin"
-	"github.com/minio/minio-go/v7"
-	"github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/neo4j/neo4j-go-driver/v6/neo4j"
 )
 
@@ -64,6 +63,9 @@ type SystemHandler struct {
 	// singleton tenant.StorageEngineConfig. Optional — nil in partially-wired
 	// unit tests, in which case only the legacy config is consulted.
 	storageBackendRepo interfaces.StorageBackendRepository
+	sandboxConfigSvc   sandboxConfigService
+	// startup snapshot for GET /system/capabilities; bound in router.NewRouter.
+	deploymentCapabilities DeploymentCapabilitiesData
 }
 
 // NewSystemHandler creates a new system handler
@@ -78,6 +80,7 @@ func NewSystemHandler(cfg *config.Config,
 	taskInspector interfaces.TaskInspector,
 	knowledgeSvc interfaces.KnowledgeService,
 	storageBackendRepo interfaces.StorageBackendRepository,
+	sandboxConfigSvc *service.TenantSandboxConfigService,
 ) *SystemHandler {
 	return &SystemHandler{
 		cfg:                cfg,
@@ -91,6 +94,7 @@ func NewSystemHandler(cfg *config.Config,
 		taskInspector:      taskInspector,
 		knowledgeSvc:       knowledgeSvc,
 		storageBackendRepo: storageBackendRepo,
+		sandboxConfigSvc:   sandboxConfigSvc,
 	}
 }
 
@@ -863,59 +867,16 @@ func storageEndpointHost(endpoint string) string {
 	return endpoint
 }
 
-// isBlockedStorageEndpoint checks whether a storage endpoint resolves to a dangerous
-// address (cloud metadata, loopback, link-local). Unlike the stricter isSSRFSafeURL,
-// this allows private IPs since MinIO is commonly deployed on internal networks.
-// It also respects the SSRF_WHITELIST environment variable for whitelisted hosts.
+// isBlockedStorageEndpoint keeps the legacy handler contract while delegating
+// to the same fail-closed SSRF policy used by the storage clients themselves.
+// Private storage endpoints must be explicitly whitelisted by an operator.
 func isBlockedStorageEndpoint(endpoint string) (bool, string) {
-	host := storageEndpointHost(endpoint)
-	if host == "" {
+	endpoint = strings.TrimSpace(endpoint)
+	if endpoint == "" {
 		return true, "无效的地址"
 	}
-
-	// Check SSRF whitelist first – whitelisted hosts bypass the block check.
-	if secutils.IsSSRFWhitelisted(host) {
-		return false, ""
-	}
-
-	hostLower := strings.ToLower(host)
-
-	blockedHosts := []string{
-		"metadata.google.internal",
-		"metadata.tencentyun.com",
-		"metadata.aws.internal",
-	}
-	for _, bh := range blockedHosts {
-		if hostLower == bh {
-			return true, "该地址不允许访问"
-		}
-	}
-
-	checkIP := func(ip net.IP) (bool, string) {
-		if ip.IsLoopback() {
-			return true, "不允许访问本地回环地址"
-		}
-		if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
-			return true, "不允许访问链路本地地址"
-		}
-		if ip.IsUnspecified() {
-			return true, "无效的地址"
-		}
-		return false, ""
-	}
-
-	if ip := net.ParseIP(host); ip != nil {
-		return checkIP(ip)
-	}
-
-	ips, err := net.LookupIP(host)
-	if err != nil {
-		return false, ""
-	}
-	for _, ip := range ips {
-		if blocked, reason := checkIP(ip); blocked {
-			return blocked, reason
-		}
+	if err := secutils.ValidateURLForSSRF(endpoint); err != nil {
+		return true, secutils.FormatSSRFError("存储 Endpoint", endpoint, err)
 	}
 	return false, ""
 }
@@ -1029,15 +990,7 @@ func (h *SystemHandler) checkMinio(c *gin.Context, ctx context.Context, cfg *typ
 		// If bucket does not exist, auto-create it
 		if strings.Contains(errMsg, "does not exist") && cfg.BucketName != "" {
 			logger.Info(ctx, "Storage check: bucket does not exist, attempting auto-creation", "bucket", cfg.BucketName)
-			minioClient, clientErr := minio.New(endpoint, &minio.Options{
-				Creds:  credentials.NewStaticV4(accessKeyID, secretAccessKey, ""),
-				Secure: cfg.UseSSL,
-			})
-			if clientErr != nil {
-				c.JSON(200, gin.H{"code": 0, "data": StorageCheckResponse{OK: false, Message: fmt.Sprintf("Failed to create MinIO client: %s", sanitizeStorageCheckError(clientErr))}})
-				return
-			}
-			if mkErr := minioClient.MakeBucket(ctx, cfg.BucketName, minio.MakeBucketOptions{}); mkErr != nil {
+			if _, mkErr := file.NewMinioFileService(endpoint, accessKeyID, secretAccessKey, cfg.BucketName, cfg.UseSSL); mkErr != nil {
 				logger.Error(ctx, "Storage check: failed to create bucket", "bucket", cfg.BucketName, "error", mkErr)
 				c.JSON(200, gin.H{"code": 0, "data": StorageCheckResponse{OK: false, Message: fmt.Sprintf("Failed to auto-create Bucket '%s': %s", cfg.BucketName, sanitizeStorageCheckError(mkErr))}})
 				return
@@ -1631,6 +1584,98 @@ func (h *SystemHandler) ResetUserPassword(c *gin.Context) {
 		"sessions_revoked": true,
 	})
 	c.JSON(http.StatusOK, gin.H{"message": "Password reset successfully"})
+}
+
+// CreateSystemUserResponse is the payload returned by
+// POST /api/v1/system/admin/users/create. GeneratedPassword is populated
+// exactly once, only when the server minted a random password (`password`
+// omitted or null), and is never logged, audited, or retrievable again.
+type CreateSystemUserResponse struct {
+	User *types.UserInfo `json:"user"`
+	// GeneratedPassword is the plaintext password when the server
+	// auto-generated one. Absent when the caller supplied the password.
+	GeneratedPassword string `json:"generated_password,omitempty"`
+}
+
+// CreateSystemUser godoc
+// @Summary      Create a new user (SystemAdmin)
+// @Description  Provision a new local user account (SystemAdmin only).
+// @Description  When `password` is omitted or null, a cryptographically random
+// @Description  password is generated (OIDC-style crypto/rand + base64url)
+// @Description  and returned once in the response body. Any provided value,
+// @Description  including empty string, is policy-checked. Tenant provisioning
+// @Description  follows the shared auth.default_tenant_mode policy.
+// @Tags         System Admin
+// @Accept       json
+// @Produce      json
+// @Param        request body types.AdminCreateUserRequest true "User creation request"
+// @Success      201  {object}  CreateSystemUserResponse  "User created successfully"
+// @Success      200  {object}  CreateSystemUserResponse  "Identity already exists, returns the existing user"
+// @Failure      400  {object}  map[string]interface{}  "Invalid request or weak password"
+// @Failure      403  {object}  map[string]interface{}  "Forbidden: not a system admin"
+// @Failure      409  {object}  map[string]interface{}  "Email and username refer to conflicting identities"
+// @Failure      500  {object}  map[string]interface{}  "Internal error"
+// @Router       /system/admin/users/create [post]
+func (h *SystemHandler) CreateSystemUser(c *gin.Context) {
+	ctx := logger.CloneContext(c.Request.Context())
+
+	var req types.AdminCreateUserRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user creation request"})
+		return
+	}
+	req.Username = secutils.SanitizeForLog(strings.TrimSpace(req.Username))
+	req.Email = secutils.SanitizeForLog(strings.TrimSpace(req.Email))
+	// Password is intentionally NOT trimmed or sanitized.
+	if req.Username == "" || req.Email == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Username and email are required"})
+		return
+	}
+	// Binding's min=2/max=50 ran on the raw JSON, re-check the trimmed value.
+	if n := utf8.RuneCountInString(req.Username); n < 2 || n > 50 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Username must be 2-50 characters"})
+		return
+	}
+
+	user, generatedPassword, err := h.userSvc.AdminCreateUser(ctx, &req, h.resolveDefaultTenantMode(ctx))
+	if err != nil {
+		switch {
+		case errors.Is(err, service.ErrUserEmailExists) || errors.Is(err, service.ErrUserUsernameExists):
+			if user == nil {
+				logger.Errorf(ctx, "Duplicate identity error without a resolved user: %v", err)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create user"})
+				return
+			}
+			logger.Infof(ctx, "Create user noop (identity already exists, ID: %s)", user.ID)
+			h.emitAdminAudit(ctx, types.AuditActionSystemUserCreated, user, map[string]any{
+				"target_email":       user.Email,
+				"target_username":    user.Username,
+				"password_generated": false,
+				"idempotent":         true,
+			})
+			c.JSON(http.StatusOK, CreateSystemUserResponse{User: user.ToUserInfo()})
+		case errors.Is(err, service.ErrPasswordPolicy):
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		case errors.Is(err, service.ErrUserIdentityConflict):
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		default:
+			logger.Errorf(ctx, "Failed to create user: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create user"})
+		}
+		return
+	}
+
+	logger.Infof(ctx, "System admin created user %s (ID: %s)", user.Username, user.ID)
+	h.emitAdminAudit(ctx, types.AuditActionSystemUserCreated, user, map[string]any{
+		"target_email":       user.Email,
+		"target_username":    user.Username,
+		"password_generated": generatedPassword != "",
+		"idempotent":         false,
+	})
+	c.JSON(http.StatusCreated, CreateSystemUserResponse{
+		User:              user.ToUserInfo(),
+		GeneratedPassword: generatedPassword,
+	})
 }
 
 // ============================================================================

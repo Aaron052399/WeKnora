@@ -65,6 +65,11 @@ export interface CustomAgentConfig {
   skills_selection_mode?: 'all' | 'selected' | 'none';
   selected_skills?: string[];       // 选择的Skill名称列表
 
+  // ===== 沙箱设置 =====
+  // 该智能体的技能脚本运行在哪个沙箱配置上；为空表示不启用沙箱执行。
+  // 指向逻辑配置而非某个具体版本，凭据轮换时无需重新指派每个智能体。
+  sandbox_config_id?: string;
+
   // ===== 知识库设置 =====
   // 知识库选择模式：all=全部知识库, selected=指定知识库, none=不使用知识库
   kb_selection_mode?: 'all' | 'selected' | 'none';
@@ -104,6 +109,12 @@ export interface CustomAgentConfig {
   // ===== 多轮对话设置 =====
   multi_turn_enabled?: boolean;     // 是否启用多轮对话
   history_turns?: number;           // 保留历史轮数
+
+  // ===== 长期记忆 =====
+  // 该智能体是否可以读取用户的长期记忆。
+  // 缺省（旧数据）等同于 true：这是一个只能"关"的开关，空间设置关闭时
+  // 这里打开也不会生效。
+  memory_enabled?: boolean;
 
   // ===== 检索策略设置 =====
   embedding_top_k?: number;         // 向量召回TopK
@@ -318,7 +329,7 @@ export interface IMChannelOverview {
   id: string;
   tenant_id: number;
   agent_id: string;
-  agent_name: string; // empty string for built-in agents
+  agent_name: string; // localized built-in name when the agent is built-in
   platform: IMChannel['platform'];
   name: string;
   enabled: boolean;

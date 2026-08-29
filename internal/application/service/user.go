@@ -32,11 +32,41 @@ var (
 	jwtSecretOnce sync.Once
 	jwtSecret     string
 
+	// ErrUserEmailExists is returned by Register when the target entity's
+	// email already exists.
+	ErrUserEmailExists = errors.New("user with this email already exists")
+
+	// ErrUserUsernameExists is returned by Register when the target entity's
+	// username already exists.
+	ErrUserUsernameExists = errors.New("user with this username already exists")
+
+	// ErrUserIdentityConflict is returned by AdminCreateUser when only part
+	// of the requested identity (email or username) collides with an existing
+	// user, so a blind idempotent retry would return the wrong account.
+	ErrUserIdentityConflict = errors.New("email and username refer to conflicting existing identities")
+
 	// ErrPasswordPolicy is returned when a newly chosen password does not
 	// meet the product's public 8-32 character, letter-and-number contract.
 	// It is exported so HTTP handlers can translate the failure to a 400
 	// without exposing bcrypt or persistence errors.
 	ErrPasswordPolicy = errors.New("password must be 8-32 characters and contain at least one letter and one number")
+
+	// ErrInvalidOldPassword is returned by ChangePassword when the supplied
+	// current password does not match the stored hash. Handlers map this to
+	// a 400 so callers can prompt the user without treating it as a 500.
+	ErrInvalidOldPassword = errors.New("invalid old password")
+
+	// ErrSamePassword is returned when the new password equals the current
+	// one so callers can reject no-op rotations that would still revoke
+	// every session.
+	ErrSamePassword = errors.New("new password must differ from current password")
+)
+
+// Machine-readable change-password failure reasons for HTTP details fields.
+const (
+	DetailInvalidOldPassword = "invalid_old_password"
+	DetailPasswordPolicy     = "password_policy"
+	DetailSamePassword       = "same_password"
 )
 
 // ValidatePasswordPolicy keeps administrative password resets aligned with
@@ -119,12 +149,12 @@ func (s *userService) Register(ctx context.Context, req *types.RegisterRequest) 
 	// Check if user already exists
 	existingUser, _ := s.userRepo.GetUserByEmail(ctx, req.Email)
 	if existingUser != nil {
-		return nil, errors.New("user with this email already exists")
+		return nil, ErrUserEmailExists
 	}
 
 	existingUser, _ = s.userRepo.GetUserByUsername(ctx, req.Username)
 	if existingUser != nil {
-		return nil, errors.New("user with this username already exists")
+		return nil, ErrUserUsernameExists
 	}
 
 	// Hash password
@@ -312,16 +342,21 @@ func (s *userService) buildMembershipsForUser(
 	if user == nil {
 		return []types.Membership{}
 	}
+	// Only synthesise a membership from User.TenantID when the membership
+	// service is entirely unavailable (partial DI graphs / legacy tests).
+	// Once ListByUser is reachable, an empty or fully-filtered result is
+	// authoritative: inventing a row from a stale users.tenant_id is what
+	// kept removed workspaces visible in the space switcher (#2586).
 	if s.memberService == nil {
 		return synthFallbackMembership(user, activeTenant)
 	}
 	rows, err := s.memberService.ListByUser(ctx, user.ID)
 	if err != nil {
 		logger.Warnf(ctx, "Failed to list memberships for user %s: %v", user.ID, err)
-		return synthFallbackMembership(user, activeTenant)
+		return []types.Membership{}
 	}
 	if len(rows) == 0 {
-		return synthFallbackMembership(user, activeTenant)
+		return []types.Membership{}
 	}
 	// 收集需要批量查询名称的 tenant id（跳过 activeTenant 因为它已经在手）。
 	needsLookup := make([]uint64, 0, len(rows))
@@ -366,17 +401,18 @@ func (s *userService) buildMembershipsForUser(
 			Role:       m.Role,
 		})
 	}
-	if len(out) == 0 {
-		return synthFallbackMembership(user, activeTenant)
-	}
 	return out
 }
 
 // synthFallbackMembership returns a single-row membership list inferred
-// from User.TenantID. Used when the membership table has not been
-// populated yet (e.g. during the rollout window where the migration has
-// run but the auth middleware's auto-promotion hasn't fired) so the
-// response shape stays consistent.
+// from User.TenantID. Used only when the membership service itself is
+// unavailable (partial DI graphs in tests, or a rollout window where the
+// service has not been wired yet) so the response shape stays consistent.
+//
+// Callers that successfully queried tenant_members must NOT use this
+// helper: an empty membership list is authoritative and synthesising
+// from users.tenant_id would re-surface workspaces the user was removed
+// from (#2586).
 //
 // The fallback role is intentionally TenantRoleViewer (least privilege):
 // the login response only feeds UI rendering, and the backend re-derives
@@ -626,17 +662,29 @@ func (s *userService) DeleteUser(ctx context.Context, id string) error {
 	return s.userRepo.DeleteUser(ctx, id)
 }
 
-// ChangePassword changes user password
+// ChangePassword changes user password after verifying the current
+// credential. The new password must satisfy ValidatePasswordPolicy so
+// self-service rotation cannot introduce weaker passwords than
+// registration / admin reset allow. On success every outstanding session
+// is revoked so a stolen token cannot survive the rotation.
 func (s *userService) ChangePassword(ctx context.Context, userID string, oldPassword, newPassword string) error {
 	user, err := s.userRepo.GetUserByID(ctx, userID)
 	if err != nil {
 		return err
 	}
 
-	// Verify old password
-	err = bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(oldPassword))
-	if err != nil {
-		return errors.New("invalid old password")
+	// Verify old password before policy checks so callers with a wrong
+	// current credential get a clear failure instead of a policy error.
+	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(oldPassword)); err != nil {
+		return ErrInvalidOldPassword
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(newPassword)); err == nil {
+		return ErrSamePassword
+	}
+
+	if err := ValidatePasswordPolicy(newPassword); err != nil {
+		return err
 	}
 
 	// Hash new password
@@ -647,6 +695,10 @@ func (s *userService) ChangePassword(ctx context.Context, userID string, oldPass
 
 	user.PasswordHash = string(hashedPassword)
 	user.UpdatedAt = time.Now()
+	if user.Preferences.OidcOnlyLogin != nil && *user.Preferences.OidcOnlyLogin {
+		cleared := false
+		user.Preferences.OidcOnlyLogin = &cleared
+	}
 
 	if err := s.userRepo.UpdateUser(ctx, user); err != nil {
 		return err
@@ -682,6 +734,105 @@ func (s *userService) AdminResetPassword(ctx context.Context, userID string, new
 	}
 
 	return s.tokenRepo.RevokeTokensByUserID(ctx, userID)
+}
+
+// AdminCreateUser provisions a new local user on behalf of a SystemAdmin.
+//
+// An absent password generates a random one, returned exactly once.
+// Any provided password, must satisfy ValidatePasswordPolicy.
+//
+// Delegates to Register, so duplicate checks, tenant provisioning and Owner
+// membership bootstrapping match public registration.
+func (s *userService) AdminCreateUser(
+	ctx context.Context,
+	req *types.AdminCreateUserRequest,
+	provisioning types.TenantProvisioningMode,
+) (*types.User, string, error) {
+	if req == nil || strings.TrimSpace(req.Username) == "" || strings.TrimSpace(req.Email) == "" {
+		return nil, "", errors.New("username and email are required")
+	}
+
+	password := ""
+	generated := false
+	if req.Password == nil {
+		randomPassword, err := generatePolicyCompliantPassword()
+		if err != nil {
+			return nil, "", fmt.Errorf("failed to generate password: %w", err)
+		}
+		password = randomPassword
+		generated = true
+	} else {
+		password = *req.Password
+	}
+	// Generation triggers only on an absent password. Any provided
+	// value, empty or whitespace-only, is hashed byte-for-byte and must
+	// satisfy the password policy.
+	if err := ValidatePasswordPolicy(password); err != nil {
+		return nil, "", err
+	}
+
+	user, err := s.Register(ctx, &types.RegisterRequest{
+		Username:           strings.TrimSpace(req.Username),
+		Email:              strings.TrimSpace(req.Email),
+		Password:           password,
+		TenantProvisioning: provisioning,
+	})
+	// WARN: idempotency is sequential only. Two concurrent creates of the
+	// same identity can race past Register's check; the loser gets a 500,
+	// and a retry resolves idempotently.
+	if err != nil {
+		// Register owns duplicate detection; on a duplicate we surface
+		// the existing row so the caller can respond idempotently. The
+		// sentinel names the colliding identity, so the lookup is
+		// targeted at exactly that key.
+		switch {
+		case errors.Is(err, ErrUserEmailExists):
+			return s.adminCreateUserOnDuplicate(
+				ctx, req, err,
+				func(ctx context.Context) (*types.User, error) {
+					return s.userRepo.GetUserByEmail(ctx, strings.TrimSpace(req.Email))
+				},
+			)
+		case errors.Is(err, ErrUserUsernameExists):
+			return s.adminCreateUserOnDuplicate(
+				ctx, req, err,
+				func(ctx context.Context) (*types.User, error) {
+					return s.userRepo.GetUserByUsername(ctx, strings.TrimSpace(req.Username))
+				},
+			)
+		}
+		return nil, "", err
+	}
+	if generated {
+		return user, password, nil
+	}
+	return user, "", nil
+}
+
+func (s *userService) adminCreateUserOnDuplicate(
+	ctx context.Context,
+	req *types.AdminCreateUserRequest,
+	dupErr error,
+	lookup func(context.Context) (*types.User, error),
+) (*types.User, string, error) {
+	existing, lookupErr := lookup(ctx)
+	if lookupErr != nil || existing == nil {
+		return nil, "", dupErr
+	}
+	if adminCreateIdentityMatches(existing, req.Username, req.Email) {
+		return existing, "", dupErr
+	}
+	return nil, "", ErrUserIdentityConflict
+}
+
+// adminCreateIdentityMatches reports whether an existing row is the exact
+// identity an admin create is idempotently retrying (both email and username).
+func adminCreateIdentityMatches(existing *types.User, username, email string) bool {
+	if existing == nil {
+		return false
+	}
+	return existing.Username == strings.TrimSpace(username) &&
+		existing.Email == strings.TrimSpace(email)
 }
 
 // ValidatePassword validates user password
@@ -776,6 +927,14 @@ func (s *userService) resolveLoginTenantID(ctx context.Context, user *types.User
 // token when a usable tenant is available (repairs partial
 // invitation/admin-assignment flows). resolveFirstMembershipTenant
 // best-effort persists the resolved tenant as the new home.
+//
+// When users.tenant_id is non-zero we still verify an active membership
+// still exists (mirroring resolveLoginTenantID's check on
+// LastActiveTenantID). A dangling home pointer is common after
+// RemoveMember: the membership row is soft-deleted but users.tenant_id
+// was historically left untouched, which made the removed workspace
+// reappear via synthFallbackMembership (#2586). Superusers that can
+// access every tenant skip the membership gate.
 func (s *userService) homeOrFirstMembershipTenant(ctx context.Context, user *types.User) uint64 {
 	if user == nil {
 		return 0
@@ -783,7 +942,42 @@ func (s *userService) homeOrFirstMembershipTenant(ctx context.Context, user *typ
 	if user.TenantID == 0 {
 		return s.resolveFirstMembershipTenant(ctx, user)
 	}
-	return user.TenantID
+	if user.CanAccessAllTenants || s.memberService == nil {
+		return user.TenantID
+	}
+	member, err := s.memberService.GetMembership(ctx, user.ID, user.TenantID)
+	if err == nil && member != nil && member.Status == types.TenantMemberStatusActive {
+		return user.TenantID
+	}
+	logger.Warnf(ctx,
+		"homeOrFirstMembershipTenant: user %s home tenant %d has no active membership, "+
+			"clearing stale home and re-resolving (err=%v)",
+		user.ID, user.TenantID, err)
+	s.clearStaleHomeTenant(ctx, user)
+	return s.resolveFirstMembershipTenant(ctx, user)
+}
+
+// clearStaleHomeTenant best-effort zeroes users.tenant_id (and a
+// LastActiveTenantID that pointed at the same workspace) after the home
+// membership is observed to be gone. Failures are logged but never
+// fail login: the in-memory user is already corrected for this request.
+func (s *userService) clearStaleHomeTenant(ctx context.Context, user *types.User) {
+	if user == nil {
+		return
+	}
+	staleHome := user.TenantID
+	user.TenantID = 0
+	if user.Preferences.LastActiveTenantID != nil && *user.Preferences.LastActiveTenantID == staleHome {
+		user.Preferences.LastActiveTenantID = nil
+	}
+	if s.userRepo == nil {
+		return
+	}
+	if err := s.userRepo.UpdateUser(ctx, user); err != nil {
+		logger.Warnf(ctx,
+			"clearStaleHomeTenant: failed to persist cleared home for user %s (was tenant %d): %v",
+			user.ID, staleHome, err)
+	}
 }
 
 // resolveFirstMembershipTenant makes a tenantless identity usable when an
@@ -1426,6 +1620,13 @@ func (s *userService) provisionOIDCUser(
 	if err != nil {
 		return nil, fmt.Errorf("failed to auto-provision OIDC user: %w", err)
 	}
+
+	oidcOnly := true
+	user.Preferences.OidcOnlyLogin = &oidcOnly
+	user.UpdatedAt = time.Now()
+	if err := s.userRepo.UpdateUser(ctx, user); err != nil {
+		return nil, fmt.Errorf("failed to mark OIDC-only login preference: %w", err)
+	}
 	return user, nil
 }
 
@@ -1458,6 +1659,22 @@ func generateRandomString(length int) (string, error) {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(buffer), nil
+}
+
+// generatePolicyCompliantPassword returns a cryptographically random
+// password that satisfies ValidatePasswordPolicy, regenerating until
+// it does (a single 32-char base64url draw misses digits ~0.4% of the
+// time).
+func generatePolicyCompliantPassword() (string, error) {
+	for {
+		password, err := generateRandomString(24)
+		if err != nil {
+			return "", err
+		}
+		if ValidatePasswordPolicy(password) == nil {
+			return password, nil
+		}
+	}
 }
 
 func decodeJWTClaims(token string) (map[string]interface{}, error) {

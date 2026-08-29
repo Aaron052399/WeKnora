@@ -263,3 +263,115 @@ func MergeStorageEngineConfigForUpdate(incoming, existing *StorageEngineConfig) 
 	}
 	return &out
 }
+
+// SandboxConfigForResponse returns a copy of cfg safe to serialize into an API
+// response. When maskSecrets is true every secret-bearing field is replaced
+// with RedactedSecretPlaceholder. Unset secrets stay empty so the UI can tell
+// "configured" apart from "not configured".
+func SandboxConfigForResponse(cfg *TenantSandboxConfig, maskSecrets bool) *TenantSandboxConfig {
+	if cfg == nil {
+		return nil
+	}
+	out := *cfg
+	if !maskSecrets {
+		return &out
+	}
+	if out.Cube != nil {
+		cube := *out.Cube
+		if cube.APIKey != "" {
+			cube.APIKey = RedactedSecretPlaceholder
+		}
+		out.Cube = &cube
+	}
+	if out.E2B != nil {
+		e2b := *out.E2B
+		if e2b.APIKey != "" {
+			e2b.APIKey = RedactedSecretPlaceholder
+		}
+		out.E2B = &e2b
+	}
+	// EnvVars values are encrypted at rest and may hold credentials, so they
+	// are masked as a class rather than by name.
+	if len(out.EnvVars) > 0 {
+		envVars := make(map[string]string, len(out.EnvVars))
+		for name, value := range out.EnvVars {
+			if value != "" {
+				value = RedactedSecretPlaceholder
+			}
+			envVars[name] = value
+		}
+		out.EnvVars = envVars
+	}
+	return &out
+}
+
+// MergeSandboxConfigForUpdate resolves redacted placeholders in incoming
+// against the currently stored config, so a client that never received the
+// real secret can submit the rest of the form without wiping it. Pointers
+// the editor does not own (SkillImage, VolumeMount) are kept from existing.
+func MergeSandboxConfigForUpdate(incoming, existing *TenantSandboxConfig) *TenantSandboxConfig {
+	if incoming == nil {
+		return nil
+	}
+	out := *incoming
+
+	if out.Cube != nil {
+		cube := *out.Cube
+		var prev CubeSandboxConfig
+		if existing != nil && existing.Cube != nil {
+			prev = *existing.Cube
+		}
+		cube.APIKey = PreserveIfRedacted(cube.APIKey, prev.APIKey)
+		out.Cube = &cube
+	}
+	if out.E2B != nil {
+		e2b := *out.E2B
+		var prev E2BSandboxConfig
+		if existing != nil && existing.E2B != nil {
+			prev = *existing.E2B
+		}
+		e2b.APIKey = PreserveIfRedacted(e2b.APIKey, prev.APIKey)
+		out.E2B = &e2b
+	}
+	// Only keys present in incoming survive: deleting a row in the UI must
+	// actually remove the variable rather than silently restore it.
+	if len(out.EnvVars) > 0 {
+		envVars := make(map[string]string, len(out.EnvVars))
+		for name, value := range out.EnvVars {
+			prev := ""
+			if existing != nil {
+				prev = existing.EnvVars[name]
+			}
+			envVars[name] = PreserveIfRedacted(value, prev)
+		}
+		out.EnvVars = envVars
+	}
+
+	// SkillImage and VolumeMount are owned by the install / volume paths, not
+	// by the sandbox settings form. The editor rebuilds the payload without
+	// either field, so copying incoming as-is would wipe a live snapshot on
+	// every runtime save and leave sessions booting the base template while the
+	// skill rows still claim ready. Reading them from the stored row instead —
+	// and clearing when there is no stored row — also means a crafted PUT can
+	// neither plant nor wipe a pointer.
+	out.SkillImage = nil
+	out.VolumeMount = nil
+	if existing != nil {
+		if existing.SkillImage != nil {
+			image := *existing.SkillImage
+			out.SkillImage = &image
+		}
+		if existing.VolumeMount != nil {
+			mount := *existing.VolumeMount
+			out.VolumeMount = &mount
+		}
+		// The runtime form omits skill_rollout. An empty incoming value must
+		// not reset a saved "new_session" choice; the skills panel sends the
+		// explicit next_turn token when the admin switches back.
+		if strings.TrimSpace(out.SkillRollout) == "" {
+			out.SkillRollout = existing.SkillRollout
+		}
+	}
+
+	return &out
+}

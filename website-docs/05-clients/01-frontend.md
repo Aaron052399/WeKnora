@@ -127,7 +127,7 @@ flowchart TB
 | `/platform/settings` | `settings` | `src/views/settings/Settings.vue` | 设置中心（全屏模态形态），分区见下方「设置中心的分区与可见性」 |
 | `/platform/tenant` | — | 重定向 | 兼容旧路径 → `/platform/settings` |
 | `/platform/knowledge-search` | — | 重定向 | 旧全局搜索路径 → 知识库列表并通过 `?cmdk=` 打开全局命令面板（⌘K） |
-| `/platform/integrations` | — | 重定向 | → `/platform/settings?section=integrations`（API / Chrome 扩展 / Claw Skill 集成，视图在 `src/views/integrations/`） |
+| `/platform/integrations` | — | 重定向 | → `/platform/settings?section=integration-im`（旧 `?tab=` 会归一成 `integration-<tab>`；视图在 `src/views/integrations/`） |
 | `/platform/system`、`/platform/system/settings`、`/platform/system/admins` | `systemSettings` / `systemAdmins` | 重定向 | 系统管理旧路径 → `/platform/settings?section=system-global`，要求 `requiresSystemAdmin`（视图在 `src/views/system/`：`SystemSettings.vue`、`SystemAuditLog.vue`、`PlatformAPIKeys.vue` 等） |
 | `/platform/system/queues` | `systemQueues` | 重定向 | → `/platform/settings?section=runtime-queues`（运行时任务队列 `src/views/system/RuntimeQueues.vue`） |
 
@@ -144,7 +144,7 @@ flowchart TB
 | 账户 | `general`（个人偏好）、`userprofile` |
 | 空间 | `tenant`（空间信息）、`members`（成员）、`chathistory` |
 | 模型与运行 | `models`、`ollama`、`weknoracloud` |
-| 发布与集成 | IM 集成、网页嵌入、API、Chrome 扩展、Claw Skill |
+| 发布与集成 | `integration-im`、`integration-embed`、`integration-api`、`integration-chrome`、`integration-claw` |
 | 数据与扩展 | `vectorstore`、`parser`、`storage`、`websearch`、`mcp` |
 | 系统管理 | `system-global`、`runtime-queues`、`platform-api-keys`、`system-audit-log` |
 | 平台 | `system`（版本信息） |
@@ -299,8 +299,8 @@ RAG 流水线的可视化进度（`views/chat/components/RagPipelineProgress.vue
 
 `frontend/docker-entrypoint.sh`（运行时配置注入）：
 
-1. 生成 `/usr/share/nginx/html/config.js`，把 `MAX_FILE_SIZE_MB`（默认 50）写入 `window.__RUNTIME_CONFIG__` 供前端运行时读取；
-2. 用 `envsubst` 渲染 nginx 模板，可配置环境变量：`MAX_FILE_SIZE_MB`、`APP_HOST`（默认 `app`）、`APP_PORT`（默认 `8080`）、`APP_SCHEME`（默认 `http`，远程 HTTPS 后端可设 `https`）；
+1. 生成 `/usr/share/nginx/html/config.js`，把 `MAX_FILE_SIZE_MB`（默认 50）与 `DEFAULT_LOCALE`（可选，默认空）写入 `window.__RUNTIME_CONFIG__` 供前端运行时读取；entrypoint 仅允许 `zh-CN|en-US|ru-RU|ko-KR`，非法值会被丢弃；
+2. 用 `envsubst` 渲染 nginx 模板，可配置环境变量：`MAX_FILE_SIZE_MB`、`DEFAULT_LOCALE`、`APP_HOST`（默认 `app`）、`APP_PORT`（默认 `8080`）、`APP_SCHEME`（默认 `http`，远程 HTTPS 后端可设 `https`）；
 3. 前台启动 nginx。
 
 `frontend/nginx.conf` 关键行为：

@@ -37,6 +37,12 @@ type UserPreferences struct {
 	//        a stored *0 the same as nil.
 	// *N   = preferred workspace id.
 	LastActiveTenantID *uint64 `json:"last_active_tenant_id,omitempty"`
+
+	// OidcOnlyLogin is set server-side when an account is auto-provisioned
+	// via OIDC with a random password the user never received. The profile
+	// UI hides self-service password rotation until the user sets a known
+	// password via ChangePassword (which clears this flag).
+	OidcOnlyLogin *bool `json:"oidc_only_login,omitempty"`
 }
 
 // Value implements driver.Valuer so GORM persists UserPreferences as
@@ -186,6 +192,18 @@ type RegisterRequest struct {
 	// own tenancy semantics. Empty preserves the historical behaviour and is
 	// treated as create_personal by UserService.Register.
 	TenantProvisioning TenantProvisioningMode `json:"-"`
+}
+
+// AdminCreateUserRequest is the payload for a SystemAdmin provisioning a
+// new local user via POST /api/v1/system/admin/users/create.
+//
+// Password is optional: when absent (or null), the service generates a
+// random one and returns it exactly once. Any provided value, the
+// empty string included, is subject to the password policy.
+type AdminCreateUserRequest struct {
+	Username string  `json:"username" binding:"required,min=2,max=50"`
+	Email    string  `json:"email"    binding:"required,email"`
+	Password *string `json:"password"`
 }
 
 // TenantProvisioningMode controls what UserService.Register does after it
