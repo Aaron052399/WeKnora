@@ -23,7 +23,8 @@ const (
 
 	// defaultToolExecTimeout is the default maximum time for a single tool execution.
 	// Prevents long-running tools (web_fetch, database_query) from hanging indefinitely.
-	defaultToolExecTimeout = 60 * time.Second
+	// 放宽到 600s：覆盖 MCP 生图(30s~2min)/视频(分钟级)等长耗时工具，避免 context deadline exceeded。
+	defaultToolExecTimeout = 600 * time.Second
 	// shellExecToolTimeout is slightly longer than shell_exec's own hard
 	// 600-second command timeout so the tool can return a structured timeout
 	// result instead of being cancelled first by the generic agent wrapper.
