@@ -28,6 +28,8 @@ export type DisplayType =
     | 'wiki_delete_page'
     | 'shell_exec'
     | 'list_sandbox_files'
+    | 'write_sandbox_file'
+    | 'edit_sandbox_file'
     | 'read_skill';
 
 // Search result item
@@ -355,6 +357,19 @@ export interface ListSandboxFilesData {
     entries?: SandboxFileEntry[];
     count?: number;
     truncated?: boolean;
+}
+
+export interface WriteSandboxFileData {
+    display_type?: 'write_sandbox_file' | 'edit_sandbox_file';
+    session_id?: string;
+    path?: string;
+    root?: string;
+    name?: string;
+    size?: number;
+    replacements?: number;
+    added_lines?: number;
+    removed_lines?: number;
+    preview?: string;
 }
 
 export interface ReadSkillData {

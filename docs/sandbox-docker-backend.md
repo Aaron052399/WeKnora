@@ -13,6 +13,7 @@ CubeSandbox / E2B 的集群与模板见 [沙箱集群与标准模板](./sandbox-
   这正是当初把 provider 抽象成 `RemoteSandboxClient` 的收益。
 - 它适合单机 / 私有化部署。跨主机调度、内核级隔离、内存态快照仍然要用 E2B 协议后端，
   原因见「边界」一节。
+- **默认关闭。** 本机 `docker.sock` 等同宿主机 root。系统管理员可在「设置 → 系统设置 → 网络安全」打开，立即生效；也可用环境变量 `WEKNORA_SANDBOX_DOCKER_ENABLED=true` 作为未落库时的回退。设置页始终保留 Docker 标签：未打开时没有「添加」入口，只说明如何启用。已有配置仍可查看/删除，但不会再创建容器。
 - Docker 官方的 Docker Sandboxes（`sbx`）不能当后端：那是开发者本机 CLI，要 Docker 账号登录、
   工作区是宿主机目录直挂、没有多租户服务端 API。
 
@@ -115,6 +116,8 @@ archive 接口里只剩 `HEAD` 还在用，且仅用于读固定路径的活跃�
 
 在「设置 → 沙箱后端」中新建配置并选择 Docker：
 
+系统管理员可在「设置 → 系统设置 → 网络安全」打开 Docker 沙箱（立即生效）。未落库时回退到 `WEKNORA_SANDBOX_DOCKER_ENABLED`。默认关闭，因为能保存 Docker 配置的空间管理员可以在本进程够得到的 Engine API 上创建容器，而本机 `docker.sock` 等同宿主机 root。设置页始终有 Docker 标签；未打开时没有添加按钮，只提示如何启用。
+
 | 字段 | 说明 |
 | --- | --- |
 | 镜像 | 必填。会话容器都从它创建，等价于其它后端的 template ID |
@@ -142,7 +145,10 @@ Debian 系基础镜像天然带 find 和 timeout。
 
 WeKnora 自己跑在容器里时，要把 **实际的** docker socket 挂进 app 容器（并接受它等同宿主机 root 的事实），
 或者改用远程 daemon。Linux 上通常是 `/var/run/docker.sock`；macOS 上 Colima / Docker Desktop / OrbStack
-各自有 `$HOME` 下的 socket，以 `docker context show` 为准。
+各自有 `$HOME` 下的 socket，以 `docker context show` 为准。入口脚本在 `gosu` 降权前会按
+socket 的 GID 把 `appuser` 加入对应组；不要依赖 compose `group_add`，也不要 `chmod 666`
+宿主机 socket。若 socket 是 `root:root` 且仅所有者可写，容器内无法安全补权，需在宿主机把
+socket 改成非 root 组的 `660`。
 
 ## 边界
 

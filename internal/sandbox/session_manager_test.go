@@ -330,6 +330,55 @@ func TestSessionBoundManagerEndSessionTurnIgnoresCancel(t *testing.T) {
 	require.False(t, active)
 }
 
+func TestCleanSessionWorkspaceWritePathAcceptsWorkspaceAndRefusesInput(t *testing.T) {
+	got, err := cleanSessionWorkspaceWritePath("/workspace/output/generate_ppt.py")
+	require.NoError(t, err)
+	require.Equal(t, "/workspace/output/generate_ppt.py", got)
+
+	got, err = cleanSessionWorkspaceWritePath("/workspace/scratch/gen.py")
+	require.NoError(t, err)
+	require.Equal(t, "/workspace/scratch/gen.py", got)
+
+	_, err = cleanSessionWorkspaceWritePath("/workspace/input/report.txt")
+	require.Error(t, err)
+	_, err = cleanSessionWorkspaceWritePath("/workspace/output")
+	require.Error(t, err)
+	_, err = cleanSessionWorkspaceWritePath("/etc/passwd")
+	require.Error(t, err)
+	_, err = cleanSessionWorkspaceWritePath("relative.py")
+	require.Error(t, err)
+}
+
+func TestWriteSessionWorkspaceFileWritesUnderOutput(t *testing.T) {
+	ctx := context.WithValue(context.Background(), types.TenantIDContextKey, uint64(10000))
+	mgr, client := newSessionManagerExecTestHarness(t)
+
+	require.NoError(t, mgr.WriteSessionWorkspaceFile(
+		ctx, "sess-1", "/workspace/output/generate_ppt.py", []byte("print(1)\n"),
+	))
+
+	client.mu.Lock()
+	writes := append([]fakeRemoteWriteFile(nil), client.writeFiles...)
+	client.mu.Unlock()
+	require.Len(t, writes, 1)
+	require.Equal(t, "/workspace/output/generate_ppt.py", writes[0].path)
+	require.Equal(t, []byte("print(1)\n"), writes[0].content)
+}
+
+func TestWriteSessionWorkspaceFileRefusesSessionInput(t *testing.T) {
+	ctx := context.WithValue(context.Background(), types.TenantIDContextKey, uint64(10000))
+	mgr, client := newSessionManagerExecTestHarness(t)
+
+	err := mgr.WriteSessionWorkspaceFile(
+		ctx, "sess-1", "/workspace/input/secret.txt", []byte("nope"),
+	)
+	require.Error(t, err)
+	client.mu.Lock()
+	n := len(client.writeFiles)
+	client.mu.Unlock()
+	require.Zero(t, n)
+}
+
 func TestWriteSessionFileSucceedsWhenInstallDirectoryAlreadyExists(t *testing.T) {
 	ctx := context.WithValue(context.Background(), types.TenantIDContextKey, uint64(10000))
 	mgr, client := newSessionManagerExecTestHarness(t)
@@ -349,6 +398,34 @@ func TestWriteSessionFileSucceedsWhenInstallDirectoryAlreadyExists(t *testing.T)
 	client.mu.Unlock()
 	require.Len(t, writes, 1)
 	require.Equal(t, skillDir+"/SKILL.md", writes[0].path)
+}
+
+// The whole feature is inert without this: RemoteNetworkPolicy already existed
+// and both adapters already forwarded it, but nothing ever filled it in.
+func TestBuildSessionCreateRequestCarriesNetworkPolicy(t *testing.T) {
+	denied := false
+	cfg := DefaultConfig()
+	cfg.CubeTemplate = "tpl-1"
+	cfg.E2BTemplate = "tpl-1"
+	cfg.DockerImage = "img-1"
+	cfg.Network = RemoteNetworkPolicy{
+		AllowInternetAccess: &denied,
+		AllowOut:            []string{"api.example.com"},
+		DenyOut:             []string{"0.0.0.0/0"},
+	}
+
+	for _, provider := range []RemoteProvider{
+		SandboxTypeCube, SandboxTypeE2B, SandboxTypeDocker,
+	} {
+		request, err := buildSessionCreateRequest(provider, cfg)
+		require.NoError(t, err, "provider %s", provider)
+		require.NotNil(t, request.Network.AllowInternetAccess, "provider %s", provider)
+		require.False(t, *request.Network.AllowInternetAccess, "provider %s", provider)
+		require.Equal(t, []string{"api.example.com"}, request.Network.AllowOut,
+			"provider %s", provider)
+		require.Equal(t, []string{"0.0.0.0/0"}, request.Network.DenyOut,
+			"provider %s", provider)
+	}
 }
 
 func newSessionManagerExecTestHarness(t *testing.T) (*SessionBoundManager, *fakeRemoteClient) {

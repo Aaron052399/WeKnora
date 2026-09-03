@@ -44,12 +44,12 @@ export interface CustomAgentConfig {
   model_id?: string;
   rerank_model_id?: string;         // ReRank 模型 ID
   temperature?: number;
-  max_completion_tokens?: number;   // 最大生成token数（普通模式）
+  max_completion_tokens?: number;   // 0 = 跟随系统默认（快速问答 2048；智能推理 4096，绑沙箱可写文件时 24576）。大于 0 为自定义上限
   thinking?: boolean;                      // 是否启用思考模式（支持扩展思考的模型）
   citation_enabled?: boolean;        // 是否在最终回答中输出知识库/网页来源引用（默认开启）
 
   // ===== Agent模式设置 =====
-  max_iterations?: number;          // 最大迭代次数
+  max_iterations?: number;          // 最大迭代次数；-1 表示不限制
   llm_call_timeout?: number;        // LLM调用超时时间（秒）
   allowed_tools?: string[];         // 允许的工具
   reflection_enabled?: boolean;     // 是否启用反思

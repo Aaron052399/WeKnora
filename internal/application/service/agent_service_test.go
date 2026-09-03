@@ -88,6 +88,9 @@ func (stubSessionFileStore) ReadSessionFile(context.Context, string, string) ([]
 func (stubSessionFileStore) WriteSessionInputFile(context.Context, string, string, []byte) error {
 	return nil
 }
+func (stubSessionFileStore) WriteSessionWorkspaceFile(context.Context, string, string, []byte) error {
+	return nil
+}
 func (stubSessionFileStore) RemoveSessionInputPath(context.Context, string, string) error { return nil }
 
 func (s *fakeAgentKnowledgeService) ListPagedKnowledgeByKnowledgeBaseID(
@@ -125,10 +128,10 @@ func toolOffered(names []string, name string) bool {
 
 // TestCreateAgentEngineOpensSandboxToolsOnlyForInstallMode pins the skill
 // gate on the skill installer alone for shell_exec. shell_exec follows
-// SkillsEnabled (it can execute skill scripts), while list_sandbox_files and
-// read_sandbox_file are pure filesystem capabilities that follow the sandbox
-// backend's SessionFileStore capability instead — so they are offered even
-// when skills are disabled and to the installer agent.
+// SkillsEnabled (or install mode). list/read/write/edit sandbox file tools
+// follow SessionFileStore for ordinary agents, including when skills are
+// disabled, but are withheld from the installer: those tools only accept
+// /workspace, and the installer must write the skill tree via shell_exec.
 func TestCreateAgentEngineOpensSandboxToolsOnlyForInstallMode(t *testing.T) {
 	ctx := context.WithValue(context.Background(), types.TenantIDContextKey, uint64(7))
 
@@ -140,8 +143,8 @@ func TestCreateAgentEngineOpensSandboxToolsOnlyForInstallMode(t *testing.T) {
 					typ:   sandbox.SandboxTypeCube,
 					shell: &stubShellExecutor{},
 					// The manager advertises a session file store, the way
-					// every real remote backend does. File tools are a pure
-					// sandbox capability, so the installer receives them too.
+					// every real remote backend does. The installer still
+					// must not receive those tools: they only write /workspace.
 					files:        stubSessionFileStore{},
 					installShell: &stubInstallShellExecutor{},
 				},
@@ -152,7 +155,7 @@ func TestCreateAgentEngineOpensSandboxToolsOnlyForInstallMode(t *testing.T) {
 			SkillsEnabled:   false,
 			AllowedTools:    []string{tools.ToolShellExec},
 		}
-		config.EnableSkillInstallMode(types.BuiltinSkillInstallerID)
+		config.EnableSkillInstallMode(types.BuiltinSkillInstallerID, sandbox.SkillsImageRoot+"/pptx")
 
 		engine, err := svc.CreateAgentEngine(ctx, config, chatModel, nil, nil, "sess-1", "msg-1")
 
@@ -162,9 +165,11 @@ func TestCreateAgentEngineOpensSandboxToolsOnlyForInstallMode(t *testing.T) {
 		require.True(t, toolOffered(chatModel.lastToolNames, tools.ToolShellExec))
 		require.False(t, toolOffered(chatModel.lastToolNames, tools.ToolReadSkill))
 		require.False(t, toolOffered(chatModel.lastToolNames, tools.ToolExecuteSkillScript))
-		require.True(t, toolOffered(chatModel.lastToolNames, tools.ToolListSandboxFiles),
-			"file inspection is a sandbox capability, not a skill, so the installer keeps it")
-		require.True(t, toolOffered(chatModel.lastToolNames, tools.ToolReadSandboxFile))
+		require.False(t, toolOffered(chatModel.lastToolNames, tools.ToolListSandboxFiles),
+			"session file tools only accept /workspace; the installer must write the skill tree via shell_exec")
+		require.False(t, toolOffered(chatModel.lastToolNames, tools.ToolReadSandboxFile))
+		require.False(t, toolOffered(chatModel.lastToolNames, tools.ToolWriteSandboxFile))
+		require.False(t, toolOffered(chatModel.lastToolNames, tools.ToolEditSandboxFile))
 		require.Nil(t, engine.(*agent.AgentEngine).GetSkillsManager())
 	})
 
@@ -194,6 +199,8 @@ func TestCreateAgentEngineOpensSandboxToolsOnlyForInstallMode(t *testing.T) {
 			"shell_exec follows SkillsEnabled; an agent with skills off gets no shell")
 		require.True(t, toolOffered(chatModel.lastToolNames, tools.ToolListSandboxFiles))
 		require.True(t, toolOffered(chatModel.lastToolNames, tools.ToolReadSandboxFile))
+		require.True(t, toolOffered(chatModel.lastToolNames, tools.ToolWriteSandboxFile))
+		require.True(t, toolOffered(chatModel.lastToolNames, tools.ToolEditSandboxFile))
 		require.Nil(t, engine.(*agent.AgentEngine).GetSkillsManager())
 	})
 
@@ -221,6 +228,8 @@ func TestCreateAgentEngineOpensSandboxToolsOnlyForInstallMode(t *testing.T) {
 		require.False(t, toolOffered(chatModel.lastToolNames, tools.ToolShellExec))
 		require.True(t, toolOffered(chatModel.lastToolNames, tools.ToolListSandboxFiles))
 		require.True(t, toolOffered(chatModel.lastToolNames, tools.ToolReadSandboxFile))
+		require.True(t, toolOffered(chatModel.lastToolNames, tools.ToolWriteSandboxFile))
+		require.True(t, toolOffered(chatModel.lastToolNames, tools.ToolEditSandboxFile))
 		require.False(t, toolOffered(chatModel.lastToolNames, tools.ToolReadSkill))
 		require.False(t, toolOffered(chatModel.lastToolNames, tools.ToolExecuteSkillScript))
 		require.Nil(t, engine.(*agent.AgentEngine).GetSkillsManager())
@@ -250,6 +259,8 @@ func TestCreateAgentEngineOpensSandboxToolsOnlyForInstallMode(t *testing.T) {
 		require.True(t, toolOffered(chatModel.lastToolNames, tools.ToolShellExec))
 		require.True(t, toolOffered(chatModel.lastToolNames, tools.ToolListSandboxFiles))
 		require.True(t, toolOffered(chatModel.lastToolNames, tools.ToolReadSandboxFile))
+		require.True(t, toolOffered(chatModel.lastToolNames, tools.ToolWriteSandboxFile))
+		require.True(t, toolOffered(chatModel.lastToolNames, tools.ToolEditSandboxFile))
 		require.True(t, toolOffered(chatModel.lastToolNames, tools.ToolReadSkill))
 		require.True(t, toolOffered(chatModel.lastToolNames, tools.ToolExecuteSkillScript))
 		require.NotNil(t, engine.(*agent.AgentEngine).GetSkillsManager())
@@ -373,6 +384,8 @@ func TestCreateAgentEngineShellFollowsSkillsEnabledWithoutInstalledSkills(t *tes
 	require.False(t, toolOffered(chatModel.lastToolNames, tools.ToolExecuteSkillScript))
 	require.True(t, toolOffered(chatModel.lastToolNames, tools.ToolListSandboxFiles))
 	require.True(t, toolOffered(chatModel.lastToolNames, tools.ToolReadSandboxFile))
+	require.True(t, toolOffered(chatModel.lastToolNames, tools.ToolWriteSandboxFile))
+	require.True(t, toolOffered(chatModel.lastToolNames, tools.ToolEditSandboxFile))
 	require.Nil(t, engine.(*agent.AgentEngine).GetSkillsManager())
 }
 
@@ -560,4 +573,23 @@ func TestGetKnowledgeBaseInfos_ExcludesUnprocessedDocuments(t *testing.T) {
 	assert.Equal(t, 1, infos[0].DocCount)
 	require.Len(t, infos[0].RecentDocs, 1)
 	assert.Equal(t, "doc-completed", infos[0].RecentDocs[0].KnowledgeID)
+}
+
+func TestValidateConfigMaxIterationsUnlimited(t *testing.T) {
+	s := &agentService{}
+
+	unlimited := &types.AgentConfig{MaxIterations: -1}
+	require.NoError(t, s.ValidateConfig(unlimited))
+	assert.Equal(t, types.UnlimitedMaxIterations, unlimited.MaxIterations)
+
+	normalized := &types.AgentConfig{MaxIterations: -9}
+	require.NoError(t, s.ValidateConfig(normalized))
+	assert.Equal(t, types.UnlimitedMaxIterations, normalized.MaxIterations)
+
+	unset := &types.AgentConfig{}
+	require.NoError(t, s.ValidateConfig(unset))
+	assert.Equal(t, 5, unset.MaxIterations)
+
+	tooHigh := &types.AgentConfig{MaxIterations: MAX_ITERATIONS + 1}
+	require.Error(t, s.ValidateConfig(tooHigh))
 }

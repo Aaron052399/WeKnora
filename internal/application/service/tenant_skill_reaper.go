@@ -134,9 +134,10 @@ func (s *TenantSkillService) ReapStuckRuns(ctx context.Context) (int, error) {
 			}
 			reaped++
 		case types.SkillStatusRemoving:
-			// Deleting the row and its bundle is the one irreversible thing
-			// the reaper does, so a run it cannot judge is left for the next
-			// sweep rather than guessed at.
+			// Deleting the leftover install row is irreversible, so a run the
+			// reaper cannot judge is left for the next sweep rather than
+			// guessed at. The catalog archive is not touched: this is a
+			// sandbox install, not a definition delete.
 			if !known {
 				continue
 			}
@@ -156,13 +157,15 @@ func (s *TenantSkillService) ReapStuckRuns(ctx context.Context) (int, error) {
 				reaped++
 				continue
 			}
+			pinned := strings.TrimSpace(row.BundleRef)
 			if err := s.skills.DeleteSkill(ctx, row.TenantID, row.SandboxConfigID, row.ID); err != nil {
 				logger.Warnf(ctx, "[skill] drop abandoned removal %s failed: %v", row.ID, err)
 				continue
 			}
-			if row.BundleRef != "" {
-				s.deleteBundleBestEffort(ctx, row.TenantID, row.BundleRef)
-			}
+			// The row was the last thing naming an archive it owned outright,
+			// so the sweep that drops it is what makes those bytes reachable
+			// by nothing. A definition's own object has other names and stays.
+			s.releaseInstallBundle(ctx, row.TenantID, pinned)
 			reaped++
 		}
 	}
@@ -422,10 +425,10 @@ func configuredSandboxTTL(cfg *types.TenantSandboxConfig) time.Duration {
 // image is never touched, nor is anything the ledger does not name: extras
 // belong to other environments on a shared provider account.
 //
-// A live sandbox does not need the template it was created from in order to
-// keep running, so the only reason to wait is in-flight creates that resolved
-// the previous pointer. Twenty-four hours is far past every backend's default
-// TTL; a config that sets a longer one extends the wait.
+// Retention is a lower bound, not a guarantee the provider will accept the
+// delete. Session sandboxes pause instead of dying when idle, and a paused
+// sandbox still pins its template; a Conflict is left on the ledger for the
+// next sweep.
 func (s *TenantSkillService) PruneSupersededSnapshots(ctx context.Context) (int, error) {
 	if s == nil || s.skills == nil {
 		return 0, nil
@@ -497,6 +500,12 @@ func (s *TenantSkillService) pruneConfigSnapshots(
 			continue
 		}
 		if err := deleter.DeleteSnapshot(ctx, row.SnapshotID); err != nil && !sandbox.IsRemoteNotFound(err) {
+			if sandbox.IsRemoteConflict(err) {
+				logger.Infof(ctx,
+					"[skill] snapshot %s still in use; leaving it until sandboxes release it: %s",
+					row.SnapshotID, sandbox.RemoteErrorDiagnostics(err))
+				continue
+			}
 			logger.Warnf(ctx, "[skill] delete superseded snapshot %s failed: %v", row.SnapshotID, err)
 			continue
 		}
@@ -568,6 +577,12 @@ func (s *TenantSkillService) reapAbandonedBuilds(
 			continue
 		}
 		if err := deleter.DeleteSnapshot(ctx, found); err != nil && !sandbox.IsRemoteNotFound(err) {
+			if sandbox.IsRemoteConflict(err) {
+				logger.Infof(ctx,
+					"[skill] abandoned build %s of config %s still in use; leaving it until sandboxes release it: %s",
+					found, cfg.ID, sandbox.RemoteErrorDiagnostics(err))
+				continue
+			}
 			logger.Warnf(ctx, "[skill] delete abandoned build %s of config %s failed: %v",
 				found, cfg.ID, err)
 			continue

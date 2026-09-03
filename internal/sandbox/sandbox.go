@@ -184,12 +184,18 @@ type ExecuteConfig struct {
 	SessionID string
 
 	// RemoteScriptPath is an absolute path to a script that already exists
-	// inside the sandbox image (installed skills). When set, the executor
-	// skips the upload step and runs it in place. Only paths under a valid
-	// skill directory in SkillsImageRoot are accepted; script-content
-	// validation is skipped because the file is already on the image, so
-	// callers must have vetted the bundle at install time.
+	// inside the sandbox. When set, the executor skips the upload step and
+	// runs it in place. Accepted locations:
+	//   - an installed skill file under SkillsImageRoot (bundle vetted at install)
+	//   - a session-writable file under /workspace, not under /workspace/input,
+	//     which also requires SkillDir so the skill's interpreter is used
 	RemoteScriptPath string
+
+	// SkillDir is the installed skill directory whose venv/node_modules
+	// should run RemoteScriptPath. Required when RemoteScriptPath sits under
+	// /workspace. Image-skill paths derive the directory from the script and
+	// ignore this field.
+	SkillDir string
 }
 
 // ExecuteResult contains the result of script execution
@@ -277,6 +283,12 @@ type Config struct {
 	// EnvVars are additional environment variables to set for the sandbox.
 	EnvVars map[string]string
 
+	// Network is the outbound/inbound policy every sandbox built from this
+	// config is created with. DefaultConfig and ResolveEffectiveConfig fully
+	// specify it: leaving it nil would let adapters use provider defaults,
+	// which expose inbound traffic publicly.
+	Network RemoteNetworkPolicy
+
 	// CubeAPIURL is the base URL of the CubeAPI (E2B-compatible) endpoint.
 	// Only used when Type == SandboxTypeCube. Example: "http://127.0.0.1:33000".
 	CubeAPIURL string
@@ -352,6 +364,7 @@ func DefaultConfig() *Config {
 		MaxCPU:          DefaultCPULimit,
 		CubeSandboxTTL:  DefaultCubeSandboxTTL,
 		CubeHTTPTimeout: DefaultCubeHTTPTimeout,
+		Network:         resolveNetworkPolicy(nil),
 	}
 }
 
