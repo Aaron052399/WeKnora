@@ -958,6 +958,8 @@ export default {
       mattermost: 'Mattermost',
       wecom: 'WeCom',
       wechat: 'WeChat',
+      wechatkf: 'WeChat КС',
+      wechatkfConsole: 'Консоль управления WeCom',
       qqbot: 'QQBot',
       yunzhijia: 'Yunzhijia',
       addChannel: 'Добавить канал',

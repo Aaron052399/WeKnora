@@ -5808,6 +5808,8 @@ export default {
       mattermost: 'Mattermost',
       wecom: 'WeCom',
       wechat: 'WeChat',
+      wechatkf: 'WeChat カスタマーサービス',
+      wechatkfConsole: 'WeCom 管理コンソール',
       qqbot: 'QQBot',
       yunzhijia: 'Yunzhijia',
       addChannel: 'チャネルを追加',

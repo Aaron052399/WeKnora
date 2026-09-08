@@ -960,6 +960,8 @@ export default {
       mattermost: 'Mattermost',
       wecom: '企业微信',
       wechat: '微信',
+      wechatkf: '微信客服',
+      wechatkfConsole: '企业微信管理后台',
       qqbot: 'QQBot',
       yunzhijia: '云之家',
       addChannel: '添加渠道',

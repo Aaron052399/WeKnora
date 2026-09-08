@@ -958,6 +958,8 @@ export default {
       mattermost: 'Mattermost',
       wecom: 'WeCom',
       wechat: 'WeChat',
+      wechatkf: '위챗 고객서비스',
+      wechatkfConsole: '기업 WeChat 관리 콘솔',
       qqbot: 'QQBot',
       yunzhijia: 'Yunzhijia',
       addChannel: '채널 추가',
@@ -5988,6 +5990,9 @@ export default {
       modelNotSet: '구성되지 않음',
       enabled: '켜다',
       disabled: '비활성화',
+      mcpAll: '모든 서비스',
+      mcpSelected: '{count} 서비스 지정',
+      mcpNone: '사용되지 않음',
     },
     desc: {
       name: '에이전트를 쉽게 식별할 수 있는 이름을 설정하세요',
