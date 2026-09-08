@@ -371,12 +371,17 @@ func (s *TenantSkillService) clearImagePointer(
 
 	// The metadata is kept and the generation still advances: an empty
 	// SnapshotID already means "boot the base template", and the rest is what
-	// tells an operator which generation emptied the image.
+	// tells an operator which generation emptied the image. A mock skill hang
+	// point (Config.MockSkill) keeps its placeholder snapshot id too.
+	prevImage := cfgEntity.Config.SkillImage
 	cfgEntity.Config.SkillImage = &types.SkillImageConfig{
 		Generation:       generation,
 		BuiltAt:          s.now(),
 		BaseTemplateID:   effectiveBaseTemplate(cfgEntity),
 		OwnerFingerprint: skillOwnerFingerprint(cfgEntity.Config),
+	}
+	if cfgEntity.Config.MockSkill && prevImage != nil {
+		cfgEntity.Config.SkillImage.SnapshotID = prevImage.SnapshotID
 	}
 	cfgEntity.TenantID = tenantID
 	return s.configs.Update(ctx, cfgEntity)

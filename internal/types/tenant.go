@@ -638,6 +638,13 @@ type TenantSandboxConfig struct {
 	// blocked. It is explicit in the UI instead of hidden in process env.
 	AllowPrivateEndpoints bool `json:"allow_private_endpoints,omitempty"`
 
+	// MockSkill marks a platform-provided skill hanging point with no real
+	// sandbox backend. Skill installs on it skip the sandbox session and
+	// snapshot entirely and go straight to ready, with the skill served from
+	// its DB row. It lives on the config (not inside SkillImage) so the
+	// install/remove bookkeeping paths that rebuild SkillImage cannot drop it.
+	MockSkill bool `json:"mock_skill,omitempty"`
+
 	// EnvVars are additional environment variables injected into every
 	// sandbox created for this tenant. 🔒 Values are encrypted at rest.
 	// These become visible to all scripts running in the tenant's

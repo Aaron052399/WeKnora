@@ -324,6 +324,22 @@ func (s *TenantSkillService) runInstall(
 	if err := ensureUsableImage(cfgEntity); err != nil {
 		return err
 	}
+
+	// Mock skill hanging point (Config.MockSkill): the config serves as a platform
+	// skill hang point with no real sandbox backend, so the skill is served
+	// straight from its DB row. Skip the sandbox session + snapshot entirely
+	// and mark the row Ready — otherwise install would hang trying to snapshot
+	// an unreachable backend (which is exactly the mock case).
+	if cfgEntity.Config != nil && cfgEntity.Config.MockSkill {
+		stopHeartbeat()
+		if err := s.writeReadySkillState(ctx, tenantID, configID, skillID, "", bundle); err != nil {
+			return err
+		}
+		s.publishProgress(ctx, tenantID, configID, skillID, SkillProgress{
+			Percent: 100, Stage: "done", Status: types.SkillStatusReady,
+		})
+		return nil
+	}
 	// Snapshots are private to the provider account that created them. The
 	// fingerprint is captured here, from the credentials this sandbox will
 	// actually use, and switchImagePointer refuses to stamp a later rotation
@@ -1559,13 +1575,20 @@ func (s *TenantSkillService) switchImagePointer(
 	}
 
 	// Only the SkillImage portion is touched; everything else in the entity is
-	// whatever the latest read says it is.
+	// whatever the latest read says it is. A mock skill hang point
+	// (Config.MockSkill) keeps its placeholder snapshot id: install never takes
+	// a real snapshot for it, so the marker (on the config) and the placeholder
+	// snapshot id must survive the bookkeeping write-back.
+	prevImage := cfgEntity.Config.SkillImage
 	cfgEntity.Config.SkillImage = &types.SkillImageConfig{
 		SnapshotID:       snapshotID,
 		Generation:       generation,
 		BuiltAt:          s.now(),
 		BaseTemplateID:   effectiveBaseTemplate(cfgEntity),
 		OwnerFingerprint: builtFingerprint,
+	}
+	if cfgEntity.Config.MockSkill && prevImage != nil && strings.TrimSpace(snapshotID) == "" {
+		cfgEntity.Config.SkillImage.SnapshotID = prevImage.SnapshotID
 	}
 	cfgEntity.TenantID = tenantID
 	return s.configs.Update(ctx, cfgEntity)
