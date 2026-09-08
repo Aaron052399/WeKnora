@@ -261,6 +261,25 @@ export default {
     confirmRemove: 'Подтвердить удаление'
   },
   integrations: {
+    cli: {
+      title: 'WeKnora CLI',
+      subtitle: 'Управляйте базами знаний и документами, ищите информацию и задавайте вопросы из терминала. Подключайте скрипты и инструменты ИИ через CLI или MCP.',
+      docs: 'Документация CLI',
+      docsHint: 'Установка и полный справочник команд',
+      quickstart: 'Быстрый старт',
+      installTitle: 'Установка CLI',
+      installDesc: 'Соберите из исходного кода с помощью Git и Go 1.26+. В этом примере для macOS / Linux PATH меняется только для текущего терминала. Для постоянного использования поместите бинарный файл в каталог из PATH.',
+      connectTitle: 'Подключение к этому серверу',
+      connectDesc: 'Создайте и активируйте профиль weknora, затем войдите с электронной почтой и паролем. Если такой профиль уже существует, выберите другое имя и измените имя профиля в примере MCP.',
+      verifyTitle: 'Проверка подключения',
+      verifyDesc: 'Проверьте состояние сервера и авторизации, затем выведите базы знаний, доступные вашей учётной записи.',
+      commandsTitle: 'Основные команды',
+      commandsDesc: 'Замените KB_ID на ID базы знаний и измените путь к файлу, поисковый запрос и вопрос. Загруженные документы доступны для поиска после завершения обработки.',
+      mcpTitle: 'Подключение клиента MCP',
+      mcpDesc: 'После входа добавьте эту конфигурацию в клиент MCP с поддержкой stdio. Если клиент не находит weknora, укажите в command абсолютный путь к бинарному файлу.',
+      copy: 'Копировать',
+      copied: 'Скопировано',
+    },
     title: 'Публикация и интеграция',
     selectAgentPlaceholder: 'Выберите агента',
     selectAgentHint: 'Сначала выберите агента',
@@ -548,6 +567,7 @@ export default {
       embed: 'Веб-встраивание',
       api: 'API-интеграция',
       chrome: 'Расширение Chrome',
+      cli: 'CLI',
       claw: 'Claw Skill'
     }
   },
@@ -1310,6 +1330,7 @@ export default {
       readSkill: 'Чтение навыка',
       executeSkillScript: 'Выполнение скрипта навыка',
       listSandboxFiles: 'Список файлов песочницы',
+      readFile: 'Чтение файла',
       readSandboxFile: 'Чтение файла песочницы',
       writeSandboxFile: 'Запись файла песочницы',
       editSandboxFile: 'Правка файла песочницы',
@@ -2320,6 +2341,7 @@ export default {
     enUS: 'English',
     ruRU: 'Русский',
     koKR: '한국어',
+    jaJP: '日本語',
     selectLanguage: 'Выбрать язык',
     language: 'Язык',
     languageDescription: 'Выберите язык отображения интерфейса',
@@ -2620,7 +2642,10 @@ export default {
       emptyDescription: 'Сервис не предоставил инструменты или ресурсы',
       requireApproval: 'Требуется подтверждение',
       requireApprovalTip: 'При включении агент ждёт подтверждения перед вызовом инструмента.',
-      approvalSaveFailed: 'Не удалось сохранить настройку'
+      approvalSaveFailed: 'Не удалось сохранить настройку',
+      toolEnabled: 'Включить инструмент',
+      toolEnabledTip: 'Если отключить, агент не увидит и не вызовет этот инструмент.',
+      toolEnabledSaveFailed: 'Не удалось сохранить настройку инструмента'
     }
   },
   system: {
@@ -2717,6 +2742,7 @@ export default {
           'system.api_key_revoked': 'Отозван платформенный API-ключ',
           'system.admin_revoked': 'Отозван системный администратор',
           'system.user_password_reset': 'Сброшен пароль пользователя',
+          'system.user_created': 'Создан пользователь',
           'system.queue_task_retried': 'Повторно запущена сбойная задача',
           'system.queue_task_deleted': 'Удалена запись о сбойной задаче',
           'system.queue_task_run_now': 'Задача очереди запущена сейчас',
@@ -2761,6 +2787,49 @@ export default {
         confirmBtn: 'Подтвердить сброс',
         success: 'Пароль сброшен, существующие сеансы пользователя завершены',
         failed: 'Не удалось сбросить пароль',
+      },
+      createUser: {
+        label: 'Создать пользователя',
+        description: 'Завести новый локальный аккаунт. Если режим пространства по умолчанию — «создавать личное пространство», пользователь получит личное пространство так же, как при самостоятельной регистрации.',
+        action: 'Создать пользователя',
+        dialogTitle: 'Создание нового пользователя',
+        warning: 'Это операция повышенного риска. Внимательно проверьте имя пользователя и email — это его единственные учётные данные для входа.',
+        usernameLabel: 'Имя пользователя',
+        usernamePlaceholder: '2–50 символов',
+        emailLabel: 'Email',
+        emailPlaceholder: 'Введите корректный email',
+        autoGenerateLabel: 'Сгенерировать случайный пароль автоматически',
+        newPasswordLabel: 'Новый пароль',
+        newPasswordPlaceholder: '8–32 символа, включая буквы и цифры',
+        confirmPasswordLabel: 'Подтвердите новый пароль',
+        confirmPasswordPlaceholder: 'Введите новый пароль ещё раз',
+        confirmBtn: 'Создать пользователя',
+        success: 'Пользователь создан',
+        successIdempotent: 'Пользователь уже существует; изменений нет',
+        missingPassword: 'Пользователь создан, но сгенерированный пароль не вернулся. Сбросьте пароль, чтобы восстановить доступ.',
+        failed: 'Не удалось создать пользователя',
+        validation: {
+          usernameRequired: 'Введите имя пользователя',
+          usernameLength: 'Имя пользователя должно содержать от 2 до 50 символов',
+          emailRequired: 'Введите email',
+          emailInvalid: 'Введите корректный email',
+          passwordRequired: 'Введите новый пароль',
+          passwordLength: 'Пароль должен содержать от 8 до 32 символов',
+          passwordLetter: 'Пароль должен содержать букву',
+          passwordNumber: 'Пароль должен содержать цифру',
+          confirmRequired: 'Введите новый пароль ещё раз',
+          passwordMismatch: 'Пароли не совпадают'
+        },
+        generated: {
+          successTitle: 'Пользователь создан',
+          successBody: 'Для этого пользователя сгенерирован случайный пароль. Он будет показан только один раз.',
+          usernameLabel: 'Имя пользователя',
+          emailLabel: 'Email',
+          passwordLabel: 'Сгенерированный пароль',
+          copyBtn: 'Скопировать данные аккаунта',
+          copySuccess: 'Данные аккаунта скопированы в буфер обмена',
+          acknowledgeBtn: 'Я сохранил пароль'
+        }
       },
       admins: {
         label: 'Системные администраторы',
@@ -3360,6 +3429,8 @@ export default {
     webFetchStatusSkipped: 'Skipped',
     webFetchErrorCode: 'Error code',
     webFetchRetryable: 'Retryable',
+    webFetchContentRange: 'Символы {start}–{end} из {total}',
+    webFetchPartialContent: 'Часть страницы',
     webFetchSummaryFailed: 'Summary failed',
     lengthChars: '{value} символов',
     lengthThousands: '{value} тыс. символов',
@@ -6449,6 +6520,10 @@ export default {
     clearSelection: 'Снять выделение',
     batchDelete: 'Удалить выбранные',
     confirmBatchDeleteDocument: 'Удалить {count} выбранных документов? Это действие нельзя отменить.',
+    deleteSubmitted: 'Запрос на удаление отправлен. Ожидание завершения.',
+    deletePending: 'Удаление ещё не завершено. Обновите страницу позже, чтобы проверить результат.',
+    deleteTaskFailed: 'Не удалось удалить документы. Проверьте сведения об ошибке и повторите попытку.',
+    deleteStatusUnavailable: 'Не удалось подтвердить результат удаления. Обновите страницу позже, чтобы проверить состояние документов.',
     batchDeleteSuccess: 'Удалено документов: {count}',
     batchDeleteFailed: 'Ошибка пакетного удаления',
     batchTag: 'Пакетная метка',
@@ -6679,7 +6754,7 @@ export default {
       steps: {
         submit: {
           title: 'Создать базу знаний',
-          desc: 'Проверьте тип, название и модели, затем нажмите выделенную кнопку «Создать». Далее подскажем загрузить первый документ.'
+          desc: 'Нажмите «Понятно», чтобы завершить руководство без создания базы знаний. Когда будете готовы, введите название, проверьте тип и модели, затем нажмите «Создать».'
         },
         faq: {
           title: 'Индексация FAQ',
@@ -6842,6 +6917,7 @@ export default {
     }
   },
   menu: {
+    sessionInProgress: 'Диалог выполняется',
     knowledgeBase: 'База знаний',
     agents: 'Агенты',
     organizations: 'Общие пространства',

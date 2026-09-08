@@ -261,6 +261,25 @@ export default {
     confirmRemove: '确认移除'
   },
   integrations: {
+    cli: {
+      title: 'WeKnora CLI',
+      subtitle: '在终端中管理知识库和文档、检索内容并发起问答，也可通过脚本或 MCP 接入 AI 工具。',
+      docs: '查看 CLI 文档',
+      docsHint: '安装说明与完整命令参考',
+      quickstart: '快速开始',
+      installTitle: '安装 CLI',
+      installDesc: '目前支持源码构建，需要 Git 和 Go 1.26+。以下示例适用于 macOS / Linux，PATH 设置仅在当前终端生效；长期使用请将二进制放入 PATH 目录。',
+      connectTitle: '连接当前服务',
+      connectDesc: '创建并启用名为 weknora 的连接配置，然后使用邮箱和密码登录。如果已有同名配置，请更换名称，并同步修改 MCP 示例中的配置名。',
+      verifyTitle: '验证连接',
+      verifyDesc: '检查服务与认证状态，并列出当前账号可访问的知识库。',
+      commandsTitle: '常用命令',
+      commandsDesc: '将 KB_ID 替换为知识库 ID，按需替换文件路径、检索词和问题。上传后的文档需解析完成才能检索。',
+      mcpTitle: '接入 MCP 客户端',
+      mcpDesc: '完成登录后，将以下配置添加到支持 stdio 的 MCP 客户端。若客户端无法找到 weknora，请将 command 改为二进制的绝对路径。',
+      copy: '复制',
+      copied: '已复制',
+    },
     title: '发布集成',
     selectAgentPlaceholder: '请选择智能体',
     selectAgentHint: '请先选择一个智能体',
@@ -548,6 +567,7 @@ export default {
       embed: '网页嵌入',
       api: 'API 集成',
       chrome: 'Chrome 插件',
+      cli: 'CLI',
       claw: 'Claw Skill'
     }
   },
@@ -1312,6 +1332,7 @@ export default {
       readSkill: '读取技能',
       executeSkillScript: '执行技能脚本',
       listSandboxFiles: '列出沙箱文件',
+      readFile: '读取文件',
       readSandboxFile: '读取沙箱文件',
       writeSandboxFile: '写入沙箱文件',
       editSandboxFile: '编辑沙箱文件',
@@ -2322,6 +2343,7 @@ export default {
     enUS: 'English',
     ruRU: 'Русский',
     koKR: '한국어',
+    jaJP: '日本語',
     selectLanguage: '选择语言',
     language: '语言',
     languageDescription: '选择界面显示语言',
@@ -2622,7 +2644,10 @@ export default {
       emptyDescription: '该服务未提供工具或资源',
       requireApproval: '需人工审核',
       requireApprovalTip: '开启后，Agent 调用该工具前会暂停并等待确认，适用于可能改库/删文件等高危操作',
-      approvalSaveFailed: '保存审核设置失败'
+      approvalSaveFailed: '保存审核设置失败',
+      toolEnabled: '启用工具',
+      toolEnabledTip: '关闭后，Agent 不会再看到或调用该工具',
+      toolEnabledSaveFailed: '保存工具开关失败'
     }
   },
   system: {
@@ -2719,6 +2744,7 @@ export default {
           'system.api_key_revoked': '吊销平台 API Key',
           'system.admin_revoked': '回收系统管理员',
           'system.user_password_reset': '重置用户密码',
+          'system.user_created': '创建用户',
           'system.queue_task_retried': '重新执行失败任务',
           'system.queue_task_deleted': '清除失败任务记录',
           'system.queue_task_run_now': '立即执行队列任务',
@@ -2763,6 +2789,49 @@ export default {
         confirmBtn: '确认重置',
         success: '密码已重置，该用户的现有会话已失效',
         failed: '重置密码失败',
+      },
+      createUser: {
+        label: '创建用户',
+        description: '开通一个新的本地用户账号。如果平台的默认空间模式设置为「自动创建个人空间」，该用户会像自助注册的用户一样，同时获得一个个人空间。',
+        action: '创建用户',
+        dialogTitle: '创建新用户',
+        warning: '这是高风险操作。请仔细核对用户名和邮箱——它们将作为该用户登录的唯一凭据。',
+        usernameLabel: '用户名',
+        usernamePlaceholder: '2-50 个字符',
+        emailLabel: '邮箱',
+        emailPlaceholder: '请输入有效的邮箱地址',
+        autoGenerateLabel: '自动生成随机密码',
+        newPasswordLabel: '新密码',
+        newPasswordPlaceholder: '8-32 个字符，包含字母和数字',
+        confirmPasswordLabel: '确认新密码',
+        confirmPasswordPlaceholder: '再次输入新密码',
+        confirmBtn: '创建用户',
+        success: '用户已创建',
+        successIdempotent: '用户已存在，未做任何更改',
+        missingPassword: '用户已创建，但未返回生成的密码。请使用重置密码来恢复访问。',
+        failed: '创建用户失败',
+        validation: {
+          usernameRequired: '请输入用户名',
+          usernameLength: '用户名长度必须为 2-50 个字符',
+          emailRequired: '请输入邮箱',
+          emailInvalid: '请输入有效的邮箱地址',
+          passwordRequired: '请输入新密码',
+          passwordLength: '密码长度必须为 8-32 个字符',
+          passwordLetter: '密码必须包含字母',
+          passwordNumber: '密码必须包含数字',
+          confirmRequired: '请再次输入新密码',
+          passwordMismatch: '两次输入的密码不一致'
+        },
+        generated: {
+          successTitle: '用户已创建',
+          successBody: '已为该用户生成一个随机密码。此密码只会显示一次。',
+          usernameLabel: '用户名',
+          emailLabel: '邮箱',
+          passwordLabel: '生成的密码',
+          copyBtn: '复制账号信息',
+          copySuccess: '账号信息已复制到剪贴板',
+          acknowledgeBtn: '我已保存密码'
+        }
       },
       admins: {
         label: '系统管理员',
@@ -3362,6 +3431,8 @@ export default {
     webFetchStatusSkipped: '已跳过',
     webFetchErrorCode: '错误码',
     webFetchRetryable: '可重试',
+    webFetchContentRange: '字符范围 {start}–{end}，共 {total} 字符',
+    webFetchPartialContent: '部分页面内容',
     webFetchSummaryFailed: '摘要失败',
     lengthChars: '{value} 字',
     lengthThousands: '{value} 千字',
@@ -6731,6 +6802,10 @@ export default {
     clearSelection: '取消选择',
     batchDelete: '批量删除',
     confirmBatchDeleteDocument: '确认删除选中的 {count} 个文档？删除后将无法恢复。',
+    deleteSubmitted: '删除任务已提交，正在等待完成。',
+    deletePending: '删除尚未完成，请稍后刷新查看结果。',
+    deleteTaskFailed: '删除任务失败，请查看文档错误详情后重试。',
+    deleteStatusUnavailable: '暂时无法确认删除结果，请稍后刷新查看文档状态。',
     batchDeleteSuccess: '成功删除 {count} 个文档',
     batchDeleteFailed: '批量删除失败',
     batchTag: '批量打标签',
@@ -6961,7 +7036,7 @@ export default {
       steps: {
         submit: {
           title: '创建知识库',
-          desc: '确认类型、名称与模型已选好后，点击高亮的「创建」按钮。创建成功后将引导你上传第一份文档。'
+          desc: '点击「知道了」结束引导，无需现在创建知识库。准备好后，填写名称、确认类型与模型，再点击「创建」。'
         },
         faq: {
           title: 'FAQ 索引方式',
@@ -7124,6 +7199,7 @@ export default {
     }
   },
   menu: {
+    sessionInProgress: '会话进行中',
     knowledgeBase: '知识库',
     agents: '智能体',
     organizations: '共享空间',

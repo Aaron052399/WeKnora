@@ -261,6 +261,25 @@ export default {
     confirmRemove: '제거 확인'
   },
   integrations: {
+    cli: {
+      title: 'WeKnora CLI',
+      subtitle: '터미널에서 지식 베이스와 문서를 관리하고, 콘텐츠를 검색하고, 질문하세요. CLI 또는 MCP로 스크립트와 AI 도구를 연결할 수 있습니다.',
+      docs: 'CLI 문서 보기',
+      docsHint: '설치 안내 및 전체 명령어 참조',
+      quickstart: '빠른 시작',
+      installTitle: 'CLI 설치',
+      installDesc: 'Git과 Go 1.26+로 소스에서 빌드합니다. 아래 macOS / Linux 예제의 PATH 설정은 현재 터미널에만 적용됩니다. 계속 사용하려면 바이너리를 PATH에 포함된 디렉터리에 배치하세요.',
+      connectTitle: '현재 서버에 연결',
+      connectDesc: 'weknora 프로필을 생성하고 활성화한 후 이메일과 비밀번호로 로그인하세요. 같은 이름의 프로필이 있다면 다른 이름을 사용하고 MCP 예제의 프로필 이름도 변경하세요.',
+      verifyTitle: '연결 확인',
+      verifyDesc: '서버 및 인증 상태를 확인하고 현재 계정으로 접근할 수 있는 지식 베이스를 조회합니다.',
+      commandsTitle: '주요 명령어',
+      commandsDesc: 'KB_ID를 지식 베이스 ID로 바꾸고 파일 경로, 검색어, 질문을 수정하세요. 업로드한 문서는 처리가 완료되어야 검색할 수 있습니다.',
+      mcpTitle: 'MCP 클라이언트 연결',
+      mcpDesc: '로그인 후 stdio를 지원하는 MCP 클라이언트에 아래 설정을 추가하세요. 클라이언트가 weknora를 찾지 못하면 command를 바이너리의 절대 경로로 변경하세요.',
+      copy: '복사',
+      copied: '복사됨',
+    },
     title: '게시 및 통합',
     selectAgentPlaceholder: '에이전트를 선택하세요',
     selectAgentHint: '먼저 에이전트를 선택하세요',
@@ -548,6 +567,7 @@ export default {
       embed: '웹 임베드',
       api: 'API 연동',
       chrome: 'Chrome 확장',
+      cli: 'CLI',
       claw: 'Claw Skill'
     }
   },
@@ -1310,6 +1330,7 @@ export default {
       readSkill: '스킬 읽기',
       executeSkillScript: '스킬 스크립트 실행',
       listSandboxFiles: '샌드박스 파일 목록',
+      readFile: '파일 읽기',
       readSandboxFile: '샌드박스 파일 읽기',
       writeSandboxFile: '샌드박스 파일 쓰기',
       editSandboxFile: '샌드박스 파일 편집',
@@ -2320,6 +2341,7 @@ export default {
     enUS: 'English',
     ruRU: 'Русский',
     koKR: '한국어',
+    jaJP: '日本語',
     selectLanguage: '언어 선택',
     language: '언어',
     languageDescription: '인터페이스 표시 언어 선택',
@@ -2620,7 +2642,10 @@ export default {
       emptyDescription: '이 서비스에서 제공하는 도구 또는 리소스가 없습니다',
       requireApproval: '수동 승인 필요',
       requireApprovalTip: '활성화 시 에이전트가 이 도구를 호출하기 전에 승인을 기다립니다.',
-      approvalSaveFailed: '승인 설정 저장 실패'
+      approvalSaveFailed: '승인 설정 저장 실패',
+      toolEnabled: '도구 활성화',
+      toolEnabledTip: '비활성화하면 에이전트가 이 도구를 보거나 호출하지 않습니다.',
+      toolEnabledSaveFailed: '도구 설정 저장 실패'
     }
   },
   system: {
@@ -2717,6 +2742,7 @@ export default {
           'system.api_key_revoked': '플랫폼 API 키 폐기',
           'system.admin_revoked': '시스템 관리자 회수',
           'system.user_password_reset': '사용자 비밀번호 재설정',
+          'system.user_created': '사용자 생성',
           'system.queue_task_retried': '실패 작업 다시 실행',
           'system.queue_task_deleted': '실패 작업 기록 삭제',
           'system.queue_task_run_now': '큐 작업 즉시 실행',
@@ -2761,6 +2787,49 @@ export default {
         confirmBtn: '재설정 확인',
         success: '비밀번호가 재설정되고 기존 세션이 만료되었습니다',
         failed: '비밀번호 재설정 실패',
+      },
+      createUser: {
+        label: '사용자 생성',
+        description: '새 로컬 사용자 계정을 개설합니다. 플랫폼의 기본 공간 모드가 "개인 공간 자동 생성"으로 설정된 경우, 스스로 가입한 사용자와 마찬가지로 개인 공간도 함께 만들어집니다.',
+        action: '사용자 생성',
+        dialogTitle: '새 사용자 생성',
+        warning: '보안에 민감한 작업입니다. 새 사용자가 로그인할 때 사용할 사용자 이름과 이메일을 신중히 확인하세요.',
+        usernameLabel: '사용자 이름',
+        usernamePlaceholder: '2~50자',
+        emailLabel: '이메일',
+        emailPlaceholder: '올바른 이메일 주소를 입력하세요',
+        autoGenerateLabel: '무작위 비밀번호 자동 생성',
+        newPasswordLabel: '새 비밀번호',
+        newPasswordPlaceholder: '8~32자, 문자와 숫자 포함',
+        confirmPasswordLabel: '새 비밀번호 확인',
+        confirmPasswordPlaceholder: '새 비밀번호를 다시 입력',
+        confirmBtn: '사용자 생성',
+        success: '사용자가 생성되었습니다',
+        successIdempotent: '이미 존재하는 사용자입니다. 변경 사항이 없습니다',
+        missingPassword: '사용자는 생성되었지만 생성된 비밀번호가 반환되지 않았습니다. 비밀번호를 재설정해 접근을 복구하세요.',
+        failed: '사용자 생성 실패',
+        validation: {
+          usernameRequired: '사용자 이름을 입력하세요',
+          usernameLength: '사용자 이름은 2~50자여야 합니다',
+          emailRequired: '이메일을 입력하세요',
+          emailInvalid: '올바른 이메일 주소를 입력하세요',
+          passwordRequired: '새 비밀번호를 입력하세요',
+          passwordLength: '비밀번호는 8~32자여야 합니다',
+          passwordLetter: '비밀번호에 문자가 포함되어야 합니다',
+          passwordNumber: '비밀번호에 숫자가 포함되어야 합니다',
+          confirmRequired: '새 비밀번호를 다시 입력하세요',
+          passwordMismatch: '비밀번호가 일치하지 않습니다'
+        },
+        generated: {
+          successTitle: '사용자가 생성되었습니다',
+          successBody: '이 사용자를 위한 무작위 비밀번호가 생성되었습니다. 이 비밀번호는 한 번만 표시됩니다.',
+          usernameLabel: '사용자 이름',
+          emailLabel: '이메일',
+          passwordLabel: '생성된 비밀번호',
+          copyBtn: '계정 정보 복사',
+          copySuccess: '계정 정보가 클립보드에 복사되었습니다',
+          acknowledgeBtn: '비밀번호를 저장했습니다'
+        }
       },
       admins: {
         label: '시스템 관리자',
@@ -3360,6 +3429,8 @@ export default {
     webFetchStatusSkipped: 'Skipped',
     webFetchErrorCode: 'Error code',
     webFetchRetryable: 'Retryable',
+    webFetchContentRange: '문자 {start}–{end} / 전체 {total}',
+    webFetchPartialContent: '페이지 일부',
     webFetchSummaryFailed: 'Summary failed',
     lengthChars: '{value}자',
     lengthThousands: '{value}천 자',
@@ -6657,6 +6728,10 @@ export default {
     clearSelection: '선택 해제',
     batchDelete: '선택 삭제',
     confirmBatchDeleteDocument: '선택한 {count}개 문서를 삭제하시겠습니까? 삭제 후 복구할 수 없습니다.',
+    deleteSubmitted: '삭제 요청이 제출되었습니다. 완료를 기다리는 중입니다.',
+    deletePending: '삭제가 아직 완료되지 않았습니다. 잠시 후 새로고침하여 결과를 확인하세요.',
+    deleteTaskFailed: '삭제에 실패했습니다. 문서의 오류 세부 정보를 확인한 후 다시 시도하세요.',
+    deleteStatusUnavailable: '삭제 결과를 확인할 수 없습니다. 잠시 후 새로고침하여 문서 상태를 확인하세요.',
     batchDeleteSuccess: '{count}개 문서가 삭제되었습니다',
     batchDeleteFailed: '일괄 삭제 실패',
     batchTag: '일괄 태그',
@@ -6887,7 +6962,7 @@ export default {
       steps: {
         submit: {
           title: '지식 베이스 생성',
-          desc: '유형·이름·모델을 확인한 뒤 강조된 「생성」을 클릭하세요. 이후 첫 문서 업로드를 안내합니다.'
+          desc: '「확인」을 클릭하면 지식 베이스를 생성하지 않고 안내를 마칠 수 있습니다. 준비되면 이름을 입력하고 유형과 모델을 확인한 뒤 「생성」을 클릭하세요.'
         },
         faq: {
           title: 'FAQ 색인',
@@ -7050,6 +7125,7 @@ export default {
     }
   },
   menu: {
+    sessionInProgress: '대화 진행 중',
     knowledgeBase: '지식베이스',
     agents: '에이전트',
     organizations: '공유 공간',

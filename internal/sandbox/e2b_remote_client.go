@@ -92,8 +92,12 @@ func newE2BRemoteClient(
 	// or not a gateway is configured: the two details it rewrites belong to the
 	// envd protocol itself, not to any one deployment. See envd_compat_transport.go.
 	httpClient := &http.Client{
-		Timeout:   timeout,
-		Transport: NewEnvdCompatTransport(transport, DefaultSandboxExecUser),
+		// Command streams share this client with control-plane requests. A
+		// client-wide timeout would override even a longer WithTimeout on Run.
+		Transport: &e2bRPCTimeoutTransport{
+			next:    NewEnvdCompatTransport(transport, DefaultSandboxExecUser),
+			timeout: timeout,
+		},
 	}
 	client, err := e2b.NewClient(e2b.ClientConfig{
 		APIKey:        cfg.E2BAPIKey,
@@ -772,6 +776,9 @@ func (c *E2BRemoteClient) Exec(
 	if request.Timeout < 0 {
 		return nil, e2bInvalidRequest("Exec", "execution timeout cannot be negative", nil)
 	}
+	if request.User == "" {
+		request.User = DefaultSandboxExecUser
+	}
 
 	// The SDK runs every command through `/bin/bash -l -c <cmd>`, so argv mode
 	// is lowered to a quoted shell line and stdin (when present) is piped in
@@ -857,10 +864,12 @@ func (c *E2BRemoteClient) Exec(
 }
 
 // Filesystem operations name DefaultSandboxExecUser explicitly rather than
-// relying on the daemon's default account. It keeps ownership aligned with the
-// account scripts run as, and it is required for interoperability: E2B Cloud
-// falls back to "user" when the request omits it, while other E2B-compatible
-// control planes reject the call outright.
+// relying on the daemon's default account. Naming the user is required for
+// interoperability: E2B Cloud falls back to "user" when the request omits it,
+// while other E2B-compatible control planes reject the call outright. The
+// default account is root, which matches what scripts run as; under
+// one-session-one-sandbox there is no shared volume here to defend with
+// file-mode ownership.
 func (c *E2BRemoteClient) WriteFile(
 	ctx context.Context,
 	handle RemoteSandboxHandle,
@@ -874,7 +883,7 @@ func (c *E2BRemoteClient) WriteFile(
 	if strings.TrimSpace(path) == "" {
 		return e2bInvalidRequest("WriteFile", "path is required", nil)
 	}
-	if _, err := sandbox.Filesystem.WriteBytes(ctx, path, content, e2b.WithFileUser(DefaultSandboxExecUser)); err != nil {
+	if _, err := sandbox.Filesystem.WriteBytes(ctx, path, content, e2b.WithFileUser(remoteFileUser(ctx))); err != nil {
 		return normalizeE2BError("WriteFile", err)
 	}
 	return nil
@@ -892,7 +901,7 @@ func (c *E2BRemoteClient) ReadFile(
 	if strings.TrimSpace(path) == "" {
 		return nil, e2bInvalidRequest("ReadFile", "path is required", nil)
 	}
-	content, err := sandbox.Filesystem.ReadBytes(ctx, path, e2b.WithFileUser(DefaultSandboxExecUser))
+	content, err := sandbox.Filesystem.ReadBytes(ctx, path, e2b.WithFileUser(remoteFileUser(ctx)))
 	if err != nil {
 		return nil, normalizeE2BError("ReadFile", err)
 	}
@@ -911,7 +920,7 @@ func (c *E2BRemoteClient) ListDir(
 	if strings.TrimSpace(path) == "" {
 		return nil, e2bInvalidRequest("ListDir", "path is required", nil)
 	}
-	entries, err := sandbox.Filesystem.List(ctx, path, e2b.WithFileUser(DefaultSandboxExecUser))
+	entries, err := sandbox.Filesystem.List(ctx, path, e2b.WithFileUser(remoteFileUser(ctx)))
 	if err != nil {
 		return nil, normalizeE2BError("ListDir", err)
 	}
@@ -931,19 +940,18 @@ func (c *E2BRemoteClient) ListDir(
 func (c *E2BRemoteClient) MakeDir(
 	ctx context.Context,
 	handle RemoteSandboxHandle,
-	path string,
+	dir string,
 ) error {
 	sandbox, err := e2bHandleSandbox("MakeDir", handle)
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(path) == "" {
+	if strings.TrimSpace(dir) == "" {
 		return e2bInvalidRequest("MakeDir", "path is required", nil)
 	}
-	if err := sandbox.Filesystem.MakeDir(ctx, path, e2b.WithFileUser(DefaultSandboxExecUser)); err != nil {
-		return ignoreExistingDir(normalizeE2BError("MakeDir", err))
-	}
-	return nil
+	return makeDirTree(dir, func(component string) error {
+		return normalizeE2BError("MakeDir", sandbox.Filesystem.MakeDir(ctx, component, e2b.WithFileUser(remoteFileUser(ctx))))
+	})
 }
 
 func (c *E2BRemoteClient) Remove(
@@ -958,7 +966,7 @@ func (c *E2BRemoteClient) Remove(
 	if strings.TrimSpace(path) == "" {
 		return e2bInvalidRequest("Remove", "path is required", nil)
 	}
-	if err := sandbox.Filesystem.Remove(ctx, path, e2b.WithFileUser(DefaultSandboxExecUser)); err != nil {
+	if err := sandbox.Filesystem.Remove(ctx, path, e2b.WithFileUser(remoteFileUser(ctx))); err != nil {
 		return normalizeE2BError("Remove", err)
 	}
 	return nil
@@ -976,7 +984,7 @@ func (c *E2BRemoteClient) Stat(
 	if strings.TrimSpace(path) == "" {
 		return nil, e2bInvalidRequest("Stat", "path is required", nil)
 	}
-	info, err := sandbox.Filesystem.Stat(ctx, path, e2b.WithFileUser(DefaultSandboxExecUser))
+	info, err := sandbox.Filesystem.Stat(ctx, path, e2b.WithFileUser(remoteFileUser(ctx)))
 	if err != nil {
 		return nil, normalizeE2BError("Stat", err)
 	}

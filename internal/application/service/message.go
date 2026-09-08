@@ -125,7 +125,7 @@ func (s *messageService) GetMessage(ctx context.Context, sessionID string, messa
 	}
 
 	logger.Info(ctx, "Message retrieved successfully")
-	return message, nil
+	return s.clarifyReadArtifactVersions(ctx, sessionID, []*types.Message{message})[0], nil
 }
 
 // GetMessagesBySession retrieves paginated messages for a specific session
@@ -155,7 +155,7 @@ func (s *messageService) GetMessagesBySession(ctx context.Context,
 	}
 
 	logger.Infof(ctx, "Retrieved %d messages successfully", len(messages))
-	return messages, nil
+	return s.clarifyReadArtifactVersions(ctx, sessionID, messages), nil
 }
 
 // GetRecentMessagesBySession retrieves the most recent messages from a session
@@ -188,7 +188,7 @@ func (s *messageService) GetRecentMessagesBySession(ctx context.Context,
 	}
 
 	logger.Infof(ctx, "Retrieved %d recent messages successfully", len(messages))
-	return messages, nil
+	return s.clarifyReadArtifactVersions(ctx, sessionID, messages), nil
 }
 
 // GetMessagesBySessionBeforeTime retrieves messages sent before a specific time
@@ -222,7 +222,7 @@ func (s *messageService) GetMessagesBySessionBeforeTime(ctx context.Context,
 	}
 
 	logger.Infof(ctx, "Retrieved %d messages before time successfully", len(messages))
-	return messages, nil
+	return s.clarifyReadArtifactVersions(ctx, sessionID, messages), nil
 }
 
 // UpdateMessage updates an existing message's content or metadata
@@ -384,6 +384,12 @@ func (s *messageService) IndexMessageToKB(ctx context.Context, userQuery string,
 
 	cfg := s.getChatHistoryConfig(ctx)
 	if cfg == nil {
+		// Say why, otherwise an operator who enabled indexing in the UI sees
+		// "indexed messages: 0" with nothing in the logs to explain it: the
+		// stats endpoint only checks Enabled, while indexing additionally
+		// requires an embedding model and an auto-created KB.
+		logger.Infof(ctx, "Skipping message index for message %s: %s",
+			messageID, describeChatHistorySkip(ctx))
 		return
 	}
 
@@ -408,6 +414,30 @@ func (s *messageService) IndexMessageToKB(ctx context.Context, userQuery string,
 	}
 
 	logger.Infof(ctx, "Message indexed to chat history KB: knowledge_id=%s, message_id=%s", knowledge.ID, messageID)
+}
+
+// describeChatHistorySkip reports which chat-history precondition is missing,
+// for the log line emitted when indexing is skipped. ChatHistoryConfig.
+// IsConfigured requires Enabled plus a selected embedding model plus an
+// auto-created KB, so "enabled" alone is not enough to index.
+func describeChatHistorySkip(ctx context.Context) string {
+	tenant, ok := types.TenantInfoFromContext(ctx)
+	if !ok {
+		return "no tenant in context"
+	}
+	cfg := tenant.ChatHistoryConfig
+	switch {
+	case cfg == nil:
+		return "chat history config not set"
+	case !cfg.Enabled:
+		return "chat history indexing disabled"
+	case cfg.EmbeddingModelID == "":
+		return "enabled but no embedding model selected"
+	case cfg.KnowledgeBaseID == "":
+		return "enabled but chat history knowledge base not created yet"
+	default:
+		return "chat history config incomplete"
+	}
 }
 
 // DeleteMessageKnowledge deletes the Knowledge entry associated with a message from the chat history KB.

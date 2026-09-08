@@ -46,6 +46,21 @@ func TestRegistryProtocolOwnsResourceHandleRules(t *testing.T) {
 	require.Contains(t, prompt, "res://NNNN")
 }
 
+func TestOutputFilesAreRenderedOnlyForLiveModelResults(t *testing.T) {
+	result := &types.ToolResult{Success: true, Output: "generated", OutputFiles: []string{"sandbox:比赛信息.pptx"}}
+	registry := NewRegistry(true)
+	require.Equal(t, "generated\nOutput files: `sandbox:比赛信息.pptx`", registry.ModelToolResultForTool("shell_exec", result))
+	require.Equal(t, "generated", result.Output)
+	encoded, err := json.Marshal(result)
+	require.NoError(t, err)
+	var restored types.ToolResult
+	require.NoError(t, json.Unmarshal(encoded, &restored))
+	require.Equal(t, "generated", registry.ModelToolResultForTool("shell_exec", &restored))
+	result.Success = false
+	result.Error = "timeout"
+	require.Contains(t, registry.ModelToolResultForTool("shell_exec", result), "sandbox:比赛信息.pptx")
+}
+
 func TestRegistryAuditsUnresolvedAndPartiallyResolvedToolHandles(t *testing.T) {
 	registry := NewRegistry(true)
 	registry.RegisterKnowledgeBase("kb-real")
@@ -331,7 +346,7 @@ func TestRegistryDecodesCanonicalArgumentsForEveryBuiltInReferenceTool(t *testin
 		{"data analysis SQL", "data_analysis", `{"knowledge_id":"d1","sql":"SELECT * FROM 'd1'"}`, `{"knowledge_id":"doc-real","sql":"SELECT * FROM 'doc-real'"}`},
 		{"data schema", "data_schema", `{"knowledge_id":"d1"}`, `{"knowledge_id":"doc-real"}`},
 		{"database SQL", "database_query", `{"sql":"SELECT * FROM chunks WHERE knowledge_base_id='b1'"}`, `{"sql":"SELECT * FROM chunks WHERE knowledge_base_id='kb-real'"}`},
-		{"web fetch", "web_fetch", `{"items":[{"url":"w1","prompt":"read"}]}`, `{"items":[{"url":"https://example.com/page","prompt":"read"}]}`},
+		{"web fetch", "web_fetch", `{"items":[{"url":"w1"}]}`, `{"items":[{"url":"https://example.com/page"}]}`},
 		{"wiki source", "wiki_read_source_doc", `{"knowledge_id":"d1"}`, `{"knowledge_id":"doc-real"}`},
 		{"wiki source refs", "wiki_write_page", `{"slug":"res://0001","source_refs":["d1"]}`, `{"slug":"summary/00000000-0000-0000-0000-000000000001","source_refs":["doc-real"]}`},
 		{"wiki suspected refs", "wiki_flag_issue", `{"slug":"concept/a","suspected_knowledge_ids":["d1"]}`, `{"slug":"concept/a","suspected_knowledge_ids":["doc-real"]}`},

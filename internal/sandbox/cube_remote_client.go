@@ -70,14 +70,19 @@ func NewCubeRemoteClientWithPool(
 		sdkCfg.ProxyScheme = proxyScheme
 	}
 
-	var opts []cubesandbox.ClientOption
-	if pool != nil {
-		httpClient := &http.Client{
-			Timeout:   httpTimeout,
-			Transport: pool.RoundTripperFor(config),
-		}
-		opts = append(opts, cubesandbox.WithHTTPClient(httpClient))
+	if pool == nil {
+		pool = NewSandboxGatewayTransportPoolWithPolicy(nil, OutboundURLPolicy{
+			AllowPrivate: config.AllowPrivateEndpoints,
+		})
 	}
+	// Route both planes through the existing gateway pool while correcting
+	// the SDK's root-default filesystem identity.
+	routingConfig := *config
+	routingConfig.Type = SandboxTypeCube
+	httpClient := &http.Client{
+		Transport: &cubeFilesystemTransport{next: pool.RoundTripperFor(&routingConfig), timeout: httpTimeout},
+	}
+	opts := []cubesandbox.ClientOption{cubesandbox.WithHTTPClient(httpClient)}
 
 	return &CubeRemoteClient{
 		config: config,
@@ -633,6 +638,9 @@ func (c *CubeRemoteClient) Exec(
 	if request.Timeout < 0 {
 		return nil, cubeInvalidRequest("Exec", "execution timeout cannot be negative", nil)
 	}
+	if request.User == "" {
+		request.User = DefaultSandboxExecUser
+	}
 
 	execCtx := ctx
 	cancel := func() {}
@@ -656,9 +664,11 @@ func (c *CubeRemoteClient) Exec(
 	logCubeDataPlaneExec(ctx, c, sb, request.User, line)
 
 	startedAt := time.Now()
-	// User comes from the neutral request rather than being hardcoded: running
-	// everything as root silently defeats file-mode protections on shared
-	// volumes, and made this adapter behave differently from E2B's.
+	// User comes from the neutral request rather than being hardcoded, so the
+	// account a Cube exec lands on matches the other backends. The default is
+	// now root (see DefaultSandboxExecUser); the shared-volume concern that
+	// once made root here a footgun no longer applies under
+	// one-session-one-sandbox.
 	sdkResult, execErr := sb.Commands().Run(execCtx, line, cubesandbox.CommandOptions{
 		Timeout: request.Timeout,
 		Envs:    envs,
@@ -780,16 +790,16 @@ func normaliseFileType(t string) string {
 func (c *CubeRemoteClient) MakeDir(
 	ctx context.Context,
 	handle RemoteSandboxHandle,
-	path string,
+	dir string,
 ) error {
 	sb, err := cubeHandleSandbox("MakeDir", handle)
 	if err != nil {
 		return err
 	}
-	if _, err := sb.Files().MakeDir(ctx, path); err != nil {
-		return ignoreExistingDir(normalizeCubeError("MakeDir", err))
-	}
-	return nil
+	return makeDirTree(dir, func(component string) error {
+		_, err := sb.Files().MakeDir(ctx, component)
+		return normalizeCubeError("MakeDir", err)
+	})
 }
 
 func (c *CubeRemoteClient) Remove(

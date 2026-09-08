@@ -18291,7 +18291,7 @@ const docTemplate = `{
                     }
                 },
                 "skills_selection_mode": {
-                    "description": "===== Skills Settings (only for smart-reasoning mode) =====\nSkills selection mode: \"all\" = all preloaded skills, \"selected\" = specific skills, \"none\" = no skills",
+                    "description": "===== Skills Settings (only for smart-reasoning mode) =====\nSkills selection mode: \"all\" = all installed skills, \"selected\" = specific skills, \"none\" = no skills",
                     "type": "string"
                 },
                 "supported_file_types": {
@@ -22622,7 +22622,8 @@ const docTemplate = `{
                 "keenable",
                 "zhipu",
                 "exa",
-                "metaso"
+                "metaso",
+                "bocha"
             ],
             "x-enum-varnames": [
                 "WebSearchProviderTypeBing",
@@ -22635,7 +22636,8 @@ const docTemplate = `{
                 "WebSearchProviderTypeKeenable",
                 "WebSearchProviderTypeZhipu",
                 "WebSearchProviderTypeExa",
-                "WebSearchProviderTypeMetaso"
+                "WebSearchProviderTypeMetaso",
+                "WebSearchProviderTypeBocha"
             ]
         },
         "github_com_Tencent_WeKnora_internal_types.WikiConfig": {

@@ -91,31 +91,18 @@ func TestSessionBoundManagerExecuteEnsuresOutputDir(t *testing.T) {
 		"the attachment directory is prepared alongside the artifact one; a "+
 			"snapshot-derived image carries neither")
 	require.Equal(t, DefaultSandboxExecUser, execs[0].User,
-		"chown follows symlinks, so a root-run bootstrap can be aimed at /etc by "+
-			"a session that swaps its artifact directory for a link; running as the "+
-			"sandbox account is what makes that attempt fail")
+		"the bootstrap names its account like every other caller, so the directories "+
+			"it creates belong to whoever the execs that follow will run as")
 }
 
-// A directory the sandbox account cannot write is the state an image built
-// before /workspace was handed to that account leaves behind, and the state a
-// provider whose filesystem API runs as root recreates. The bootstrap has to
-// repair it without privileges, which is why it replaces the directory rather
-// than chowning it.
-func TestWorkspaceBootstrapCommandRepairsUnwritableDirs(t *testing.T) {
-	t.Parallel()
-
+func TestWorkspaceBootstrapPreservesExistingData(t *testing.T) {
 	cmd := workspaceBootstrapCommand(SessionInputRoot, SessionOutputRoot)
 	require.Contains(t, cmd, "for d in /workspace/input /workspace/output")
-	require.Contains(t, cmd, `mkdir -p "$d"`)
-	require.Contains(t, cmd, `[ -d "$d" ] && [ -w "$d" ] && [ ! -L "$d" ]`,
-		"directories that already belong to the account are left alone")
-	require.Contains(t, cmd, `[ -L "$d" ]`,
-		"a symlink left at the path must be removed, not followed")
-	require.Contains(t, cmd, `mv -f "$d"`,
-		"an unwritable directory is moved aside; the account owns the parent, "+
-			"so this needs no privileges")
-	require.NotContains(t, cmd, "chown",
-		"nothing here may depend on privileges the sandbox account lacks")
+	require.Contains(t, cmd, `mkdir -p -- "$d"`)
+	require.Contains(t, cmd, `[ -L "$d" ]`)
+	for _, destructive := range []string{"mv ", "rm ", "chown ", "chmod "} {
+		require.NotContains(t, cmd, destructive)
+	}
 }
 
 // The agent can delete /workspace/output between turns. Preparing only once
@@ -205,7 +192,7 @@ func TestCleanSessionWorkDirStillRejectsArbitraryPathsInInstallMode(t *testing.T
 	require.Error(t, err, "install mode widens the allowlist, it does not remove it")
 }
 
-func TestExecShellCommandWithOptionsRunsAsRootOnlyWhenAsked(t *testing.T) {
+func TestExecShellCommandWithOptionsSelectsMaintenanceBootstrap(t *testing.T) {
 	ctx := context.WithValue(context.Background(), types.TenantIDContextKey, uint64(10000))
 	mgr, client := newSessionManagerExecTestHarness(t)
 
@@ -213,7 +200,8 @@ func TestExecShellCommandWithOptionsRunsAsRootOnlyWhenAsked(t *testing.T) {
 	require.NoError(t, err)
 	last := lastExecRequest(t, client)
 	require.Equal(t, DefaultSandboxExecUser, last.User,
-		"ordinary shell_exec must stay on the non-root sandbox account")
+		"ordinary shell_exec must stay on the default sandbox account rather than "+
+			"taking the install-mode escape")
 
 	skillDir := mustSkillDir(t, "sk-1")
 	_, err = mgr.ExecShellCommandWithOptions(ctx, "sess-1", "echo hi", ShellExecOptions{
@@ -225,6 +213,13 @@ func TestExecShellCommandWithOptionsRunsAsRootOnlyWhenAsked(t *testing.T) {
 	last = lastExecRequest(t, client)
 	require.Equal(t, "root", last.User)
 	require.Equal(t, skillDir, last.WorkDir)
+	client.mu.Lock()
+	execs := append([]RemoteExecRequest(nil), client.execRequests...)
+	client.mu.Unlock()
+	require.Len(t, execs, 4, "each command has one bootstrap and one execution")
+	ordinaryBootstrap := workspaceBootstrapCommand(SessionInputRoot, SessionOutputRoot, SessionWorkspaceRoot)
+	require.Equal(t, ordinaryBootstrap, execs[0].Command)
+	require.Equal(t, workspaceBootstrapCommand(skillDir), execs[2].Command)
 }
 
 func TestExecShellCommandKeepsOrdinaryRemoteRequest(t *testing.T) {
@@ -246,7 +241,7 @@ func TestExecShellCommandKeepsOrdinaryRemoteRequest(t *testing.T) {
 	}, last)
 }
 
-func TestExecShellCommandEmptyWorkDirLeavesRemoteRequestUnset(t *testing.T) {
+func TestExecShellCommandEmptyWorkDirUsesWorkspace(t *testing.T) {
 	ctx := context.WithValue(context.Background(), types.TenantIDContextKey, uint64(10000))
 	mgr, client := newSessionManagerExecTestHarness(t)
 
@@ -254,7 +249,7 @@ func TestExecShellCommandEmptyWorkDirLeavesRemoteRequestUnset(t *testing.T) {
 	require.NoError(t, err)
 
 	last := lastExecRequest(t, client)
-	require.Empty(t, last.WorkDir)
+	require.Equal(t, SessionWorkspaceRoot, last.WorkDir)
 	require.Equal(t, DefaultSandboxExecUser, last.User)
 }
 
@@ -345,8 +340,9 @@ func TestCleanSessionWorkspaceWritePathAcceptsWorkspaceAndRefusesInput(t *testin
 	require.Error(t, err)
 	_, err = cleanSessionWorkspaceWritePath("/etc/passwd")
 	require.Error(t, err)
-	_, err = cleanSessionWorkspaceWritePath("relative.py")
-	require.Error(t, err)
+	got, err = cleanSessionWorkspaceWritePath("relative.py")
+	require.NoError(t, err)
+	require.Equal(t, "/workspace/relative.py", got)
 }
 
 func TestWriteSessionWorkspaceFileWritesUnderOutput(t *testing.T) {
@@ -359,10 +355,36 @@ func TestWriteSessionWorkspaceFileWritesUnderOutput(t *testing.T) {
 
 	client.mu.Lock()
 	writes := append([]fakeRemoteWriteFile(nil), client.writeFiles...)
+	execs := len(client.execRequests)
 	client.mu.Unlock()
 	require.Len(t, writes, 1)
 	require.Equal(t, "/workspace/output/generate_ppt.py", writes[0].path)
 	require.Equal(t, []byte("print(1)\n"), writes[0].content)
+	require.Equal(t, 1, execs)
+}
+
+func TestWriteSessionWorkspaceFilesPreparesLayoutOnce(t *testing.T) {
+	ctx := context.WithValue(context.Background(), types.TenantIDContextKey, uint64(10000))
+	mgr, client := newSessionManagerExecTestHarness(t)
+
+	require.NoError(t, mgr.WriteSessionWorkspaceFiles(ctx, "sess-1", []SessionWorkspaceFile{
+		{Path: "/workspace/.skills/host/rev/SKILL.md", Content: []byte("skill")},
+		{Path: "/workspace/.skills/host/rev/scripts/a.py", Content: []byte("a")},
+		{Path: "/workspace/.skills/host/rev/scripts/b.py", Content: []byte("b")},
+	}))
+
+	client.mu.Lock()
+	writes := append([]fakeRemoteWriteFile(nil), client.writeFiles...)
+	execs := append([]RemoteExecRequest(nil), client.execRequests...)
+	dirs := append([]string(nil), client.makeDirPaths...)
+	client.mu.Unlock()
+	require.Len(t, writes, 3)
+	require.Len(t, execs, 1, "workspace bootstrap must run once for the whole tree")
+	require.Contains(t, execs[0].Command, "mkdir -p")
+	require.ElementsMatch(t, []string{
+		"/workspace/.skills/host/rev",
+		"/workspace/.skills/host/rev/scripts",
+	}, dirs)
 }
 
 func TestWriteSessionWorkspaceFileRefusesSessionInput(t *testing.T) {

@@ -1,5 +1,6 @@
 export default {
   menu: {
+    sessionInProgress: 'Conversation in progress',
     knowledgeBase: 'Knowledge Base',
     agents: 'Agents',
     organizations: 'Shared Spaces',
@@ -194,7 +195,7 @@ export default {
         },
         submit: {
           title: 'Create the knowledge base',
-          desc: 'When type, name, and models look correct, click the highlighted Create button. You will then be guided to upload your first document.'
+          desc: 'Click Got it to finish the guide without creating a knowledge base. When ready, enter a name, confirm the type and models, then click Create.'
         }
       }
     },
@@ -592,6 +593,10 @@ export default {
     clearSelection: 'Deselect all',
     batchDelete: 'Delete selected',
     confirmBatchDeleteDocument: 'Delete {count} selected documents? This action cannot be undone.',
+    deleteSubmitted: 'Delete request submitted. Waiting for completion.',
+    deletePending: 'Deletion is still pending. Refresh later to check the result.',
+    deleteTaskFailed: 'Deletion failed. Check the document error details and try again.',
+    deleteStatusUnavailable: 'Could not confirm the deletion result. Refresh later to check the document status.',
     batchDeleteSuccess: 'Deleted {count} documents',
     batchDeleteFailed: 'Batch delete failed',
     batchTag: 'Batch Tag',
@@ -1048,7 +1053,7 @@ export default {
       sandboxBackendMissing: 'Config deleted',
       sandboxNoConfigs: 'This workspace has no sandbox yet, so skill scripts will not run.',
       skillsInfoTitle: 'How Skills and the sandbox work together',
-      skillsInfoContent: 'Skills are preloaded knowledge modules whose scripts run in the selected sandbox. The list comes from skills installed there. Once a session sandbox exists, its attachments, artifacts, and teardown stay pinned to the config it was created on — changing the sandbox only affects later sessions.'
+      skillsInfoContent: 'Skills are knowledge modules whose scripts run in the selected sandbox. The list comes from skills installed there. Once a session sandbox exists, its attachments, artifacts, and teardown stay pinned to the config it was created on — changing the sandbox only affects later sessions.'
     },
     selector: {
       title: 'Select Agent',
@@ -3438,6 +3443,8 @@ export default {
     webFetchStatusSkipped: 'Skipped',
     webFetchErrorCode: 'Error code',
     webFetchRetryable: 'Retryable',
+    webFetchContentRange: 'Characters {start}–{end} of {total}',
+    webFetchPartialContent: 'Partial page',
     webFetchSummaryFailed: 'Summary failed',
     lengthChars: '{value} characters',
     lengthThousands: '{value}k characters',
@@ -4069,6 +4076,49 @@ export default {
         success: 'Password reset; the user\'s existing sessions were revoked',
         failed: 'Failed to reset password',
       },
+      createUser: {
+        label: 'Create user',
+        description: 'Provision a new local user account. If the platform\'s default workspace mode is set to "create personal", the user gets a personal workspace just like a self-registered user would.',
+        action: 'Create user',
+        dialogTitle: 'Create a new user',
+        warning: 'This is a high-risk action. Verify the username and email carefully — they are how the new user will sign in.',
+        usernameLabel: 'Username',
+        usernamePlaceholder: '2-50 characters',
+        emailLabel: 'Email',
+        emailPlaceholder: 'Enter a valid email address',
+        autoGenerateLabel: 'Auto-generate a random password',
+        newPasswordLabel: 'New password',
+        newPasswordPlaceholder: '8-32 characters, including letters and numbers',
+        confirmPasswordLabel: 'Confirm new password',
+        confirmPasswordPlaceholder: 'Enter the new password again',
+        confirmBtn: 'Create user',
+        success: 'User created',
+        successIdempotent: 'User already existed; no changes made',
+        missingPassword: 'User was created but the generated password was not returned. Reset the password to recover access.',
+        failed: 'Failed to create user',
+        validation: {
+          usernameRequired: 'Enter a username',
+          usernameLength: 'Username must be 2-50 characters',
+          emailRequired: 'Enter an email address',
+          emailInvalid: 'Enter a valid email address',
+          passwordRequired: 'Enter a new password',
+          passwordLength: 'Password must be 8-32 characters',
+          passwordLetter: 'Password must contain a letter',
+          passwordNumber: 'Password must contain a number',
+          confirmRequired: 'Enter the new password again',
+          passwordMismatch: 'The passwords do not match'
+        },
+        generated: {
+          successTitle: 'User created',
+          successBody: 'A random password was generated for this user. It will only be shown once.',
+          usernameLabel: 'Username',
+          emailLabel: 'Email',
+          passwordLabel: 'Generated password',
+          copyBtn: 'Copy account details',
+          copySuccess: 'Account details copied to clipboard',
+          acknowledgeBtn: 'I have saved the password'
+        }
+      },
       bulkApply: {
         label: 'Apply to all existing workspaces',
         tooltip: 'Saving the value only affects new workspaces by default; click here to also overwrite every existing workspace.',
@@ -4108,6 +4158,7 @@ export default {
           'system.api_key_revoked': 'Platform API key revoked',
           'system.admin_revoked': 'System admin revoked',
           'system.user_password_reset': 'User password reset',
+          'system.user_created': 'User created',
           'system.queue_task_retried': 'Failed task run again',
           'system.queue_task_deleted': 'Failed task record cleared',
           'system.queue_task_run_now': 'Queue task run now',
@@ -4155,7 +4206,10 @@ export default {
       emptyDescription: 'This service did not provide tools or resources',
       requireApproval: 'Require human approval',
       requireApprovalTip: 'When enabled, the agent pauses before calling this tool until you approve — use for DB writes, deletes, etc.',
-      approvalSaveFailed: 'Failed to save approval setting'
+      approvalSaveFailed: 'Failed to save approval setting',
+      toolEnabled: 'Enable tool',
+      toolEnabledTip: 'When disabled, the agent will not see or call this tool',
+      toolEnabledSaveFailed: 'Failed to save tool setting'
     }
   },
   error: {
@@ -4446,6 +4500,7 @@ export default {
     enUS: 'English',
     ruRU: 'Русский',
     koKR: '한국어',
+    jaJP: '日本語',
     selectLanguage: 'Select Language',
     language: 'Language',
     languageDescription: 'Select interface display language',
@@ -5444,6 +5499,7 @@ export default {
       readSkill: 'Read Skill',
       executeSkillScript: 'Execute Skill Script',
       listSandboxFiles: 'List sandbox files',
+      readFile: 'Read file',
       readSandboxFile: 'Read sandbox file',
       writeSandboxFile: 'Write sandbox file',
       editSandboxFile: 'Edit sandbox file',
@@ -6218,12 +6274,32 @@ export default {
     }
   },
   integrations: {
+    cli: {
+      title: 'WeKnora CLI',
+      subtitle: 'Manage knowledge bases and documents, search content, and ask questions from your terminal. Connect scripts and AI tools through the CLI or MCP.',
+      docs: 'CLI documentation',
+      docsHint: 'Installation and complete command reference',
+      quickstart: 'Quick start',
+      installTitle: 'Install the CLI',
+      installDesc: 'Build from source with Git and Go 1.26+. This macOS / Linux example updates PATH for the current terminal only. For regular use, place the binary in a directory on PATH.',
+      connectTitle: 'Connect to this server',
+      connectDesc: 'Create and activate a profile named weknora, then sign in with your email and password. If that profile already exists, choose another name and update the MCP example to match.',
+      verifyTitle: 'Verify the connection',
+      verifyDesc: 'Check server and authentication status, then list the knowledge bases your account can access.',
+      commandsTitle: 'Common commands',
+      commandsDesc: 'Replace KB_ID with a knowledge base ID and adapt the file path, query, and question. Uploaded documents must finish processing before they can be searched.',
+      mcpTitle: 'Connect an MCP client',
+      mcpDesc: 'After signing in, add this configuration to an MCP client that supports stdio. If the client cannot find weknora, set command to the absolute path of the binary.',
+      copy: 'Copy',
+      copied: 'Copied',
+    },
     title: 'Publish & Integrations',
     tabs: {
       im: 'IM Integration',
       embed: 'Web Embed',
       api: 'API Integration',
       chrome: 'Chrome Extension',
+      cli: 'CLI',
       claw: 'Claw Skill'
     },
     api: {

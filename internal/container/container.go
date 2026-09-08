@@ -428,7 +428,6 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Provide(handler.NewStorageBackendHandler))
 	must(container.Provide(handler.NewCustomAgentHandler))
 	must(container.Provide(handler.NewUserResourceFavoriteHandler))
-	must(container.Provide(service.NewSkillService))
 	must(container.Provide(func(s *service.TenantSkillService) *handler.SkillHandler {
 		return handler.NewSkillHandler(s, s)
 	}))
@@ -1629,6 +1628,8 @@ func registerWebSearchProviders(registry *infra_web_search.Registry) {
 	registry.Register("zhipu", infra_web_search.NewZhipuProvider)
 	registry.Register("exa", infra_web_search.NewExaProvider)
 	registry.Register("metaso", infra_web_search.NewMetasoProvider)
+	registry.Register("bocha", infra_web_search.NewBochaProvider)
+	registry.Register("brave", infra_web_search.NewBraveProvider)
 }
 
 // registerIMService registers adapter factories, loads enabled channels, and

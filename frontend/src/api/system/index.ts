@@ -400,14 +400,23 @@ export interface CreateSystemUserResponse {
   generated_password?: string
 }
 
+export interface CreateSystemUserResult extends CreateSystemUserResponse {
+  /**
+   * True only when this call created the account (HTTP 201), false on the
+   * idempotent 200 retry (identity already existed).
+   */
+  created: boolean
+}
+
 /**
  * Provision a new local user account (SystemAdmin only).
- * Backend returns the unwrapped CreateSystemUserResponse body.
- * Responses 201 on success.
+ * The backend answers 201 on create and 200 on the idempotent retry with
+ * the same CreateSystemUserResponse body. The status is projected onto
+ * `created`.
  */
-export async function createSystemUser(req: CreateSystemUserRequest): Promise<CreateSystemUserResponse> {
-  const response = await post('/api/v1/system/admin/users/create', req)
-  return response as unknown as CreateSystemUserResponse
+export async function createSystemUser(req: CreateSystemUserRequest): Promise<CreateSystemUserResult> {
+  const response = await post<CreateSystemUserResponse>('/api/v1/system/admin/users/create', req)
+  return { ...response, created: response.$httpStatus === 201 }
 }
 
 // ---- System Settings (P1) ----
