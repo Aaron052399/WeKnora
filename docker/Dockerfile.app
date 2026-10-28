@@ -21,6 +21,8 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --pr
 # 国内网络直连 crates.io 不稳定（DNS 死/SSL EOF/慢），cargo 走 rsproxy 镜像源
 ARG CARGO_INDEX_ARG=sparse+https://rsproxy.cn/index/
 ENV CARGO_REGISTRIES_CRATES_IO_INDEX=${CARGO_INDEX_ARG}
+# rustup 工具链下载同样走 rsproxy（build_browserskill.sh 内有自己的 rustup-init 调用）
+ENV RUSTUP_DIST_SERVER=https://rsproxy.cn RUSTUP_UPDATE_ROOT=https://rsproxy.cn/rustup
 # browserskill 内 pnpm 装依赖同样切国内源（pnpm 认 npm_config_registry）
 ARG NPM_REGISTRY=https://registry.npmmirror.com
 ENV npm_config_registry=${NPM_REGISTRY}
