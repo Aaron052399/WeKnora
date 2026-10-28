@@ -21,6 +21,9 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --pr
 # 国内网络直连 crates.io 不稳定（DNS 死/SSL EOF/慢），cargo 走 rsproxy 镜像源
 ARG CARGO_INDEX_ARG=sparse+https://rsproxy.cn/index/
 ENV CARGO_REGISTRIES_CRATES_IO_INDEX=${CARGO_INDEX_ARG}
+# browserskill 内 pnpm 装依赖同样切国内源（pnpm 认 npm_config_registry）
+ARG NPM_REGISTRY=https://registry.npmmirror.com
+ENV npm_config_registry=${NPM_REGISTRY}
 COPY scripts/build_browserskill.sh scripts/browserskill-release.json ./scripts/
 ARG TARGETOS
 ARG TARGETARCH
