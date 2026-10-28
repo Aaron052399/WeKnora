@@ -303,10 +303,10 @@
             v-model="advancedTimeoutText"
             type="number"
             :min="1"
-            :max="300"
+            :max="600"
             placeholder="30"
             class="number-input"
-            @blur="onAdvancedNumberBlur('timeout', 30, 1, 300)"
+            @blur="onAdvancedNumberBlur('timeout', 30, 1, 600)"
           >
             <template #suffix>
               <span class="number-input__unit">{{ t('mcpServiceDialog.unitSecond', '秒') }}</span>
