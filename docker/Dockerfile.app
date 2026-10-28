@@ -18,6 +18,9 @@ RUN if [ -n "$APK_MIRROR_ARG" ]; then \
 ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo
 ENV PATH=/usr/local/cargo/bin:$PATH
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+# 国内网络直连 crates.io 不稳定（DNS 死/SSL EOF/慢），cargo 走 rsproxy 镜像源
+ARG CARGO_INDEX_ARG=sparse+https://rsproxy.cn/index/
+ENV CARGO_REGISTRIES_CRATES_IO_INDEX=${CARGO_INDEX_ARG}
 COPY scripts/build_browserskill.sh scripts/browserskill-release.json ./scripts/
 ARG TARGETOS
 ARG TARGETARCH
