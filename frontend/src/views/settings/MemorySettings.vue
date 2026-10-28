@@ -4,17 +4,17 @@
       <div class="section-header-titlewrap">
         <h2>{{ t('memorySettings.title') }}</h2>
         <t-popup
-          placement="bottom-start"
+          placement="bottom-left"
           trigger="hover"
+          show-arrow
           overlay-class-name="memory-usage-popup-overlay"
         >
           <button
             type="button"
             class="usage-trigger-btn"
             :aria-label="t('memorySettings.usage.iconHint')"
-            :title="t('memorySettings.usage.iconHint')"
           >
-            <t-icon name="info-circle" size="16px" />
+            <t-icon name="help-circle" size="16px" />
           </button>
           <template #content>
             <div class="usage-popup">
@@ -157,12 +157,13 @@
             <span class="status-tab-label">
               <t-icon :name="tabIcon(value)" size="14px" />
               <span>{{ tabLabel(value) }}</span>
+              <span class="status-tab-count">{{ tabCount(value) }}</span>
             </span>
           </template>
         </t-tab-panel>
       </t-tabs>
 
-      <t-loading :loading="loading">
+      <t-loading :loading="loading" class="memory-results">
         <div v-if="listIsEmpty" class="empty">
           <p class="empty-title">
             {{ emptyTitle }}
@@ -259,22 +260,7 @@
         <ul v-else-if="isItems && items.length > 0" class="memory-list">
           <li v-for="item in items" :key="item.id" class="memory-item">
             <div class="memory-main">
-              <div v-if="editingId === item.id" class="memory-edit">
-                <t-textarea
-                  v-model="editingContent"
-                  :autosize="{ minRows: 2, maxRows: 6 }"
-                  @keydown.enter.ctrl="handleSaveEdit(item)"
-                />
-                <div class="memory-edit-actions">
-                  <t-button size="small" variant="outline" @click="editingId = ''">
-                    {{ t('common.cancel') }}
-                  </t-button>
-                  <t-button size="small" theme="primary" @click="handleSaveEdit(item)">
-                    {{ t('common.save') }}
-                  </t-button>
-                </div>
-              </div>
-              <p v-else class="memory-content" :class="{ inactive: isRetired(item) }">
+              <p class="memory-content" :class="{ inactive: isRetired(item) }">
                 {{ item.content }}
               </p>
               <div class="memory-meta">
@@ -307,18 +293,51 @@
                   {{ t('memorySettings.rejectGuess') }}
                 </t-button>
               </template>
-              <t-button
+              <t-popup
                 v-if="item.status === 'active'"
-                size="small"
-                theme="default"
-                variant="text"
-                shape="square"
-                :disabled="!canWrite"
-                :title="t('common.edit')"
-                @click="startEdit(item)"
+                :visible="editingId === item.id"
+                trigger="click"
+                placement="bottom-right"
+                destroy-on-close
+                @visible-change="(visible: boolean) => { if (visible) startEdit(item); else editingId = '' }"
               >
-                <template #icon><t-icon name="edit" /></template>
-              </t-button>
+                <t-button
+                  size="small"
+                  theme="default"
+                  variant="text"
+                  shape="square"
+                  :disabled="!canWrite"
+                  :title="t('common.edit')"
+                  :aria-label="t('common.edit')"
+                >
+                  <template #icon><t-icon name="edit" /></template>
+                </t-button>
+                <template #content>
+                  <div class="memory-edit-popup" @click.stop @keydown.esc="editingId = ''">
+                    <div class="memory-edit-title">{{ t('common.edit') }}</div>
+                    <t-textarea
+                      v-model="editingContent"
+                      :aria-label="t('memorySettings.addContentLabel')"
+                      :autosize="{ minRows: 3, maxRows: 8 }"
+                      autofocus
+                      @keydown.enter.ctrl.prevent="handleSaveEdit(item)"
+                      @keydown.enter.meta.prevent="handleSaveEdit(item)"
+                    />
+                    <div class="memory-edit-footer">
+                      <span class="memory-edit-kind">{{ kindLabel(item.kind) }}</span>
+                      <div class="memory-edit-actions">
+                        <t-button size="small" theme="default" variant="text" @click="editingId = ''">
+                          {{ t('common.cancel') }}
+                        </t-button>
+                        <t-button size="small" theme="primary" :disabled="!editingContent.trim()"
+                          @click="handleSaveEdit(item)">
+                          {{ t('common.save') }}
+                        </t-button>
+                      </div>
+                    </div>
+                  </div>
+                </template>
+              </t-popup>
               <!-- Rejecting a guess already drops it and remembers the refusal, so a
                    delete button on a pending row is a weaker duplicate of "No". -->
               <t-popconfirm
@@ -335,6 +354,7 @@
                   theme="danger"
                   variant="text"
                   shape="square"
+                  :style="{ visibility: editingId === item.id ? 'hidden' : undefined }"
                   :title="t('common.delete')"
                 >
                   <template #icon><t-icon name="delete" /></template>
@@ -448,13 +468,15 @@ const listIsEmpty = computed(() => {
 })
 
 const tabLabel = (value: MemoryListTab) => {
-  if (value === 'tracking') {
-    return `${t('memorySettings.statusTracking')}(${trackingCount.value})`
-  }
-  if (value === 'documents') {
-    return `${t('memorySettings.statusDocuments')}(${documentCount.value})`
-  }
-  return `${t(statusLabelKeys[value])}(${counts.value[value]})`
+  if (value === 'tracking') return t('memorySettings.statusTracking')
+  if (value === 'documents') return t('memorySettings.statusDocuments')
+  return t(statusLabelKeys[value])
+}
+
+const tabCount = (value: MemoryListTab) => {
+  if (value === 'tracking') return trackingCount.value
+  if (value === 'documents') return documentCount.value
+  return counts.value[value]
 }
 
 const tabIcons: Record<MemoryListTab, string> = {
@@ -860,64 +882,31 @@ onMounted(async () => {
 </script>
 
 <style lang="less" scoped>
+@import (reference) '@/components/css/settings-section.less';
+@import (reference) '@/components/css/settings-table.less';
+
 .memory-settings {
-  width: 100%;
+  .settings-list-page();
 }
 
 .section-header {
-  margin-bottom: 24px;
-
-  h2 {
-    font-size: 20px;
-    font-weight: 600;
-    color: var(--td-text-color-primary);
-    margin: 0;
-  }
-
-  .section-description {
-    font-size: 14px;
-    color: var(--td-text-color-secondary);
-    margin: 8px 0 0;
-    line-height: 1.5;
-  }
+  .settings-section-header();
+  flex-shrink: 0;
+  margin-bottom: 12px;
+  padding-right: 32px;
 }
 
 .section-header-titlewrap {
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
+  margin-bottom: 8px;
+
+  h2 { margin: 0; }
 }
 
 .usage-trigger-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  width: 22px;
-  height: 22px;
-  margin: 0;
-  padding: 0;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--td-text-color-secondary);
-  cursor: pointer;
-  line-height: 0;
-  transition: background-color 0.2s ease, color 0.2s ease;
-
-  :deep(.t-icon) {
-    display: block;
-  }
-
-  &:hover {
-    background-color: var(--td-bg-color-secondarycontainer);
-    color: var(--td-brand-color);
-  }
-
-  &:focus-visible {
-    outline: 2px solid var(--td-brand-color-focus);
-    outline-offset: 1px;
-  }
+  .settings-title-help();
 }
 
 .notice {
@@ -926,65 +915,57 @@ onMounted(async () => {
   gap: 8px;
   padding: 12px 16px;
   margin-bottom: 16px;
-  border-radius: 8px;
+  border-radius: var(--app-radius-md);
   background: var(--td-warning-color-1);
   color: var(--td-text-color-primary);
-  font-size: 13px;
+  font-size: var(--app-text-md);
 }
 
 .status-hint {
   margin: 12px 0 0;
   color: var(--td-text-color-secondary);
-  font-size: 12px;
+  font-size: var(--app-text-sm);
   line-height: 18px;
 }
 
 .settings-group {
+  flex-shrink: 0;
   display: flex;
   flex-direction: column;
 }
 
 .setting-row {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  padding: 20px 0;
-  border-bottom: 1px solid var(--td-component-stroke);
+  .setting-row();
+  padding: 12px 0;
 }
 
 .setting-info {
-  flex: 1;
-  max-width: 65%;
-  padding-right: 24px;
-
-  label {
-    font-size: 15px;
-    font-weight: 500;
-    color: var(--td-text-color-primary);
-    display: block;
-    margin-bottom: 4px;
-  }
-
-  .desc {
-    font-size: 13px;
-    color: var(--td-text-color-secondary);
-    margin: 0;
-    line-height: 1.5;
-  }
+  .setting-info();
 }
 
 .setting-control {
-  flex-shrink: 0;
-  display: flex;
-  justify-content: flex-end;
-  align-items: center;
+  .setting-control();
+  min-width: 0;
 }
 
 .list-section {
-  margin-top: 28px;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  margin-top: 16px;
+}
+
+.memory-results {
+  display: block;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px 0 32px;
 }
 
 .list-toolbar {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -999,7 +980,7 @@ onMounted(async () => {
   gap: 8px;
 
   h3 {
-    font-size: 16px;
+    font-size: var(--app-text-xl);
     font-weight: 600;
     color: var(--td-text-color-primary);
     margin: 0;
@@ -1007,18 +988,25 @@ onMounted(async () => {
 }
 
 .list-count {
-  font-size: 13px;
+  font-size: var(--app-text-md);
   color: var(--td-text-color-placeholder);
 }
 
 .list-actions {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 8px;
   flex-wrap: wrap;
+
+  :deep(.t-button) { .settings-list-action(); }
+  :deep(.t-button--theme-danger) {
+    color: var(--td-error-color);
+    .t-icon { color: inherit; }
+  }
 }
 
 .status-tabs {
+  flex-shrink: 0;
   margin-top: 0;
 
   :deep(.t-tabs__header) {
@@ -1027,7 +1015,7 @@ onMounted(async () => {
   }
 
   :deep(.t-tabs__nav-item) {
-    font-size: 13px;
+    font-size: var(--app-text-md);
   }
 
   .status-tab-label {
@@ -1051,6 +1039,11 @@ onMounted(async () => {
     height: 2px;
   }
 
+  :deep(.t-tabs__nav-scroll) {
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
   :deep(.t-tabs__operations) {
     display: none;
   }
@@ -1064,7 +1057,27 @@ onMounted(async () => {
   }
 }
 
+.status-tab-count {
+  min-width: 20px;
+  padding: 0 6px;
+  box-sizing: border-box;
+  border-radius: var(--app-radius-pill);
+  background: var(--td-bg-color-secondarycontainer);
+  color: var(--td-text-color-secondary);
+  font-size: var(--app-text-xs);
+  line-height: 20px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.status-tabs :deep(.t-is-active) .status-tab-count {
+  background: var(--td-brand-color-light);
+  color: var(--td-brand-color);
+}
+
 .memory-list {
+  .settings-data-table();
+  overflow: hidden;
   list-style: none;
   margin: 0;
   padding: 0;
@@ -1075,12 +1088,11 @@ onMounted(async () => {
   align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
-  padding: 16px 0;
+  padding: 12px 24px;
   border-bottom: 1px solid var(--td-component-stroke);
 
-  &:last-child {
-    border-bottom: none;
-  }
+  &:last-child { border-bottom: 0; }
+  &:hover { background: var(--td-bg-color-container-hover); }
 }
 
 .memory-main {
@@ -1090,7 +1102,7 @@ onMounted(async () => {
 
 .memory-content {
   margin: 0 0 4px;
-  font-size: 14px;
+  font-size: var(--app-text-base);
   line-height: 1.6;
   color: var(--td-text-color-primary);
   word-break: break-word;
@@ -1105,7 +1117,7 @@ onMounted(async () => {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  font-size: 12px;
+  font-size: var(--app-text-sm);
   line-height: 18px;
   color: var(--td-text-color-placeholder);
 
@@ -1137,23 +1149,50 @@ onMounted(async () => {
 
   > span {
     flex-shrink: 0;
-    font-size: 12px;
+    font-size: var(--app-text-sm);
     line-height: 18px;
     color: var(--td-text-color-placeholder);
   }
 }
 
-.memory-edit {
+.memory-edit-popup {
+  box-sizing: border-box;
+  width: min(400px, calc(100vw - 64px));
+  padding: 8px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  margin-bottom: 8px;
+  gap: 12px;
+
+  :deep(.t-textarea__inner) {
+    border-radius: var(--app-radius-sm);
+    font-size: var(--app-text-base);
+    line-height: 1.6;
+  }
+}
+
+.memory-edit-title {
+  color: var(--td-text-color-primary);
+  font-size: var(--app-text-md);
+  font-weight: 600;
+  line-height: 20px;
+}
+
+.memory-edit-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.memory-edit-kind {
+  color: var(--td-text-color-placeholder);
+  font-size: var(--app-text-sm);
 }
 
 .memory-edit-actions {
   display: flex;
-  justify-content: flex-end;
-  gap: 8px;
+  align-items: center;
+  gap: 6px;
 }
 
 .memory-actions {
@@ -1165,6 +1204,7 @@ onMounted(async () => {
 }
 
 .memory-pagination {
+  flex-shrink: 0;
   margin-top: 16px;
 }
 
@@ -1174,14 +1214,14 @@ onMounted(async () => {
 }
 
 .empty-title {
-  font-size: 14px;
+  font-size: var(--app-text-base);
   font-weight: 500;
   color: var(--td-text-color-secondary);
   margin: 0 0 4px 0;
 }
 
 .empty-desc {
-  font-size: 13px;
+  font-size: var(--app-text-md);
   color: var(--td-text-color-placeholder);
   margin: 0;
 }
@@ -1196,7 +1236,7 @@ onMounted(async () => {
     padding: 0 !important;
     width: 380px;
     max-width: calc(100vw - 24px);
-    border-radius: 12px !important;
+    border-radius: var(--app-radius-xl) !important;
     background: var(--td-bg-color-container) !important;
     border: 0.5px solid var(--td-component-stroke) !important;
     box-shadow:
@@ -1210,14 +1250,14 @@ onMounted(async () => {
   }
 
   .usage-popup-title {
-    font-size: 13px;
+    font-size: var(--app-text-md);
     font-weight: 600;
     color: var(--td-text-color-primary);
   }
 
   .usage-popup-intro {
     margin: 4px 0 12px;
-    font-size: 12px;
+    font-size: var(--app-text-sm);
     line-height: 1.5;
     color: var(--td-text-color-placeholder);
   }
@@ -1237,7 +1277,7 @@ onMounted(async () => {
 
   .usage-popup-label {
     flex: 0 0 88px;
-    font-size: 12px;
+    font-size: var(--app-text-sm);
     font-weight: 500;
     color: var(--td-text-color-primary);
   }
@@ -1245,7 +1285,7 @@ onMounted(async () => {
   .usage-popup-text {
     flex: 1;
     min-width: 0;
-    font-size: 12px;
+    font-size: var(--app-text-sm);
     color: var(--td-text-color-secondary);
   }
 }
@@ -1266,7 +1306,7 @@ onMounted(async () => {
     padding: 14px 16px !important;
     width: 320px;
     max-width: calc(100vw - 24px);
-    border-radius: 12px !important;
+    border-radius: var(--app-radius-xl) !important;
     background: var(--td-bg-color-container) !important;
     border: 0.5px solid var(--td-component-stroke) !important;
     box-shadow:
@@ -1282,7 +1322,7 @@ onMounted(async () => {
   }
 
   .add-popup-title {
-    font-size: 14px;
+    font-size: var(--app-text-base);
     font-weight: 600;
     color: var(--td-text-color-primary);
   }
@@ -1294,12 +1334,12 @@ onMounted(async () => {
   }
 
   .add-label {
-    font-size: 12px;
+    font-size: var(--app-text-sm);
     color: var(--td-text-color-secondary);
   }
 
   .add-kind-hint {
-    font-size: 12px;
+    font-size: var(--app-text-sm);
     line-height: 18px;
     color: var(--td-text-color-placeholder);
   }

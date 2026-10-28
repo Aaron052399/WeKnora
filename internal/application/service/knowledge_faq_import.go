@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/application/access"
+	"github.com/Tencent/WeKnora/internal/application/repository"
 	"github.com/Tencent/WeKnora/internal/application/service/retriever"
 	werrors "github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/logger"
@@ -39,8 +41,11 @@ func (s *knowledgeService) UpsertFAQEntries(ctx context.Context,
 	}
 
 	// 验证知识库是否存在且有效
-	kb, err := s.validateFAQKnowledgeBase(ctx, kbID)
+	kb, ctx, err := s.writableFAQKnowledgeBase(ctx, kbID)
 	if err != nil {
+		return "", err
+	}
+	if err := s.validateFAQImportTags(ctx, kb, payload.Entries); err != nil {
 		return "", err
 	}
 
@@ -1386,7 +1391,7 @@ func (s *knowledgeService) executeFAQImport(ctx context.Context, taskID string, 
 		}
 	}()
 
-	kb, err = s.validateFAQKnowledgeBase(ctx, kbID)
+	kb, ctx, err = s.writableFAQKnowledgeBase(ctx, kbID)
 	if err != nil {
 		return err
 	}
@@ -1588,17 +1593,19 @@ func (s *knowledgeService) executeFAQImport(ctx context.Context, taskID string, 
 			indexDuration,
 		)
 
-		// 更新chunks的Status为已索引
-		chunksToUpdate := make([]*types.Chunk, 0, len(chunks))
+		// 更新chunks的Status为已索引：所有行写同一个值，一条 UPDATE ... WHERE id IN 即可，
+		// 不需要把 content 等字段再回传一遍。
 		for _, chunk := range chunks {
 			chunk.Status = int(types.ChunkStatusIndexed) // indexed
-			chunksToUpdate = append(chunksToUpdate, chunk)
 		}
-		if err := s.chunkService.UpdateChunks(ctx, chunksToUpdate); err != nil {
+		if err := s.chunkRepo.UpdateChunkFieldsByIDs(ctx, tenantID, chunkIds, map[string]interface{}{
+			"status": int(types.ChunkStatusIndexed),
+		}); err != nil {
 			return fmt.Errorf("failed to update chunks status: %w", err)
 		}
 
-		// 收集成功条目信息
+		// 收集成功条目信息（tag 信息按批一次查出，避免每条一次查询）
+		tagsByID := s.loadFAQTagsForChunks(ctx, tenantID, chunks)
 		for idx, chunk := range chunks {
 			entryIdx := i + idx + processedCount // 原始条目索引
 			meta, _ := chunk.FAQMetadata()
@@ -1606,15 +1613,7 @@ func (s *knowledgeService) executeFAQImport(ctx context.Context, taskID string, 
 			if meta != nil {
 				standardQ = meta.StandardQuestion
 			}
-			// 获取 tag info
-			var tagID int64
-			tagName := ""
-			if chunk.TagID != "" {
-				if tag, err := s.tagRepo.GetByID(ctx, tenantID, chunk.TagID); err == nil && tag != nil {
-					tagID = tag.SeqID
-					tagName = tag.Name
-				}
-			}
+			tagID, tagName := faqTagInfo(tagsByID, chunk.TagID)
 			progress.SuccessEntries = append(progress.SuccessEntries, types.FAQSuccessEntry{
 				Index:            entryIdx,
 				SeqID:            chunk.SeqID,
@@ -1976,7 +1975,12 @@ func (s *knowledgeService) incrementalIndexFAQEntry(
 		logger.Debugf(ctx, "incrementalIndexFAQEntry: updated similar questions (answers changed): %v", updatedQuestions)
 	}
 
-	// 3. 删除不再存在的相似问索引
+	// 3. 删除不再存在的相似问索引，以及即将重建的旧索引。
+	// 不能依赖 BatchIndex 覆盖同一 SourceID：ES v8、Qdrant 等引擎每次写入
+	// 生成新文档 ID，不先删会留下内容过期的重复条目。
+	for _, info := range indexInfoToUpdate {
+		sourceIDsToDelete = append(sourceIDsToDelete, info.SourceID)
+	}
 	if len(sourceIDsToDelete) > 0 {
 		logger.Debugf(ctx, "incrementalIndexFAQEntry: deleting %d obsolete sourceIDs: %v", len(sourceIDsToDelete), sourceIDsToDelete)
 		if delErr := retrieveEngine.DeleteBySourceIDList(ctx, sourceIDsToDelete, embeddingModel.GetDimensions(), types.KnowledgeTypeFAQ); delErr != nil {
@@ -2245,7 +2249,29 @@ func (s *knowledgeService) ProcessFAQImport(ctx context.Context, t *asynq.Task) 
 
 	ctx = logger.WithRequestID(ctx, uuid.New().String())
 	ctx = logger.WithField(ctx, "faq_import", payload.TaskID)
-	ctx = context.WithValue(ctx, types.TenantIDContextKey, payload.TenantID)
+	ctx = types.WithExecutionTenant(ctx, payload.TenantID)
+	kb, err := s.validateFAQKnowledgeBase(ctx, payload.KBID)
+	if err != nil {
+		if errors.Is(err, repository.ErrKnowledgeBaseNotFound) {
+			return fmt.Errorf("%w: FAQ task KB no longer exists", asynq.SkipRetry)
+		}
+		return err
+	}
+	ctx, err = access.WithKBTaskWrite(ctx, kb, payload.TenantID)
+	if err != nil {
+		return fmt.Errorf("%w: FAQ task KB does not belong to its tenant", asynq.SkipRetry)
+	}
+	knowledge, err := s.repo.GetKnowledgeByID(ctx, payload.TenantID, payload.KnowledgeID)
+	if err != nil {
+		if errors.Is(err, repository.ErrKnowledgeNotFound) {
+			return fmt.Errorf("%w: FAQ task document no longer exists", asynq.SkipRetry)
+		}
+		return err
+	}
+	if knowledge == nil || knowledge.TenantID != payload.TenantID || knowledge.KnowledgeBaseID != payload.KBID ||
+		knowledge.Type != types.KnowledgeTypeFAQ {
+		return fmt.Errorf("%w: FAQ task document does not belong to its KB", asynq.SkipRetry)
+	}
 
 	// 获取任务重试信息，用于判断是否是最后一次重试
 	retryCount, _ := asynq.GetRetryCount(ctx)
@@ -2287,6 +2313,9 @@ func (s *knowledgeService) ProcessFAQImport(ctx context.Context, t *asynq.Task) 
 
 	logger.Infof(ctx, "Processing FAQ import task: task_id=%s, kb_id=%s, total_entries=%d, dry_run=%v, retry=%d/%d",
 		payload.TaskID, payload.KBID, len(payload.Entries), payload.DryRun, retryCount, maxRetry)
+	if err := s.validateFAQImportTags(ctx, kb, payload.Entries); err != nil {
+		return err
+	}
 
 	// 保存原始总数量
 	originalTotalEntries := len(payload.Entries)
@@ -2359,31 +2388,6 @@ func (s *knowledgeService) ProcessFAQImport(ctx context.Context, t *asynq.Task) 
 	progress.UpdatedAt = time.Now().Unix()
 	if err := s.saveFAQImportProgress(ctx, progress); err != nil {
 		logger.Warnf(ctx, "Failed to update FAQ import progress: %v", err)
-	}
-
-	// 幂等性检查：获取knowledge记录（FAQ任务使用knowledge ID作为taskID）
-	knowledge, err := s.repo.GetKnowledgeByID(ctx, payload.TenantID, payload.KnowledgeID)
-	if err != nil {
-		logger.Errorf(ctx, "failed to get FAQ knowledge: %v", err)
-		return nil
-	}
-
-	if knowledge == nil {
-		return nil
-	}
-
-	kb, err := s.kbService.GetKnowledgeBaseByID(ctx, payload.KBID)
-	if err != nil {
-		logger.Errorf(ctx, "Failed to get knowledge base: %v", err)
-		// 如果是最后一次重试，更新状态为失败
-		if isLastRetry {
-			if updateErr := s.updateFAQImportProgressStatus(ctx, payload.TaskID, payload.InstanceID, payload.EnqueuedAt, types.FAQImportStatusFailed, 0, originalTotalEntries, 0, "获取知识库失败", err.Error()); updateErr != nil {
-				logger.Errorf(ctx, "Failed to update task status to failed: %v", updateErr)
-			}
-			s.recordFAQImportKBActivity(ctx, &payload, progress, originalTotalEntries, types.AuditActionFAQImportFailed, types.AuditOutcomeFailed)
-		}
-		s.cleanupFAQEntriesFileOnFinalFailure(ctx, payload.EntriesURL, retryCount, maxRetry)
-		return fmt.Errorf("failed to get knowledge base: %w", err)
 	}
 
 	// 检查任务状态 - 幂等性处理（复用之前获取的 existingProgress）
@@ -2676,23 +2680,17 @@ func (s *knowledgeService) executeFAQMergeOperations(
 			return mergedCount, fmt.Errorf("failed to batch save merged chunks: %w", err)
 		}
 
-		// 4. 重建索引（EFPutDocument 会自动覆盖相同 SourceID）
-		if err := s.indexFAQChunks(ctx, kb, faqKnowledge, mergedChunks, embeddingModel, false, false); err != nil {
+		// 4. 重建索引。先删旧索引：ES v8、Qdrant 等引擎不会覆盖相同 SourceID。
+		if err := s.indexFAQChunks(ctx, kb, faqKnowledge, mergedChunks, embeddingModel, false, true); err != nil {
 			return mergedCount, fmt.Errorf("failed to re-index merged chunks: %w", err)
 		}
 
 		// 5. 收集成功条目信息
+		tagsByID := s.loadFAQTagsForChunks(ctx, tenantID, mergedChunks)
 		for i, op := range batch {
 			chunk := mergedChunks[i]
 			meta := op.MergedMeta
-			var tagID int64
-			tagName := ""
-			if chunk.TagID != "" {
-				if tag, tErr := s.tagRepo.GetByID(ctx, tenantID, chunk.TagID); tErr == nil && tag != nil {
-					tagID = tag.SeqID
-					tagName = tag.Name
-				}
-			}
+			tagID, tagName := faqTagInfo(tagsByID, chunk.TagID)
 			progress.SuccessEntries = append(progress.SuccessEntries, types.FAQSuccessEntry{
 				Index:            op.Detail.Index,
 				SeqID:            chunk.SeqID,
@@ -2708,6 +2706,53 @@ func (s *knowledgeService) executeFAQMergeOperations(
 	}
 
 	return mergedCount, nil
+}
+
+// loadFAQTagsForChunks resolves every distinct tag referenced by chunks with a
+// single query. Lookup failures are logged and yield an empty map so the
+// import result degrades to "no tag info" instead of aborting the batch.
+func (s *knowledgeService) loadFAQTagsForChunks(
+	ctx context.Context, tenantID uint64, chunks []*types.Chunk,
+) map[string]*types.KnowledgeTag {
+	tagsByID := make(map[string]*types.KnowledgeTag)
+	seen := make(map[string]struct{})
+	ids := make([]string, 0)
+	for _, chunk := range chunks {
+		if chunk == nil || chunk.TagID == "" {
+			continue
+		}
+		if _, ok := seen[chunk.TagID]; ok {
+			continue
+		}
+		seen[chunk.TagID] = struct{}{}
+		ids = append(ids, chunk.TagID)
+	}
+	if len(ids) == 0 {
+		return tagsByID
+	}
+	tags, err := s.tagRepo.GetByIDs(ctx, tenantID, ids)
+	if err != nil {
+		logger.Warnf(ctx, "Failed to load FAQ tags for import result: %v", err)
+		return tagsByID
+	}
+	for _, tag := range tags {
+		if tag != nil {
+			tagsByID[tag.ID] = tag
+		}
+	}
+	return tagsByID
+}
+
+// faqTagInfo returns the external (seq_id, name) pair for tagID, or zero values
+// when the chunk has no tag or the tag could not be loaded.
+func faqTagInfo(tagsByID map[string]*types.KnowledgeTag, tagID string) (int64, string) {
+	if tagID == "" {
+		return 0, ""
+	}
+	if tag, ok := tagsByID[tagID]; ok && tag != nil {
+		return tag.SeqID, tag.Name
+	}
+	return 0, ""
 }
 
 // buildFAQImportResultMessage 构建 FAQ 导入 / 验证最终结果的人类可读消息。
@@ -2825,8 +2870,11 @@ func (s *knowledgeService) UpdateLastFAQImportResultDisplayStatus(ctx context.Co
 		return werrors.NewBadRequestError("invalid display status, must be 'open' or 'close'")
 	}
 
-	// 获取当前空间ID
-	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
+	kb, ctx, err := s.writableFAQKnowledgeBase(ctx, kbID)
+	if err != nil {
+		return err
+	}
+	tenantID := kb.TenantID
 
 	// 查找FAQ类型的knowledge
 	knowledgeList, err := s.repo.ListKnowledgeByKnowledgeBaseID(ctx, tenantID, kbID)

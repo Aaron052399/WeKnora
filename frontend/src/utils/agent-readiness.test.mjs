@@ -30,14 +30,36 @@ test('rejects a configured chat model that no longer exists', () => {
   ), false)
 })
 
-test('requires rerank when knowledge_search has a knowledge-base scope', () => {
+test('requires rerank when search_knowledge has a knowledge-base scope', () => {
+  assert.equal(agentRequiresRerankModel({
+    kb_selection_mode: 'all',
+    allowed_tools: ['search_knowledge'],
+  }), true)
+})
+
+test('still requires rerank for configs saved with the retired knowledge_search name', () => {
   assert.equal(agentRequiresRerankModel({
     kb_selection_mode: 'all',
     allowed_tools: ['knowledge_search'],
   }), true)
+  assert.equal(agentRequiresRerankModel({
+    kb_selection_mode: 'selected',
+    allowed_tools: ['thinking', 'grep_chunks'],
+  }), true)
+})
+
+test('does not require rerank for read-only document tools', () => {
+  assert.equal(agentRequiresRerankModel({
+    kb_selection_mode: 'all',
+    allowed_tools: ['read_document', 'list_documents'],
+  }), false)
 })
 
 test('does not require rerank when knowledge bases are disabled', () => {
+  assert.equal(agentRequiresRerankModel({
+    kb_selection_mode: 'none',
+    allowed_tools: ['search_knowledge'],
+  }), false)
   assert.equal(agentRequiresRerankModel({
     kb_selection_mode: 'none',
     allowed_tools: ['knowledge_search'],
@@ -52,10 +74,20 @@ test('does not require rerank for wiki-only tools', () => {
 })
 
 test('matches backend default-tool behavior', () => {
+  // Never set: the backend's default tools, which include search_knowledge.
+  assert.equal(agentRequiresRerankModel({
+    kb_selection_mode: 'all',
+    allowed_tools: undefined,
+  }), true)
+  assert.equal(agentRequiresRerankModel({
+    kb_selection_mode: 'all',
+    allowed_tools: null,
+  }), true)
+  // Empty: no built-in tools, so nothing calls the reranker.
   assert.equal(agentRequiresRerankModel({
     kb_selection_mode: 'all',
     allowed_tools: [],
-  }), true)
+  }), false)
   assert.equal(agentRequiresRerankModel({
     kb_selection_mode: 'none',
     allowed_tools: [],
@@ -88,6 +120,11 @@ test('getAgentNotReadyReasonKeys flags missing chat model', () => {
 
 test('getAgentNotReadyReasonKeys requires rerank only in agent mode with KB search', () => {
   assert.deepEqual(getAgentNotReadyReasonKeys(
+    { kb_selection_mode: 'all', allowed_tools: ['search_knowledge'] },
+    [{ id: 'chat-1', type: 'KnowledgeQA' }, { id: 'rerank-1', type: 'Rerank' }],
+    { isAgentMode: true, isSharedAgent: false },
+  ), ['summary_model', 'rerank_model'])
+  assert.deepEqual(getAgentNotReadyReasonKeys(
     { kb_selection_mode: 'all', allowed_tools: ['knowledge_search'] },
     [{ id: 'chat-1', type: 'KnowledgeQA' }, { id: 'rerank-1', type: 'Rerank' }],
     { isAgentMode: true, isSharedAgent: false },
@@ -102,7 +139,7 @@ test('getAgentNotReadyReasonKeys does not treat current shared context as shared
   ), ['summary_model'])
 })
 
-test('getAgentNotReadyReasonKeys treats empty allowed_tools as ready via backend defaults', () => {
+test('getAgentNotReadyReasonKeys treats an empty allowed_tools with a rerank model as ready', () => {
   assert.deepEqual(getAgentNotReadyReasonKeys(
     {
       model_id: 'chat-1',

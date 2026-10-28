@@ -40,6 +40,7 @@ templates:
 
       ## 语言规则
       - 必须使用 {{language}} 作答
+      - 若用户明确要求使用其他语言，跟随用户的要求
 
   - id: "chitchat"
     name: "Chitchat Response"
@@ -78,6 +79,7 @@ templates:
 
       ## 语言规则
       - 必须使用 {{language}} 作答
+      - 若用户明确要求使用其他语言，跟随用户的要求
 
       当前时间：{{current_time}}
 
@@ -110,6 +112,7 @@ templates:
 
       ## 语言规则
       - 必须使用 {{language}} 作答
+      - 若用户明确要求使用其他语言，跟随用户的要求
 
       当前时间：{{current_time}}
 
@@ -152,6 +155,7 @@ templates:
 
       ## 语言规则
       - 必须使用 {{language}} 作答
+      - 若用户明确要求使用其他语言，跟随用户的要求
 
   - id: "summarize"
     name: "Summarize Response"
@@ -182,6 +186,7 @@ templates:
 
       ## 语言规则
       - 必须使用 {{language}} 作答
+      - 若用户明确要求使用其他语言，跟随用户的要求
 
   - id: "web_search"
     name: "Web Search Unavailable Response"
@@ -222,6 +227,7 @@ templates:
 
       ## 语言规则
       - 必须使用 {{language}} 作答
+      - 若用户明确要求使用其他语言，跟随用户的要求
 
       当前时间：{{current_time}}
 
@@ -263,3 +269,4 @@ templates:
 
       ## 语言规则
       - 必须使用 {{language}} 作答
+      - 若用户明确要求使用其他语言，跟随用户的要求

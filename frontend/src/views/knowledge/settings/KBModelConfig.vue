@@ -38,14 +38,8 @@
               ? $t('knowledgeEditor.models.embeddingWikiOptionalDesc')
               : $t('knowledgeEditor.models.embeddingDesc') }}
           </p>
-          <t-alert
-            v-if="ragEnabled && hasFiles"
-            theme="warning"
-            :message="$t('knowledgeEditor.models.embeddingLocked')"
-            style="margin-top: 8px;"
-          />
         </div>
-        <div class="setting-control">
+        <div class="setting-control setting-control--stacked">
           <ModelSelector
             ref="embeddingSelectorRef"
             model-type="Embedding"
@@ -57,6 +51,10 @@
             @add-model="handleAddModel('embedding')"
             :placeholder="$t('knowledgeEditor.models.embeddingPlaceholder')"
           />
+          <p v-if="ragEnabled && hasFiles" class="locked-hint">
+            <t-icon name="lock-on" class="locked-hint-icon" />
+            <span>{{ $t('knowledgeEditor.models.embeddingLocked') }}</span>
+          </p>
         </div>
       </div>
 
@@ -151,14 +149,14 @@ const handleAddModel = (subSection: string) => {
   margin-bottom: 20px;
 
   h2 {
-    font-size: 20px;
+    font-size: var(--app-text-3xl);
     font-weight: 600;
     color: var(--td-text-color-primary);
     margin: 0 0 6px 0;
   }
 
   .section-description {
-    font-size: 14px;
+    font-size: var(--app-text-base);
     color: var(--td-text-color-secondary);
     margin: 0;
     line-height: 1.5;
@@ -189,7 +187,7 @@ const handleAddModel = (subSection: string) => {
   padding-right: 24px;
 
   label {
-    font-size: 15px;
+    font-size: var(--app-text-lg);
     font-weight: 500;
     color: var(--td-text-color-primary);
     display: block;
@@ -202,14 +200,14 @@ const handleAddModel = (subSection: string) => {
 
     .optional {
       color: var(--td-text-color-placeholder);
-      font-size: 12px;
+      font-size: var(--app-text-sm);
       font-weight: 400;
       margin-left: 4px;
     }
   }
 
   .desc {
-    font-size: 13px;
+    font-size: var(--app-text-md);
     color: var(--td-text-color-secondary);
     margin: 0;
     line-height: 1.5;
@@ -222,6 +220,29 @@ const handleAddModel = (subSection: string) => {
   display: flex;
   justify-content: flex-end;
   align-items: flex-start;
+
+  &--stacked {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+  }
+}
+
+.locked-hint {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0;
+  font-size: var(--app-text-sm);
+  line-height: 18px;
+  color: var(--td-text-color-secondary);
+
+  .locked-hint-icon {
+    flex-shrink: 0;
+    margin-top: 2px;
+    font-size: var(--app-text-base);
+    color: var(--td-text-color-placeholder);
+  }
 }
 </style>
 

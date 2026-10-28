@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	pg_query "github.com/pganalyze/pg_query_go/v6"
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 // This file provides comprehensive SQL validation and security features
@@ -153,6 +154,9 @@ type sqlValidator struct {
 // SearchScope describes one allowed knowledge scope for SQL query injection.
 // Empty KnowledgeIDs and TagIDs means the whole KB is in scope.
 type SearchScope struct {
+	// TenantID is the authorized owner of this KB. Zero uses the caller tenant
+	// when tenant isolation is enabled. Scopes must be authorized by the caller.
+	TenantID        uint64
 	KnowledgeBaseID string
 	KnowledgeIDs    []string
 	TagIDs          []string
@@ -652,7 +656,9 @@ func WithSearchScopeFilter(kbIDs []string, knowledgeIDs []string) SQLValidationO
 }
 
 // WithSearchScopes restricts queries using structured OR scopes. Each scope can
-// represent a full KB, specific documents, or a tag-constrained KB.
+// represent a full KB, specific documents, or a tag-constrained KB. Nonzero
+// TenantID values grant access to that owner within that scope, so scopes must
+// come from server-side authorization, never directly from untrusted input.
 func WithSearchScopes(scopes []SearchScope) SQLValidationOption {
 	return func(v *sqlValidator) {
 		if len(scopes) == 0 {
@@ -786,6 +792,48 @@ func ValidateSQL(sql string, opts ...SQLValidationOption) (*SQLParseResult, *SQL
 		}, validationResult
 	}
 
+	allTables := make(map[string]bool)
+	// Inspect all AST fields, not just selected expression lists. This covers
+	// CTEs, set-operation branches, scalar subqueries and window/limit clauses.
+	if err := walkSQLMessages(parseResult.ProtoReflect(), func(message protoreflect.Message) error {
+		switch node := message.Interface().(type) {
+		case *pg_query.SelectStmt:
+			if node.WithClause != nil {
+				return fmt.Errorf("WITH clause (CTEs) is not supported")
+			}
+			if node.Op != pg_query.SetOperation_SETOP_NONE {
+				return fmt.Errorf("compound queries are not supported")
+			}
+			if node.IntoClause != nil || len(node.LockingClause) > 0 {
+				return fmt.Errorf("SELECT must be read-only")
+			}
+		case *pg_query.RangeVar:
+			allTables[node.Relname] = true
+			if validator.checkTableNames &&
+				(node.Catalogname != "" || (node.Schemaname != "" && node.Schemaname != "public")) {
+				return fmt.Errorf("qualified table access is not allowed")
+			}
+		case *pg_query.RangeFunction:
+			return fmt.Errorf("functions in FROM clause are not allowed")
+		case *pg_query.FuncCall:
+			return validator.validateFuncCall(node, validationResult)
+		case *pg_query.SubLink:
+			if validator.checkSubqueries {
+				return fmt.Errorf("subqueries are not allowed")
+			}
+		case *pg_query.RangeSubselect:
+			if validator.checkSubqueries {
+				return fmt.Errorf("subqueries are not allowed")
+			}
+		}
+		return nil
+	}); err != nil {
+		validationResult.Valid = false
+		validationResult.Errors = append(validationResult.Errors, SQLValidationError{
+			Type: "statement_validation_error", Message: "Statement validation failed", Details: err.Error(),
+		})
+	}
+
 	// Build parse result
 	result := &SQLParseResult{
 		OriginalSQL:  sql,
@@ -819,8 +867,8 @@ func ValidateSQL(sql string, opts ...SQLValidationOption) (*SQLParseResult, *SQL
 
 		// Phase 6: Validate table names
 		if validator.checkTableNames {
-			for _, table := range result.TableNames {
-				if !validator.allowedTables[strings.ToLower(table)] {
+			for table := range allTables {
+				if !validator.allowedTables[table] {
 					validationResult.Valid = false
 					validationResult.Errors = append(validationResult.Errors, SQLValidationError{
 						Type:    "table_not_allowed",
@@ -880,112 +928,130 @@ func ValidateAndSecureSQL(sql string, opts ...SQLValidationOption) (string, *SQL
 		return "", validationResult, fmt.Errorf("failed to parse SQL: %v", err)
 	}
 
-	// Normalize SQL
-	normalizedSQL, err := pg_query.Deparse(result)
+	// Rewrite every original SELECT scope, including repeated references to the
+	// same table. Never search SQL text for keywords: identifiers and literals
+	// may contain WHERE/ORDER BY, and aliases are case sensitive when quoted.
+	err = walkSQLMessages(result.ProtoReflect(), func(message protoreflect.Message) error {
+		stmt, ok := message.Interface().(*pg_query.SelectStmt)
+		if !ok {
+			return nil
+		}
+		var injectFrom func(*pg_query.Node) error
+		injectFrom = func(node *pg_query.Node) error {
+			if rv := node.GetRangeVar(); rv != nil {
+				alias := rv.Relname
+				if rv.Alias != nil {
+					alias = rv.Alias.Aliasname
+				}
+				tables := map[string]string{strings.ToLower(rv.Relname): quoteSQLIdentifier(alias)}
+				fragment := "SELECT 1"
+				fragment = validator.injectTenantConditions(fragment, tables)
+				fragment = validator.injectSoftDeleteConditions(fragment, tables)
+				fragment = validator.injectHiddenKBFilter(fragment, tables)
+				fragment = validator.injectChunkEnabledFilter(fragment, tables)
+				fragment = validator.injectSearchScopeConditions(fragment, tables)
+				filters, err := pg_query.Parse(fragment)
+				if err != nil {
+					return fmt.Errorf("failed to build SQL security filter: %w", err)
+				}
+				addSQLPredicate(stmt, filters.Stmts[0].Stmt.GetSelectStmt().WhereClause)
+			}
+			if join := node.GetJoinExpr(); join != nil {
+				if err := injectFrom(join.Larg); err != nil {
+					return err
+				}
+				return injectFrom(join.Rarg)
+			}
+			return nil
+		}
+		for _, from := range stmt.FromClause {
+			if err := injectFrom(from); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 	if err != nil {
-		return "", validationResult, fmt.Errorf("failed to normalize SQL: %v", err)
+		return "", validationResult, err
 	}
-
-	// Build table→alias map from parse tree (respects SQL aliases like "kb", "k")
-	tablesInQuery := extractTableAliasMap(result)
-
-	// Inject tenant conditions
-	securedSQL := validator.injectTenantConditions(normalizedSQL, tablesInQuery)
-	// Inject deleted_at IS NULL conditions
-	securedSQL = validator.injectSoftDeleteConditions(securedSQL, tablesInQuery)
-	// Inject hidden KB filter (exclude is_temporary = true knowledge bases)
-	securedSQL = validator.injectHiddenKBFilter(securedSQL, tablesInQuery)
-	// Exclude disabled chunks from model-visible query results.
-	securedSQL = validator.injectChunkEnabledFilter(securedSQL, tablesInQuery)
-	// Inject search scope filter (restrict to allowed KBs and knowledges)
-	securedSQL = validator.injectSearchScopeConditions(securedSQL, tablesInQuery)
-
+	securedSQL, err := pg_query.Deparse(result)
+	if err != nil {
+		return "", validationResult, fmt.Errorf("failed to deparse secured SQL: %w", err)
+	}
 	return securedSQL, validationResult, nil
 }
 
-// extractTableAliasMap walks the parse tree to build a table_name→alias map.
-// When a table has an alias (e.g., "knowledge_bases kb"), the map entry is
-// {"knowledge_bases": "kb"}. Without an alias, both key and value are the table name.
-func extractTableAliasMap(parseResult *pg_query.ParseResult) map[string]string {
-	m := make(map[string]string)
-	if len(parseResult.Stmts) == 0 || parseResult.Stmts[0].Stmt == nil {
-		return m
-	}
-	selectStmt := parseResult.Stmts[0].Stmt.GetSelectStmt()
-	if selectStmt == nil {
-		return m
-	}
-	for _, fromItem := range selectStmt.FromClause {
-		collectTableAliases(fromItem, m)
-	}
-	return m
-}
-
-// collectTableAliases recursively collects table→alias mappings from FROM clause nodes.
-func collectTableAliases(node *pg_query.Node, m map[string]string) {
-	if node == nil {
-		return
-	}
-	if rv := node.GetRangeVar(); rv != nil {
-		tableName := strings.ToLower(rv.Relname)
-		alias := tableName
-		if rv.Alias != nil && rv.Alias.Aliasname != "" {
-			alias = strings.ToLower(rv.Alias.Aliasname)
+// walkSQLMessages visits children before their parent so rewriting a SELECT
+// does not revisit trusted predicates added by the server.
+func walkSQLMessages(message protoreflect.Message, visit func(protoreflect.Message) error) error {
+	var walkErr error
+	message.Range(func(field protoreflect.FieldDescriptor, value protoreflect.Value) bool {
+		if field.Message() == nil {
+			return true
 		}
-		m[tableName] = alias
-		return
+		if field.IsList() {
+			list := value.List()
+			for i := 0; i < list.Len(); i++ {
+				if walkErr = walkSQLMessages(list.Get(i).Message(), visit); walkErr != nil {
+					return false
+				}
+			}
+		} else {
+			walkErr = walkSQLMessages(value.Message(), visit)
+		}
+		return walkErr == nil
+	})
+	if walkErr != nil {
+		return walkErr
 	}
-	if je := node.GetJoinExpr(); je != nil {
-		collectTableAliases(je.Larg, m)
-		collectTableAliases(je.Rarg, m)
-		return
-	}
+	return visit(message)
 }
 
-// InjectAndConditions injects filter conditions into a SQL statement using AND semantics.
-// If WHERE exists, the original WHERE predicates will be wrapped in parentheses.
-// Compiled once: the WHERE keyword and the set of clauses that may trail a
-// WHERE expression. reSQLTailClause is shared by InjectAndConditions for both
-// "where does the WHERE expression end" and "where to insert a new WHERE".
-var (
-	reSQLWhereKeyword = regexp.MustCompile(`(?i)\bWHERE\b`)
-	reSQLTailClause   = regexp.MustCompile(`(?i)\b(GROUP BY|ORDER BY|LIMIT|OFFSET|HAVING|FETCH)\b`)
-)
+func quoteSQLIdentifier(name string) string {
+	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+}
 
+func addSQLPredicate(stmt *pg_query.SelectStmt, predicate *pg_query.Node) {
+	if predicate == nil {
+		return
+	}
+	if stmt.WhereClause == nil {
+		stmt.WhereClause = predicate
+		return
+	}
+	stmt.WhereClause = &pg_query.Node{Node: &pg_query.Node_BoolExpr{BoolExpr: &pg_query.BoolExpr{
+		Boolop: pg_query.BoolExprType_AND_EXPR, Args: []*pg_query.Node{predicate, stmt.WhereClause},
+	}}}
+}
+
+// InjectAndConditions combines parsed expressions, preserving literal and alias
+// boundaries. An invalid statement or filter returns no executable SQL.
 func InjectAndConditions(sql, filter string) string {
-	filter = strings.TrimSpace(filter)
-	if filter == "" {
+	if strings.TrimSpace(filter) == "" {
 		return sql
 	}
-
-	// Check if WHERE clause exists
-	if loc := reSQLWhereKeyword.FindStringIndex(sql); loc != nil {
-		// Add filter and wrap existing conditions in parentheses to prevent OR precedence issues.
-		// The wrapping must only apply to the original WHERE expression, not trailing clauses like
-		// ORDER BY / GROUP BY / LIMIT, otherwise it can generate invalid SQL.
-		whereExprStart := loc[1]
-		tailLoc := reSQLTailClause.FindStringIndex(sql[whereExprStart:])
-
-		if tailLoc == nil {
-			originalWhereExpr := strings.TrimSpace(sql[whereExprStart:])
-			return fmt.Sprintf("%sWHERE %s AND (%s)", sql[:loc[0]], filter, originalWhereExpr)
-		}
-
-		whereExprEnd := whereExprStart + tailLoc[0]
-		originalWhereExpr := strings.TrimSpace(sql[whereExprStart:whereExprEnd])
-		tailClause := strings.TrimLeft(sql[whereExprEnd:], " \t\r\n")
-		return fmt.Sprintf("%sWHERE %s AND (%s) %s", sql[:loc[0]], filter, originalWhereExpr, tailClause)
+	parsed, err := pg_query.Parse(sql)
+	if err != nil || len(parsed.Stmts) != 1 {
+		return ""
 	}
-
-	// Add new WHERE clause before ORDER BY, GROUP BY, LIMIT, etc.
-	if loc := reSQLTailClause.FindStringIndex(sql); loc != nil {
-		prefix := strings.TrimRight(sql[:loc[0]], " \t\r\n")
-		suffix := strings.TrimLeft(sql[loc[0]:], " \t\r\n")
-		return fmt.Sprintf("%s WHERE %s %s", prefix, filter, suffix)
+	stmt := parsed.Stmts[0].Stmt.GetSelectStmt()
+	if stmt == nil || stmt.Op != pg_query.SetOperation_SETOP_NONE {
+		return ""
 	}
-
-	// Add WHERE clause at the end
-	return fmt.Sprintf("%s WHERE %s", sql, filter)
+	filters, err := pg_query.Parse("SELECT 1 WHERE " + filter)
+	if err != nil || len(filters.Stmts) != 1 {
+		return ""
+	}
+	predicate := filters.Stmts[0].Stmt.GetSelectStmt()
+	if predicate == nil || predicate.WhereClause == nil {
+		return ""
+	}
+	addSQLPredicate(stmt, predicate.WhereClause)
+	out, err := pg_query.Deparse(parsed)
+	if err != nil {
+		return ""
+	}
+	return out
 }
 
 // injectTenantConditions adds tenant_id filtering to the query
@@ -998,6 +1064,12 @@ func (v *sqlValidator) injectTenantConditions(sql string, tablesInQuery map[stri
 	var conditions []string
 	for tableName, alias := range tablesInQuery {
 		if v.tablesWithTenantID[tableName] {
+			// Structured scopes bind each owner to its own KB and document/tag
+			// restrictions below. A global caller filter would reject shared KBs.
+			if v.enableSearchScopeFilter && len(v.searchScopes) > 0 &&
+				(tableName == "knowledge_bases" || tableName == "knowledges" || tableName == "chunks") {
+				continue
+			}
 			if tableName == "tenants" {
 				conditions = append(conditions, fmt.Sprintf("%s.id = %d", alias, v.tenantID))
 			} else {
@@ -1107,17 +1179,17 @@ func (v *sqlValidator) injectStructuredSearchScopeConditions(sql string, tablesI
 	var conditions []string
 
 	if alias, ok := tablesInQuery["knowledge_bases"]; ok {
-		if cond := buildKnowledgeBaseScopeCondition(alias, v.searchScopes); cond != "" {
+		if cond := v.buildKnowledgeBaseScopeCondition(alias, v.searchScopes); cond != "" {
 			conditions = append(conditions, cond)
 		}
 	}
 	if alias, ok := tablesInQuery["knowledges"]; ok {
-		if cond := buildKnowledgeScopeCondition(alias, v.searchScopes); cond != "" {
+		if cond := v.buildKnowledgeScopeCondition(alias, v.searchScopes); cond != "" {
 			conditions = append(conditions, cond)
 		}
 	}
 	if alias, ok := tablesInQuery["chunks"]; ok {
-		if cond := buildChunkScopeCondition(alias, v.searchScopes); cond != "" {
+		if cond := v.buildChunkScopeCondition(alias, v.searchScopes); cond != "" {
 			conditions = append(conditions, cond)
 		}
 	}
@@ -1128,19 +1200,29 @@ func (v *sqlValidator) injectStructuredSearchScopeConditions(sql string, tablesI
 	return InjectAndConditions(sql, strings.Join(conditions, " AND "))
 }
 
-func buildKnowledgeBaseScopeCondition(alias string, scopes []SearchScope) string {
-	kbIDs := uniqueScopeKBIDs(scopes)
-	if len(kbIDs) == 0 {
-		return ""
+func (v *sqlValidator) buildKnowledgeBaseScopeCondition(alias string, scopes []SearchScope) string {
+	clauses := make([]string, 0, len(scopes))
+	for _, scope := range scopes {
+		if scope.KnowledgeBaseID == "" {
+			continue
+		}
+		clause := fmt.Sprintf("%s.id = %s", alias, quoteString(scope.KnowledgeBaseID))
+		if tenant := v.scopeTenantCondition(alias, scope); tenant != "" {
+			clause = "(" + clause + " AND " + tenant + ")"
+		}
+		clauses = append(clauses, clause)
 	}
-	return fmt.Sprintf("%s.id IN (%s)", alias, strings.Join(quoteStringSlice(kbIDs), ", "))
+	if len(clauses) == 0 {
+		return "false"
+	}
+	return joinOrClauses(clauses)
 }
 
 // buildScopeClause renders one scope. A scope's document whitelist and tag
 // filter are ANDed: each is an independent narrowing of the same KB, so
 // applying only one of them would admit rows the other excludes. Scopes are
 // ORed against each other by joinOrClauses because they are alternatives.
-func buildScopeClause(alias, knowledgeIDColumn string, scope SearchScope) string {
+func (v *sqlValidator) buildScopeClause(alias, knowledgeIDColumn string, scope SearchScope) string {
 	if scope.KnowledgeBaseID == "" {
 		return ""
 	}
@@ -1159,43 +1241,52 @@ func buildScopeClause(alias, knowledgeIDColumn string, scope SearchScope) string
 			alias, knowledgeIDColumn, strings.Join(quoteStringSlice(scope.TagIDs), ", "),
 		))
 	}
+	if tenant := v.scopeTenantCondition(alias, scope); tenant != "" {
+		conditions = append(conditions, tenant)
+	}
 	if len(conditions) == 1 {
 		return conditions[0]
 	}
 	return "(" + strings.Join(conditions, " AND ") + ")"
 }
 
-func buildKnowledgeScopeCondition(alias string, scopes []SearchScope) string {
+func (v *sqlValidator) buildKnowledgeScopeCondition(alias string, scopes []SearchScope) string {
 	clauses := make([]string, 0, len(scopes))
 	for _, scope := range scopes {
-		if clause := buildScopeClause(alias, "id", scope); clause != "" {
+		if clause := v.buildScopeClause(alias, "id", scope); clause != "" {
 			clauses = append(clauses, clause)
 		}
+	}
+	if len(clauses) == 0 {
+		return "false"
 	}
 	return joinOrClauses(clauses)
 }
 
-func buildChunkScopeCondition(alias string, scopes []SearchScope) string {
+func (v *sqlValidator) buildChunkScopeCondition(alias string, scopes []SearchScope) string {
 	clauses := make([]string, 0, len(scopes))
 	for _, scope := range scopes {
-		if clause := buildScopeClause(alias, "knowledge_id", scope); clause != "" {
+		if clause := v.buildScopeClause(alias, "knowledge_id", scope); clause != "" {
 			clauses = append(clauses, clause)
 		}
+	}
+	if len(clauses) == 0 {
+		return "false"
 	}
 	return joinOrClauses(clauses)
 }
 
-func uniqueScopeKBIDs(scopes []SearchScope) []string {
-	seen := make(map[string]bool, len(scopes))
-	out := make([]string, 0, len(scopes))
-	for _, scope := range scopes {
-		if scope.KnowledgeBaseID == "" || seen[scope.KnowledgeBaseID] {
-			continue
+// scopeTenantCondition keeps ownership in the same OR branch as the KB and
+// document/tag restrictions. Missing ownership retains caller-only isolation.
+func (v *sqlValidator) scopeTenantCondition(alias string, scope SearchScope) string {
+	tenantID := scope.TenantID
+	if tenantID == 0 {
+		if !v.enableTenantInjection {
+			return ""
 		}
-		seen[scope.KnowledgeBaseID] = true
-		out = append(out, scope.KnowledgeBaseID)
+		tenantID = v.tenantID
 	}
-	return out
+	return fmt.Sprintf("%s.tenant_id = %d", alias, tenantID)
 }
 
 func joinOrClauses(clauses []string) string {

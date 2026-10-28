@@ -26,6 +26,12 @@ curl $BASE/api/v1/agents/placeholders -H "Authorization: Bearer $TOKEN"
 curl $BASE/api/v1/agents/type-presets -H "Authorization: Bearer $TOKEN"
 ```
 
+### GET /api/v1/agents/tools
+
+用途：获取智能体可选的内置工具目录，权限 Viewer+。响应 `{"success":true,"data":{"tools":[...],"default_tools":[...],"switch_managed_tools":[...]}}`；每项工具带 `requirement.any_of` / `all_of` 知识库能力要求，编辑器据此判断是否可选。
+
+创建或更新时新增未知工具名返回 400；已存储的未知项保留，响应顶层 `allowed_tools_warnings.kept_unknown` 列出这些名称。由独立开关管理的工具及无后继的旧技能工具从列表移除，`allowed_tools_warnings.dropped` 返回移除项。旧检索工具名会映射为后继工具，重复项去重。
+
 ### POST /api/v1/agents
 
 用途：创建自定义 Agent。权限：Contributor+。
@@ -37,7 +43,7 @@ curl $BASE/api/v1/agents/type-presets -H "Authorization: Bearer $TOKEN"
 | `avatar` | string | 否 | 头像/emoji |
 | `config` | object | 否 | Agent 配置（`types.CustomAgentConfig`，见下） |
 
-`config` 主要字段：`agent_mode`（`quick-answer`/`smart-reasoning`）、`agent_type`（`rag-qa/wiki-qa/hybrid-rag-wiki/data-analysis/custom`）、`system_prompt`、`model_id`、`temperature`（0-2，非法返回 code 2103）、`max_iterations`（1-20，非法返回 code 2102）、`allowed_tools`（智能推理必填至少一个，code 2101）、`mcp_selection_mode`/`mcp_services`、`skills_selection_mode`、`kb_selection_mode`/`knowledge_bases`、`web_search_enabled`、`question_suggestions` 等（完整定义见 `internal/types/custom_agent.go`）。
+`config` 主要字段：`agent_mode`（`quick-answer`/`smart-reasoning`）、`agent_type`（`rag-qa/wiki-qa/hybrid-rag-wiki/data-analysis/custom`）、`system_prompt`、`model_id`、`temperature`（0-2，非法返回 code 2103）、`max_iterations`（1-20，非法返回 code 2102）、`allowed_tools`（未设置/null 使用默认工具，显式 `[]` 不选内置工具；联网、记忆、MCP 与沙箱按独立配置注册）、`mcp_selection_mode`/`mcp_services`、`skills_selection_mode`、`kb_selection_mode`/`knowledge_bases`、`web_search_enabled`、`question_suggestions` 等（完整定义见 `internal/types/custom_agent.go`）。
 
 响应：201 `{"success":true,"data":{id,name,description,avatar,is_builtin,created_by,config,creator_name,...}}`
 
@@ -68,7 +74,7 @@ curl $BASE/api/v1/agents/agent-1 -H "Authorization: Bearer $TOKEN"
 
 ### PUT /api/v1/agents/:id
 
-用途：更新 Agent。权限：创建者 OR Admin+。请求体：`name/description/avatar/config`（均可选）。
+用途：更新 Agent。权限：创建者 OR Admin+。请求体：`name/description/avatar/config`（均可选）。Agent 已分享到组织时，新加入知识库范围的知识库须是调用者可分享的（知识库创建者或 Admin+，改为 `all` 需要 Admin+），否则 403。
 
 响应：200 `{"success":true,"data":{Agent}}`
 
@@ -125,17 +131,17 @@ curl "$BASE/api/v1/agents/agent-1/suggested-questions?limit=6" -H "X-API-Key: $A
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `name` | string | 是 | 名称 |
-| `description` | string | 否 | 描述 |
+| `description` | string | 否 | 旧版描述，兼容保留；管理界面统一编辑 `usage_instructions` |
+| `usage_instructions` | string | 否 | 服务用途、适用场景和关键约束，模型据此判断何时使用该服务；管理界面在第二步要求填写 |
 | `enabled` | bool | 否 | 启用 |
-| `transport_type` | string | 是 | `sse` / `http-streamable` / `stdio` |
+| `transport_type` | string | 是 | `sse` / `http-streamable`；`stdio` 出于安全原因被拒绝 |
 | `url` | *string | 否 | 服务 URL（SSE/HTTP） |
 | `headers` | map[string]string | 否 | HTTP 头 |
-| `auth_config` | object | 否 | `auth_type`(`api_key/bearer/oauth`)、`api_key_header`、`custom_headers`、`scopes`、`auth_server_metadata_url`（密钥走 credentials 子资源） |
-| `advanced_config` | object | 否 | 超时/重试 |
-| `stdio_config` | object | 否 | stdio 命令与参数 |
-| `env_vars` | map[string]string | 否 | 环境变量 |
+| `auth_config` | object | 否 | `auth_type`(`api_key/bearer/oauth`)、`api_key_header`、`custom_headers`、`scopes`、`auth_server_metadata_url`、`client_id`（OAuth 预注册客户端，留空则动态客户端注册；空字符串清除）（密钥与 `client_secret` 走 credentials 子资源，创建时可随请求体提交） |
+| `advanced_config` | object | 否 | `{timeout,retry_count,retry_delay}`，默认 30 秒 / 3 次 / 1 秒；`timeout` 大于 60 秒时也会延长 Agent 单次调用该服务工具的等待窗口 |
+| `stdio_config` / `env_vars` | object | 否 | 仅为兼容旧数据保留；stdio 已禁用，不生效 |
 
-响应：200 `{"success":true,"data":{MCPServiceResponse}}`（含 `credentials:{api_key:{configured},token:{configured}}`）
+响应：200 `{"success":true,"data":{MCPServiceResponse}}`（含 `credentials:{api_key:{configured},token:{configured},client_secret:{configured}}`；已同步工具目录的服务还带 `catalog:{tool_count,stale,synced_at}`）
 
 ```bash
 curl -X POST $BASE/api/v1/mcp-services -H "Authorization: Bearer $TOKEN" \
@@ -145,6 +151,13 @@ curl -X POST $BASE/api/v1/mcp-services -H "Authorization: Bearer $TOKEN" \
 ### GET /api/v1/mcp-services
 
 用途：MCP 服务列表。权限：Viewer+。响应：200 `{"success":true,"data":[MCPServiceResponse]}`
+
+| 查询参数 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `agent_id` | string | 否 | 与 `agent_source_tenant_id` 同时传入时，列出该共享智能体可 @ 的 MCP 服务 |
+| `agent_source_tenant_id` | int | 否 | 共享智能体的来源空间 ID，与对话请求的同名参数一致 |
+
+两个参数都传时走共享智能体路径：只返回该智能体在来源空间以 `selected` 模式指定且已启用的服务（`all`/`none` 模式返回空列表），且每项只含 ID、名称、说明、使用说明、传输类型、启用状态和工具目录摘要，不含 URL、请求头、认证配置等连接细节；调用者无权使用该智能体时返回 403。只传其一或都不传时，列出调用者自己空间的服务。
 
 ```bash
 curl $BASE/api/v1/mcp-services -H "Authorization: Bearer $TOKEN"
@@ -162,12 +175,24 @@ curl $BASE/api/v1/mcp-services/mcp-1 -H "Authorization: Bearer $TOKEN"
 
 用途：部分更新（map 语义；`auth_config` 中不可携带 api_key/token）。权限：Admin+。字段同创建（均可选）。
 
+提交 `usage_instructions` 时必须为去除首尾空白后非空的字符串，最长 16000 字符。仅修改连接或启用状态时可省略该字段，原值保持不变。
+
 响应：200 `{"success":true,"data":{MCPServiceResponse}}`
 
 ```bash
 curl -X PUT $BASE/api/v1/mcp-services/mcp-1 -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' -d '{"enabled":false}'
 ```
+
+### POST /api/v1/mcp-services/:id/usage-instructions/generate
+
+用途：根据已同步、未过期的 MCP 工具目录生成精简使用说明。权限：Admin+；API key 需要 `manage_mcp_services` 或 full。
+
+请求：`{"language":"zh-CN"}`。支持 `zh-CN`、`en-US`、`ja-JP`、`ko-KR`、`ru-RU`，默认中文。
+
+优先使用空间默认的可用对话模型，否则使用首个可用对话模型。输入包括服务名称、服务端说明和已启用工具的名称、描述；OAuth 目录沿用当前用户的授权范围。不会连接 MCP、调用工具或自动保存生成结果。
+
+响应：200 `{"success":true,"data":{"usage_instructions":"按模块和时间范围查询远程日志；已有查询 ID 时读取对应日志。"}}`。生成目标为 2–3 句简短说明，最多 500 字符；用户可编辑后通过 PUT 保存。目录未同步、过期、无启用工具或无可用对话模型时返回 400。
 
 ### DELETE /api/v1/mcp-services/:id
 
@@ -183,6 +208,26 @@ curl -X DELETE $BASE/api/v1/mcp-services/mcp-1 -H "Authorization: Bearer $TOKEN"
 
 ```bash
 curl -X POST $BASE/api/v1/mcp-services/mcp-1/test -H "Authorization: Bearer $TOKEN"
+```
+
+### GET /api/v1/mcp-services/:id/metadata
+
+用途：读取持久工具目录，不连接上游。权限：Viewer+；OAuth 目录按当前有效授权主体隔离。
+
+响应：200 `{"success":true,"data":null}` 表示未同步；已同步时 `data` 为目录快照，包含服务端信息、instructions、tools 和同步时间。连接配置变更后的快照标记 `stale:true`，不能用于加载运行时工具。
+
+```bash
+curl $BASE/api/v1/mcp-services/mcp-1/metadata -H "Authorization: Bearer $TOKEN"
+```
+
+### POST /api/v1/mcp-services/:id/metadata/refresh
+
+用途：显式连接上游、完整拉取并原子更新工具目录。静态认证目录需 Admin+；OAuth 用户可同步自己的目录（Viewer+）。API Key 需要 MCP 管理能力。
+
+响应为更新后的目录快照。失败保留原快照；连接在刷新期间变化返回 409，目录无效/过大或上游同步失败返回 400，元数据存储不可用返回 503。不会覆盖人工使用说明和单工具启用/审批策略。
+
+```bash
+curl -X POST $BASE/api/v1/mcp-services/mcp-1/metadata/refresh -H "Authorization: Bearer $TOKEN"
 ```
 
 ### GET /api/v1/mcp-services/:id/tools
@@ -203,9 +248,9 @@ curl $BASE/api/v1/mcp-services/mcp-1/resources -H "Authorization: Bearer $TOKEN"
 
 ### PUT /api/v1/mcp-services/:id/credentials
 
-用途：设置密钥（`api_key`/`token`，指针字段，省略保留）。权限：Admin+。Handler: `internal/handler/mcp_credentials.go`
+用途：设置密钥（`api_key`/`token`/`client_secret`，指针字段，省略保留）。权限：Admin+。Handler: `internal/handler/mcp_credentials.go`
 
-响应：200 `{"success":true,"data":{"fields":{"api_key":{"configured"},"token":{"configured"}}}}`
+响应：200 `{"success":true,"data":{"fields":{"api_key":{"configured"},"token":{"configured"},"client_secret":{"configured"}}}}`
 
 ```bash
 curl -X PUT $BASE/api/v1/mcp-services/mcp-1/credentials -H "Authorization: Bearer $TOKEN" \
@@ -214,7 +259,7 @@ curl -X PUT $BASE/api/v1/mcp-services/mcp-1/credentials -H "Authorization: Beare
 
 ### DELETE /api/v1/mcp-services/:id/credentials/:field
 
-用途：删除凭证字段（`api_key` 或 `token`）。权限：Admin+。响应：204。
+用途：删除凭证字段（`api_key`、`token` 或 `client_secret`）。权限：Admin+。响应：204。
 
 ```bash
 curl -X DELETE $BASE/api/v1/mcp-services/mcp-1/credentials/token -H "Authorization: Bearer $TOKEN"
@@ -269,6 +314,21 @@ curl -X POST $BASE/api/v1/mcp-services/mcp-1/oauth/authorize-url -H "Authorizati
   -H 'Content-Type: application/json' -d '{"redirect_uri":"'$BASE'/api/v1/mcp-oauth/callback"}'
 ```
 
+### POST /api/v1/mcp-services/:id/oauth/assertion
+
+用途：以 JWT Bearer 授权（RFC 7523）为本人获取 OAuth token，无需浏览器跳转。适用于 WeKnora 部署在其他应用之后、由该应用负责登录并代用户调用 WeKnora 的场景：该应用签发代表当前用户的断言（如 MCP Enterprise-Managed Authorization 使用的 ID-JAG），WeKnora 原样提交给授权服务器，由授权服务器校验。使用该服务已注册的 OAuth 客户端（不会进行动态客户端注册；尚无客户端时返回 400）。获得的 token 与授权回调保存的 token 相同，后续刷新、状态查询与吊销不变。权限：Viewer+。
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `assertion` | string | 是 | 提交给授权服务器的 JWT 断言（请求体上限 16 KiB） |
+
+响应：200，`data` 与 `oauth/status` 相同。授权服务器拒绝断言（4xx，或 2xx 响应体含 OAuth `error`）时返回 400 并附 OAuth 错误码；授权服务器 5xx 或网络错误返回 500。
+
+```bash
+curl -X POST $BASE/api/v1/mcp-services/mcp-1/oauth/assertion -H "X-API-Key: $API_KEY" \
+  -H "X-External-User-ID: user-1" -H 'Content-Type: application/json' -d '{"assertion":"'$ASSERTION'"}'
+```
+
 ### GET /api/v1/mcp-services/:id/oauth/status
 
 用途：查询本人授权状态。权限：Viewer+。查询参数：`authorization_attempt`（可选）。
@@ -285,6 +345,40 @@ curl $BASE/api/v1/mcp-services/mcp-1/oauth/status -H "Authorization: Bearer $TOK
 
 ```bash
 curl -X DELETE $BASE/api/v1/mcp-services/mcp-1/oauth/token -H "Authorization: Bearer $TOKEN"
+```
+
+## MCP Server 端点（/api/v1/mcp-endpoints） {#mcp-server-端点}
+
+管理当前空间对外发布的 MCP 端点，外部 MCP 客户端连接 `/mcp/:endpoint_id`。读：Viewer+；写：Admin+。API key：`manage_channels`/full。Handler: `internal/handler/mcp_endpoint.go`。用途与工具说明见[MCP 集成](../03-features/08-mcp.md#供外部客户端调用)。
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/mcp-endpoints` | 端点列表（不含令牌） |
+| GET | `/mcp-endpoints/tools` | 工具目录：`{groups,tools:[{name,group,destructive}],default_tools}` |
+| POST | `/mcp-endpoints` | 创建；201，响应含一次性 `token` |
+| GET | `/mcp-endpoints/:endpoint_id` | 详情 |
+| PUT | `/mcp-endpoints/:endpoint_id` | 部分更新，省略的字段保持原值 |
+| DELETE | `/mcp-endpoints/:endpoint_id` | 删除，使用该端点的客户端立即失效 |
+| POST | `/mcp-endpoints/:endpoint_id/rotate-token` | 轮换令牌，响应含新 `token`，旧令牌立即失效 |
+
+请求字段（创建和更新相同，均可选）：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `name` | string | 名称，创建时必填 |
+| `description` | string | 说明 |
+| `enabled` | bool | 默认 true；停用后连接返回 403 |
+| `knowledge_base_ids` | string[] | 可访问的知识库，空数组表示空间内全部 |
+| `tools` | string[] | 暴露的工具，至少一个；创建时省略则使用 `default_tools`（全部只读工具） |
+| `default_agent_id` | string | `ask` 使用的 Agent，空为内置快速问答；内部内置 Agent 不可选 |
+| `rate_limit_per_minute` | int | 每分钟工具调用上限，0 或省略为 60，最大 6000 |
+
+响应 `data` 为 `{id,tenant_id,name,description,enabled,token_hint,knowledge_base_ids,tools,default_agent_id,rate_limit_per_minute,path,last_used_at,created_at,updated_at}`，创建和轮换时额外带 `token`。使用受限 API Key 调用时，端点的知识库和工具所需能力不能超出该 Key 的范围，否则 403。
+
+```bash
+curl -X POST $BASE/api/v1/mcp-endpoints -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"产品文档助手","knowledge_base_ids":["kb-1"],"tools":["search_knowledge","read_document","ask"]}'
 ```
 
 ## Agent 运行时交互（/api/v1/agent）
@@ -336,7 +430,7 @@ curl -X POST $BASE/api/v1/agent/mcp-oauth-resolutions/p-1/cancel -H "Authorizati
 
 ## 技能、沙箱与个人变量
 
-`GET /api/v1/skills?sandbox_config_id=...` 返回指定配置下可用技能的名称/说明及 skills_available。目录收录、安装、模板、进度、文件与个人变量的完整接口见[沙箱与技能 API](02-api-sandbox-skills.md)。
+`GET /api/v1/skills?sandbox_config_id=...` 返回指定配置下可用技能的名称/说明及 skills_available；传 `agent_id` + `agent_source_tenant_id` 时按共享智能体的来源空间和其沙箱配置返回，详见[沙箱与技能 API](02-api-sandbox-skills.md#沙箱内技能)。目录收录、安装、模板、进度、文件与个人变量的完整接口见[沙箱与技能 API](02-api-sandbox-skills.md)。
 
 智能体 config 增加 `sandbox_config_id`；与 skills_selection_mode、selected_skills 一起决定可用技能。shell/文件工具按后端能力注册，旧 read_skill / execute_skill_script 不再注册。
 
@@ -381,4 +475,4 @@ curl -X DELETE $BASE/api/v1/user/favorites/kb/kb-1 -H "Authorization: Bearer $TO
 
 ## 实现参考
 
-路由注册：`internal/router/router.go` 的 `RegisterCustomAgentRoutes`、`RegisterMCPServiceRoutes`、`RegisterSkillRoutes`、`RegisterUserFavoriteRoutes`。Handler：`internal/handler/custom_agent.go`、`internal/handler/mcp_service.go`、`internal/handler/mcp_credentials.go`、`internal/handler/mcp_oauth.go`、`internal/handler/skill_handler.go`、`internal/handler/user_resource_favorite.go`。
+路由注册：由 `internal/router/router.go` 调用，`RegisterCustomAgentRoutes`、`RegisterSkillRoutes`、`RegisterUserFavoriteRoutes` 定义在 `routes_agent.go`，`RegisterMCPServiceRoutes`（含 MCP OAuth 与 `/agent` 运行时交互）在 `routes_infra.go`，`RegisterMCPEndpointRoutes` 与公开的 `/mcp/:endpoint_id` 在 `routes_mcp_endpoint.go`。Handler：`internal/handler/custom_agent.go`、`internal/handler/mcp_service.go`、`internal/handler/mcp_credentials.go`、`internal/handler/mcp_oauth.go`、`internal/handler/mcp_endpoint.go`、`internal/handler/skill_handler.go`、`internal/handler/user_resource_favorite.go`。

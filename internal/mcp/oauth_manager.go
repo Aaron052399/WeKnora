@@ -3,6 +3,10 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/url"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/logger"
@@ -56,23 +60,43 @@ func (m *OAuthManager) newHandler(
 	if err := ValidateServiceOutboundURLs(service); err != nil {
 		return nil, err
 	}
-	httpCfg := secutils.DefaultSSRFSafeHTTPClientConfig()
-	httpCfg.Timeout = 30 * time.Second
 	cfg := transport.OAuthConfig{
 		RedirectURI:           redirectURI,
 		Scopes:                service.AuthConfig.Scopes,
 		TokenStore:            newDBTokenStore(m.repo, tenantID, principal, service.ID),
 		PKCEEnabled:           true,
 		AuthServerMetadataURL: service.AuthConfig.AuthServerMetadataURL,
-		HTTPClient:            secutils.NewSSRFSafeHTTPClient(httpCfg),
+		HTTPClient:            newOAuthHTTPClient(),
 	}
-	if existing, err := m.repo.GetClient(ctx, tenantID, service.ID); err == nil && existing != nil {
+	if clientID, clientSecret, ok := preRegisteredClient(service); ok {
+		cfg.ClientID, cfg.ClientSecret = clientID, clientSecret
+	} else if existing, err := m.repo.GetClient(ctx, tenantID, service.ID); err == nil && existing != nil {
 		cfg.ClientID = existing.ClientID
 		cfg.ClientSecret = existing.ClientSecret
 	}
 	h := transport.NewOAuthHandler(cfg)
 	h.SetBaseURL(*service.URL)
 	return h, nil
+}
+
+// newOAuthHTTPClient builds the client for every request sent to an
+// authorization server: addresses are checked against SSRF rules when dialing
+// and only same-origin redirects are followed.
+func newOAuthHTTPClient() *http.Client {
+	httpCfg := secutils.DefaultSSRFSafeHTTPClientConfig()
+	httpCfg.SameOriginRedirectsOnly = true
+	httpCfg.Timeout = 30 * time.Second
+	return secutils.NewSSRFSafeHTTPClient(httpCfg)
+}
+
+// preRegisteredClient returns the OAuth client an administrator registered
+// with the authorization server in advance and set on the service. It takes
+// the place of dynamic client registration.
+func preRegisteredClient(service *types.MCPService) (clientID, clientSecret string, ok bool) {
+	if service == nil || service.AuthConfig == nil || service.AuthConfig.ClientID == "" {
+		return "", "", false
+	}
+	return service.AuthConfig.ClientID, service.AuthConfig.ClientSecret, true
 }
 
 // StartAuthorization performs discovery + (one-time) dynamic client
@@ -94,14 +118,20 @@ func (m *OAuthManager) StartAuthorization(
 		return "", "", fmt.Errorf("principal context is required to authorize OAuth MCP service %s", service.ID)
 	}
 
+	frontendRedirect, err = validateFrontendRedirect(frontendRedirect)
+	if err != nil {
+		return "", "", err
+	}
+
 	h, err := m.newHandler(ctx, service, tenantID, principal, redirectURI)
 	if err != nil {
 		return "", "", err
 	}
 
-	// Register a client dynamically if we don't have one yet for this service.
+	// Register a client dynamically if the service has no pre-registered client
+	// and we don't have one yet.
 	existing, _ := m.repo.GetClient(ctx, tenantID, service.ID)
-	if existing == nil {
+	if _, _, preRegistered := preRegisteredClient(service); !preRegistered && existing == nil {
 		if err := h.RegisterClient(ctx, clientRegistrationName); err != nil {
 			return "", "", fmt.Errorf("dynamic client registration failed: %w", err)
 		}
@@ -109,11 +139,14 @@ func (m *OAuthManager) StartAuthorization(
 		if clientID == "" {
 			return "", "", fmt.Errorf("dynamic client registration returned an empty client_id")
 		}
+		// The code exchange and later refreshes run with a handler rebuilt
+		// from this row, so a secret issued with the client has to be kept.
 		if err := m.repo.SaveClient(ctx, &types.MCPOAuthClient{
-			TenantID:    tenantID,
-			ServiceID:   service.ID,
-			ClientID:    clientID,
-			RedirectURI: redirectURI,
+			TenantID:     tenantID,
+			ServiceID:    service.ID,
+			ClientID:     clientID,
+			ClientSecret: h.GetClientSecret(),
+			RedirectURI:  redirectURI,
 		}); err != nil {
 			logger.GetLogger(ctx).Warnf("failed to persist MCP oauth client: %v", err)
 		}
@@ -171,58 +204,78 @@ func (m *OAuthManager) StartAuthorizationForService(
 	return authURL, err
 }
 
+// OAuthAuthorizationResult describes the authorization attempt a provider
+// callback belonged to.
+type OAuthAuthorizationResult struct {
+	// FrontendRedirect is where the browser is sent next. It is set even when
+	// the callback fails, as soon as the attempt's state has been read.
+	FrontendRedirect string
+	// TenantID and ServiceID identify the service the attempt authorized.
+	TenantID  uint64
+	ServiceID string
+	// Principal is the identity the token was issued for.
+	Principal types.Principal
+}
+
 // CompleteAuthorization handles the provider callback: it validates state,
 // exchanges the code for tokens (PKCE), and persists the per-user token.
-// Returns the frontend redirect URL and service ID recorded at
-// StartAuthorization time so the caller can recycle any cached transport that
-// still carries the previous OAuth client registration.
+// The result identifies the authorized service and principal so the caller can
+// recycle the cached connections the new authorization leaves outdated.
 func (m *OAuthManager) CompleteAuthorization(
 	ctx context.Context, state, code string,
-) (frontendRedirect, serviceID string, err error) {
+) (OAuthAuthorizationResult, error) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), oauthCallbackTimeout)
 	defer cancel()
 
 	st, err := m.states.Take(ctx, state)
 	if err != nil {
-		return "", "", err
+		return OAuthAuthorizationResult{}, err
 	}
-	frontendRedirect = st.FrontendRedirect
-	serviceID = st.ServiceID
+	frontendRedirect, err := validateFrontendRedirect(st.FrontendRedirect)
+	if err != nil {
+		return OAuthAuthorizationResult{FrontendRedirect: "/"}, err
+	}
+	result := OAuthAuthorizationResult{
+		FrontendRedirect: frontendRedirect,
+		TenantID:         st.TenantID,
+		ServiceID:        st.ServiceID,
+	}
 	principal := st.Principal.Normalize()
 	if !principal.Valid() && st.UserID != "" {
 		principal = types.Principal{Type: types.PrincipalWebUser, ID: st.UserID}.Normalize()
 	}
 	if !principal.Valid() {
-		return frontendRedirect, serviceID, fmt.Errorf("principal context is missing from OAuth state")
+		return result, fmt.Errorf("principal context is missing from OAuth state")
 	}
+	result.Principal = principal
 
 	service, err := m.serviceRepo.GetByID(ctx, st.TenantID, st.ServiceID)
 	if err != nil {
-		return frontendRedirect, serviceID, fmt.Errorf("failed to load MCP service: %w", err)
+		return result, fmt.Errorf("failed to load MCP service: %w", err)
 	}
 	if service == nil {
-		return frontendRedirect, serviceID, fmt.Errorf("MCP service not found")
+		return result, fmt.Errorf("MCP service not found")
 	}
 
 	h, err := m.newHandler(ctx, service, st.TenantID, principal, st.RedirectURI)
 	if err != nil {
-		return frontendRedirect, serviceID, err
+		return result, err
 	}
 	// Re-prime the expected state so the library's CSRF check passes after
 	// reconstructing the handler in this separate request.
 	h.SetExpectedState(state)
 
 	if err := h.ProcessAuthorizationResponse(ctx, code, state, st.CodeVerifier); err != nil {
-		return frontendRedirect, serviceID, fmt.Errorf("token exchange failed: %w", err)
+		return result, fmt.Errorf("token exchange failed: %w", err)
 	}
 	if err := m.states.CompleteAttempt(ctx, state); err != nil {
-		return frontendRedirect, serviceID, fmt.Errorf("failed to record authorization completion: %w", err)
+		return result, fmt.Errorf("failed to record authorization completion: %w", err)
 	}
 	// ProcessAuthorizationResponse persists the token via the TokenStore.
 	logger.GetLogger(ctx).Infof(
 		"MCP OAuth authorized: service=%s principal=%s", st.ServiceID, principal.StorageID(),
 	)
-	return frontendRedirect, serviceID, nil
+	return result, nil
 }
 
 // IsAuthorizationAttemptComplete reports whether this exact authorization
@@ -277,4 +330,27 @@ func (m *OAuthManager) Revoke(
 	ctx context.Context, tenantID uint64, principal types.Principal, serviceID string,
 ) error {
 	return m.repo.DeleteTokenForPrincipal(ctx, tenantID, principal, serviceID)
+}
+
+// validateFrontendRedirect accepts application-relative paths or the explicitly
+// configured frontend origin. Request Host/Origin headers are not trusted.
+func validateFrontendRedirect(raw string) (string, error) {
+	if raw == "" {
+		return "/", nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.User != nil || u.Fragment != "" ||
+		strings.ContainsAny(raw, "\\\r\n\t") || strings.ContainsAny(u.Path, "\\\r\n\t") {
+		return "", fmt.Errorf("invalid frontend_redirect")
+	}
+	if u.IsAbs() || u.Host != "" {
+		trusted, err := url.Parse(strings.TrimSpace(os.Getenv("APP_EXTERNAL_URL")))
+		if err != nil || (u.Scheme != "https" && u.Scheme != "http") || trusted.Host == "" ||
+			!strings.EqualFold(u.Scheme, trusted.Scheme) || !strings.EqualFold(u.Host, trusted.Host) {
+			return "", fmt.Errorf("frontend_redirect origin is not configured")
+		}
+	} else if !strings.HasPrefix(u.Path, "/") || strings.HasPrefix(u.Path, "//") {
+		return "", fmt.Errorf("frontend_redirect must be an application-relative path")
+	}
+	return u.String(), nil
 }

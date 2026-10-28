@@ -56,14 +56,14 @@ const badgeStyle = computed((): Record<string, string> => (
   width: 26px;
   height: 26px;
   border-radius: 7px;
-  font-size: 14px;
+  font-size: var(--app-text-base);
 }
 
 .sandbox-badge--xs {
   width: 16px;
   height: 16px;
-  border-radius: 4px;
-  font-size: 10px;
+  border-radius: var(--app-radius-xs);
+  font-size: var(--app-text-2xs);
 }
 
 .sandbox-badge--e2b {
@@ -100,7 +100,7 @@ const badgeStyle = computed((): Record<string, string> => (
 }
 
 .sandbox-badge--xs.sandbox-badge--mono::before {
-  width: 10px;
-  height: 10px;
+  width: 16px;
+  height: 16px;
 }
 </style>

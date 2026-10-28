@@ -34,9 +34,8 @@ ENV VITE_IS_DOCKER=true
 # Vite production builds of this SPA routinely exceed Node's default heap.
 ENV NODE_OPTIONS="--max-old-space-size=${NODE_MAX_OLD_SPACE_SIZE}"
 
-# package-lock references file:packages/xlsx-*.tgz — copy before npm ci.
+# The lockfile pins the remote SheetJS archive and its integrity hash.
 COPY package.json package-lock.json ./
-COPY packages ./packages
 RUN if [ -n "$NPM_REGISTRY" ]; then \
       npm ci --registry="$NPM_REGISTRY"; \
     else \
@@ -66,6 +65,7 @@ COPY nginx.conf /etc/nginx/templates/default.conf.template
 # Copied outside templates/ on purpose: envsubst would eat $host and the other
 # nginx variables in it.
 COPY nginx-api-proxy.conf /etc/nginx/api-proxy.conf
+COPY nginx-http.conf /etc/nginx/conf.d/00-weknora-http.conf
 
 COPY docker-entrypoint.sh /docker-entrypoint.sh
 RUN chmod +x /docker-entrypoint.sh

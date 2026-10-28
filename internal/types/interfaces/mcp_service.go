@@ -41,12 +41,16 @@ type MCPServiceService interface {
 	// ListMCPServices lists all MCP services for a tenant
 	ListMCPServices(ctx context.Context, tenantID uint64) ([]*types.MCPService, error)
 
+	// ListMCPMetadataSummaries returns persisted directory counts for the list UI.
+	ListMCPMetadataSummaries(context.Context, uint64, []*types.MCPService) (map[string]*types.MCPMetadataSummary, error)
+
 	// ListMCPServicesByIDs retrieves multiple MCP services by IDs
 	ListMCPServicesByIDs(ctx context.Context, tenantID uint64, ids []string) ([]*types.MCPService, error)
 
 	// UpdateMCPService updates an MCP service. updateFields records presence for
 	// scalar fields whose zero values cannot represent omission. Supported keys
-	// are "name", "description", and "enabled"; a nil map means none of those
+	// are "name", "description", "usage_instructions", "enabled", "auth_type",
+	// and "api_key_header"; a nil map means none of those
 	// scalar fields were provided.
 	UpdateMCPService(
 		ctx context.Context,
@@ -74,11 +78,12 @@ type MCPServiceService interface {
 	// Implementations MUST close any active MCP client connection for this
 	// service so the next upstream call reconnects with the new credential.
 	UpdateMCPCredentials(
-		ctx context.Context, tenantID uint64, id string, apiKey *string, token *string,
+		ctx context.Context, tenantID uint64, id string, apiKey, token, clientSecret *string,
 	) (*types.MCPService, error)
 
 	// ClearMCPCredential removes a single credential field. field must be
-	// "api_key" or "token"; other values must be rejected by the caller.
+	// "api_key", "token" or "client_secret"; other values must be rejected by
+	// the caller.
 	// Implementations MUST close any active MCP client connection for this
 	// service. Clearing a field that is already empty is a no-op (no error).
 	ClearMCPCredential(ctx context.Context, tenantID uint64, id, field string) error

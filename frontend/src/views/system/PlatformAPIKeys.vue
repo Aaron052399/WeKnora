@@ -1,18 +1,25 @@
 <template>
   <div class="platform-api-keys">
     <header class="section-header">
-      <h2>{{ t('platformApiKeys.title') }}</h2>
-      <p class="section-description">{{ t('platformApiKeys.description') }}</p>
-    </header>
-
-    <t-alert theme="warning" :message="t('platformApiKeys.securityNotice')" class="security-alert">
-      <template #operation>
-        <t-button size="small" variant="outline" @click="openCreate">
+      <div class="section-header__top">
+        <div class="section-header__titlewrap">
+          <h2>{{ t('platformApiKeys.title') }}</h2>
+          <t-popup placement="bottom-left" trigger="hover" show-arrow>
+            <button type="button" class="hint-trigger" :aria-label="t('platformApiKeys.title')">
+              <t-icon name="help-circle" size="16px" />
+            </button>
+            <template #content>
+              <div class="security-hint" role="note">{{ t('platformApiKeys.securityNotice') }}</div>
+            </template>
+          </t-popup>
+        </div>
+        <t-button size="small" variant="outline" class="header-action" @click="openCreate">
           <template #icon><t-icon name="add" /></template>
           {{ t('platformApiKeys.create') }}
         </t-button>
-      </template>
-    </t-alert>
+      </div>
+      <p class="section-description">{{ t('platformApiKeys.description') }}</p>
+    </header>
 
     <section class="keys-section">
       <div v-if="loading" class="keys-state">
@@ -355,38 +362,55 @@ async function copyToken() {
 onMounted(reload)
 </script>
 
-<style scoped>
+<style lang="less" scoped>
+@import (reference) '@/components/css/settings-section.less';
+@import (reference) '@/components/css/settings-table.less';
+
 .platform-api-keys {
-  width: 100%;
+  .settings-list-page();
 }
 
 .section-header {
-  margin-bottom: 20px;
+  .settings-section-header();
+  flex-shrink: 0;
+  margin-bottom: 12px;
+  padding-right: 32px;
 }
 
-.section-header h2 {
-  margin: 0 0 8px;
-  font-size: 20px;
-  font-weight: 600;
-  color: var(--td-text-color-primary);
+.section-header__top {
+  flex-wrap: wrap;
+  margin-bottom: 8px;
 }
 
-.section-description {
-  margin: 0;
+.section-header__titlewrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+
+  h2 { margin: 0; }
+}
+
+.hint-trigger {
+  .settings-title-help();
+}
+
+.security-hint {
+  max-width: min(320px, calc(100vw - 64px));
+  padding: 4px;
   color: var(--td-text-color-secondary);
-  font-size: 14px;
-  line-height: 1.5;
+  font-size: var(--app-text-sm);
+  line-height: 20px;
 }
 
-.security-alert {
-  margin-bottom: 20px;
+.header-action.t-button {
+  .settings-list-action();
 }
 
 .keys-section {
-  border: 1px solid var(--td-component-border);
-  border-radius: 10px;
-  background: var(--td-bg-color-container);
-  overflow: hidden;
+  .settings-data-table();
+  min-height: 0;
+  overflow: auto;
+  margin: 4px 0 32px;
 }
 
 .keys-state {
@@ -396,7 +420,7 @@ onMounted(reload)
   gap: 8px;
   min-height: 120px;
   color: var(--td-text-color-secondary);
-  font-size: 13px;
+  font-size: var(--app-text-md);
 }
 
 .keys-state--empty {
@@ -406,18 +430,18 @@ onMounted(reload)
 
 .api-key-table-wrap {
   width: 100%;
-  overflow-x: auto;
 }
 
 .api-key-table {
   width: 100%;
+  min-width: 760px;
   border-collapse: collapse;
   table-layout: fixed;
 }
 
 .api-key-table th,
 .api-key-table td {
-  padding: 13px 14px;
+  padding: 12px 24px;
   border-bottom: 1px solid var(--td-component-stroke);
   text-align: left;
   vertical-align: middle;
@@ -425,15 +449,15 @@ onMounted(reload)
 
 .api-key-table th {
   background: var(--td-bg-color-secondarycontainer);
-  color: var(--td-text-color-placeholder);
-  font-size: 12px;
+  color: var(--td-text-color-secondary);
+  font-size: var(--app-text-md);
   font-weight: 500;
-  line-height: 1.4;
+  line-height: 22px;
 }
 
 .api-key-table td {
   color: var(--td-text-color-secondary);
-  font-size: 13px;
+  font-size: var(--app-text-md);
   line-height: 1.45;
 }
 
@@ -495,9 +519,13 @@ onMounted(reload)
 .api-key-capability-popup__title {
   margin-bottom: 10px;
   color: var(--td-text-color-primary);
-  font-size: 13px;
+  font-size: var(--app-text-md);
   font-weight: 600;
   line-height: 1.4;
+}
+
+.api-key-table tbody tr:hover {
+  background: var(--td-bg-color-container-hover);
 }
 
 .api-key-table tbody tr:last-child td {
@@ -523,7 +551,7 @@ onMounted(reload)
 .api-key-capability-block__title {
   margin-bottom: 6px;
   color: var(--td-text-color-primary);
-  font-size: 12px;
+  font-size: var(--app-text-sm);
   font-weight: 600;
   line-height: 1.4;
 }
@@ -539,10 +567,10 @@ onMounted(reload)
   align-items: center;
   height: 22px;
   padding: 0 8px;
-  border-radius: 6px;
+  border-radius: var(--app-radius-sm);
   background: color-mix(in srgb, var(--td-success-color) 10%, var(--td-bg-color-container));
   color: var(--td-success-color);
-  font-size: 12px;
+  font-size: var(--app-text-sm);
   font-weight: 500;
   line-height: 20px;
   white-space: nowrap;
@@ -552,7 +580,7 @@ onMounted(reload)
   display: block;
   min-width: 0;
   color: var(--td-text-color-primary);
-  font-size: 13px;
+  font-size: var(--app-text-md);
   font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -564,7 +592,7 @@ onMounted(reload)
   max-width: 100%;
   color: var(--td-text-color-secondary);
   font-family: var(--app-font-family-mono);
-  font-size: 12px;
+  font-size: var(--app-text-sm);
   line-height: 1.5;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -575,7 +603,7 @@ onMounted(reload)
 .api-key-meta {
   display: block;
   min-width: 0;
-  font-size: 12px;
+  font-size: var(--app-text-sm);
   line-height: 1.4;
   white-space: nowrap;
 }
@@ -583,7 +611,7 @@ onMounted(reload)
 .api-key-date {
   display: block;
   font-family: var(--app-font-family-mono);
-  font-size: 12px;
+  font-size: var(--app-text-sm);
   line-height: 1.4;
   white-space: nowrap;
   color: var(--td-text-color-secondary);
@@ -618,7 +646,7 @@ onMounted(reload)
   align-items: center;
   gap: 8px;
   color: var(--td-text-color-primary);
-  font-size: 14px;
+  font-size: var(--app-text-base);
   font-weight: 600;
   line-height: 1.45;
 }
@@ -633,7 +661,7 @@ onMounted(reload)
 }
 
 .api-key-dialog-row :deep(.t-input) {
-  border-radius: 4px;
+  border-radius: var(--app-radius-xs);
   background-color: var(--td-bg-color-secondarycontainer);
   border-color: transparent;
   box-shadow: none !important;
@@ -648,7 +676,7 @@ onMounted(reload)
 .scope-hint {
   margin: 0;
   color: var(--td-text-color-placeholder);
-  font-size: 12px;
+  font-size: var(--app-text-sm);
   line-height: 18px;
 }
 
@@ -676,7 +704,7 @@ onMounted(reload)
   gap: 12px;
   min-height: 24px;
   color: var(--td-text-color-primary);
-  font-size: 13px;
+  font-size: var(--app-text-md);
   font-weight: 600;
 }
 

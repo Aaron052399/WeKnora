@@ -115,11 +115,11 @@ type AgentConfig struct {
 	SystemPromptWebEnabled  string        `json:"system_prompt_web_enabled,omitempty"`  // Deprecated: Custom prompt when web search is enabled
 	SystemPromptWebDisabled string        `json:"system_prompt_web_disabled,omitempty"` // Deprecated: Custom prompt when web search is disabled
 	UseCustomSystemPrompt   bool          `json:"use_custom_system_prompt"`             // Whether to use custom system prompt instead of default
+	LocalBrowserEnabled     bool          `json:"-"`                                    // Per-turn local_browser gate
 	WebSearchEnabled        bool          `json:"web_search_enabled"`                   // Whether web search tool is enabled
 	WebSearchMaxResults     int           `json:"web_search_max_results"`               // Maximum number of web search results (default: 5)
 	WebSearchProviderID     string        `json:"web_search_provider_id,omitempty"`     // WebSearchProviderEntity ID (resolved from agent config)
 	MultiTurnEnabled        bool          `json:"multi_turn_enabled"`                   // Whether multi-turn conversation is enabled
-	HistoryTurns            int           `json:"history_turns"`                        // Number of history turns to keep in context
 	MemoryEnabled           *bool         `json:"memory_enabled,omitempty"`             // nil inherits workspace
 	SearchTargets           SearchTargets `json:"-"`                                    // Pre-computed unified search targets (runtime only)
 	// MCP service selection
@@ -129,8 +129,16 @@ type AgentConfig struct {
 	// in-conversation OAuth authorization before skipping. <=0 falls back to
 	// the gate's configured timeout. The wait is always bounded (no leak).
 	MCPAuthWaitTimeout int `json:"mcp_auth_wait_timeout,omitempty"`
+	// AttachmentParseWaitTimeoutSec bounds how long reading an attachment waits for
+	// a file that is still being parsed. <=0 uses the server default.
+	AttachmentParseWaitTimeoutSec int `json:"-"`
+	// AttachmentSandboxCopies maps a sandbox path staged for this turn to the
+	// attachment:// path of the same stored attachment.
+	AttachmentSandboxCopies map[string]string `json:"-"`
 	// Whether to enable thinking mode (for models that support extended thinking)
 	Thinking *bool `json:"thinking"`
+	// ReasoningEffort is the graded thinking level; empty falls back to Thinking.
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 	// Whether final answers include knowledge/web source citations. Nil defaults to true.
 	CitationEnabled *bool `json:"citation_enabled"`
 	// Whether to retrieve knowledge base only when explicitly mentioned with @ (default: false)
@@ -145,8 +153,9 @@ type AgentConfig struct {
 	AllowedSkills []string `json:"allowed_skills"` // Skill names whitelist (empty = allow all)
 
 	// Runtime-only fields (not persisted)
-	VLMModelID      string `json:"-"` // VLM model ID for tool result image analysis (set from CustomAgent config)
-	SandboxConfigID string `json:"-"` // Workspace sandbox config ID for skill execution (set from CustomAgent config)
+	ChatModelSupportsVision bool   `json:"-"` // Resolved model capability, never supplied by tool input.
+	VLMModelID              string `json:"-"` // VLM model ID for tool images, resolved from CustomAgent config.
+	SandboxConfigID         string `json:"-"` // Workspace sandbox config ID for skill execution.
 	// TenantSkills are the skills installed into the selected sandbox config's
 	// snapshot image, already narrowed to the ones this run can actually
 	// invoke. Runtime only: it is derived per turn from the config the agent
@@ -155,10 +164,19 @@ type AgentConfig struct {
 	// Per-request @mention pins (runtime only; injected as <must_use> in the user message).
 	PinnedMCPServiceIDs []string `json:"-"`
 	PinnedSkillNames    []string `json:"-"`
+	// QuestionOrigin is the knowledge source of a suggested question the user
+	// picked, already checked to be inside KnowledgeBases (runtime only;
+	// rendered into runtime_context as a retrieval hint).
+	QuestionOrigin *QuestionOrigin `json:"-"`
 	// SharedAgentReadOnly prevents a shared agent from mutating resources in
 	// its source workspace. It is set from the verified share relation, never
 	// inferred from a client-provided tenant ID.
 	SharedAgentReadOnly bool `json:"-"`
+	// WritableKBIDs are the SearchTargets KBs this caller may modify (its own
+	// workspace's, or shared to it as editor+). Search targets only need read
+	// access, so tools that write (wiki pages and issues) are limited to this
+	// set; empty means read-only. Runtime only, derived per turn.
+	WritableKBIDs []string `json:"-"`
 	// LLM call timeout in seconds (default: 120). Controls the maximum time for a single LLM call.
 	LLMCallTimeout int `json:"llm_call_timeout,omitempty"`
 
@@ -174,6 +192,12 @@ type AgentConfig struct {
 	// Maximum context window tokens for the agent. Zero means "use the
 	// model's context_window, or DefaultMaxContextTokens (200000)".
 	MaxContextTokens int `json:"max_context_tokens,omitempty"`
+
+	// ContextTokenScale is the provider's tokens per estimated token that the
+	// session's last calibrated turn measured (TokenUsage.ContextTokenScale).
+	// The engine starts its estimator at this scale. Zero means uncalibrated.
+	// Runtime only.
+	ContextTokenScale float64 `json:"-"`
 
 	// How much recent conversation a compaction keeps verbatim. Zero means
 	// compaction.DefaultKeepRecentTokens, scaled down on small windows. This
@@ -349,16 +373,34 @@ type Cleanable interface {
 type ToolResult struct {
 	// OutputFiles holds sandbox references for this live result only. History
 	// uses the final answer's persistent resource references instead.
+	// A non-nil empty slice means output inspection found no eligible changes;
+	// nil means no output inspection result is available.
 	OutputFiles []string               `json:"-"`
 	Success     bool                   `json:"success"`          // Whether the tool executed successfully
 	Output      string                 `json:"output"`           // Human-readable output
 	Data        map[string]interface{} `json:"data,omitempty"`   // Structured data for programmatic use
 	Error       string                 `json:"error,omitempty"`  // Error message if execution failed
 	Images      []string               `json:"images,omitempty"` // Base64 data URIs from tool (e.g. MCP image content)
+	// ImageDescriptions is aligned with Images and holds a vision model's
+	// description of each for a chat model that cannot view them ("" when an
+	// image could not be described). Live only.
+	ImageDescriptions []string `json:"-"`
+	// ImageDetail ("brief" or "full") and ImageFocus carry how closely the
+	// model asked to read Images when it cannot view them. Live only.
+	ImageDetail string `json:"-"`
+	ImageFocus  string `json:"-"`
 }
+
+// Image description detail levels requested by a file read.
+const (
+	ImageDetailBrief = "brief"
+	ImageDetailFull  = "full"
+)
 
 // ToolCall represents a single tool invocation within an agent step
 type ToolCall struct {
+	// Target identifies the actual proxy target; Name/Args retain the model call for replay.
+	Target           *ToolCallTarget        `json:"target,omitempty"`
 	ID               string                 `json:"id"`                          // Function call ID from LLM
 	Name             string                 `json:"name"`                        // Tool name
 	Args             map[string]interface{} `json:"args"`                        // Tool arguments
@@ -366,6 +408,31 @@ type ToolCall struct {
 	Reflection       string                 `json:"reflection,omitempty"`        // Agent's reflection on this tool call result (if enabled)
 	Duration         int64                  `json:"duration"`                    // Execution time in milliseconds
 	ProviderMetadata ToolCallMetadata       `json:"provider_metadata,omitempty"` // Provider-specific tool-call state for replay
+}
+
+// ToolCallTarget identifies a resolved invocation without rewriting the model's
+// function call, which must be preserved for history replay and provider state.
+type ToolCallTarget struct {
+	Name        string                 `json:"name"`
+	Args        map[string]interface{} `json:"args"`
+	ServiceName string                 `json:"service_name"`
+	ToolName    string                 `json:"tool_name"`
+}
+
+// ExecutionName returns the resolved target name for presentation and tracing.
+func (t ToolCall) ExecutionName() string {
+	if t.Target != nil {
+		return t.Target.Name
+	}
+	return t.Name
+}
+
+// ExecutionArgs returns the resolved target arguments without changing replay data.
+func (t ToolCall) ExecutionArgs() map[string]interface{} {
+	if t.Target != nil {
+		return t.Target.Args
+	}
+	return t.Args
 }
 
 // PipelineToolCallIDPrefix marks a persisted tool call the model never made.
@@ -386,13 +453,30 @@ func IsPipelineToolCallID(id string) bool {
 type AgentStep struct {
 	Iteration int    `json:"iteration"` // Iteration number (0-indexed)
 	Thought   string `json:"thought"`   // LLM's reasoning/thinking (Think phase)
+	// UserMessagesBefore records consumed steer rows in delivery order, before
+	// this model response. Unlike timestamps, this remains unambiguous on replay.
+	UserMessagesBefore []string `json:"user_messages_before,omitempty"`
+	// IntermediateAnswer preserves a plain answer followed by a loop-end steer.
+	// The canonical final answer is still stored in Message.Content.
+	IntermediateAnswer bool `json:"intermediate_answer,omitempty"`
 	// ReasoningContent stores the OpenAI-protocol reasoning_content emitted by the
 	// model in this round. Persisted on AgentStep so cross-turn replay can put it
 	// back on the assistant message — required by MiMo / DeepSeek V3.2+ thinking
 	// mode, ignored by providers that don't recognize the field.
-	ReasoningContent string     `json:"reasoning_content,omitempty"`
-	ToolCalls        []ToolCall `json:"tool_calls"` // Tools called in this step (Act phase)
-	Timestamp        time.Time  `json:"timestamp"`  // When this step occurred
+	ReasoningContent string `json:"reasoning_content,omitempty"`
+	// ReasoningSignature / ReasoningMetadata are the provider artifacts that
+	// must accompany ReasoningContent on replay (Anthropic signatures,
+	// OpenAI Responses encrypted reasoning items).
+	ReasoningSignature string           `json:"reasoning_signature,omitempty"`
+	ReasoningMetadata  ProviderMetadata `json:"reasoning_metadata,omitempty"`
+	ToolCalls          []ToolCall       `json:"tool_calls"` // Tools called in this step (Act phase)
+	Timestamp          time.Time        `json:"timestamp"`  // When this step occurred
+	// Truncated marks the round the completion-token cap cut off. It rides in
+	// the agent_steps JSON so a reloaded, shared or re-opened conversation can
+	// still show that the answer stops mid-sentence by design, rather than
+	// looking finished. Live streaming carries the same fact on the answer
+	// event; this is what survives the round trip.
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 // GetObservations returns observations from all tool calls in this step
@@ -412,12 +496,13 @@ func (s *AgentStep) GetObservations() []string {
 
 // AgentState tracks the execution state of an agent across iterations
 type AgentState struct {
-	CurrentRound  int             `json:"current_round"`  // Current round number
-	RoundSteps    []AgentStep     `json:"round_steps"`    // All steps taken so far in the current round
-	IsComplete    bool            `json:"is_complete"`    // Whether agent has finished
-	FinalAnswer   string          `json:"final_answer"`   // The final answer to the query
-	KnowledgeRefs []*SearchResult `json:"knowledge_refs"` // Collected knowledge references
-	TurnUsage     TokenUsage      `json:"turn_usage"`     // LLM token usage accumulated across every round of this turn
+	PendingSteerMessages []string        `json:"-"`
+	CurrentRound         int             `json:"current_round"`  // Current round number
+	RoundSteps           []AgentStep     `json:"round_steps"`    // All steps taken so far in the current round
+	IsComplete           bool            `json:"is_complete"`    // Whether agent has finished
+	FinalAnswer          string          `json:"final_answer"`   // The final answer to the query
+	KnowledgeRefs        []*SearchResult `json:"knowledge_refs"` // Collected knowledge references
+	TurnUsage            TokenUsage      `json:"turn_usage"`     // LLM usage accumulated across this turn
 }
 
 // FunctionDefinition represents a function definition for LLM function calling

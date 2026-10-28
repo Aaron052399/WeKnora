@@ -2,31 +2,35 @@
   <div class="sandbox-settings">
     <div class="section-header">
       <div class="section-header__top">
-        <div>
+        <div class="section-header__main">
           <div class="section-header__titlewrap">
             <h2>{{ $t('settings.sandbox.title') }}</h2>
-            <t-popup placement="bottom-start" trigger="hover" :overlay-inner-style="{ maxWidth: '380px' }">
+            <t-popup placement="bottom-left" trigger="hover" show-arrow :overlay-inner-style="{ maxWidth: 'min(380px, calc(100vw - 64px))' }">
               <button type="button" class="hint-trigger"
                 :aria-label="$t('settings.sandbox.pageHintTitle')">
-                <t-icon name="info-circle" size="16px" />
+                <t-icon name="help-circle" size="16px" />
               </button>
               <template #content>
                 <div class="hint-popover">
                   <p class="hint-popover__title">{{ $t('settings.sandbox.pageHintTitle') }}</p>
                   <p class="hint-popover__text">{{ $t('settings.sandbox.pageHint') }}</p>
+                  <a class="hint-popover__link" :href="sandboxGuideUrl" target="_blank" rel="noopener noreferrer">
+                    {{ $t('settings.sandbox.viewClusterGuide') }}
+                    <t-icon name="jump" size="14px" />
+                  </a>
                 </div>
               </template>
             </t-popup>
           </div>
-          <p class="section-description">{{ $t('settings.sandbox.description') }}</p>
         </div>
         <div class="header-actions">
-          <a class="header-action-link" :href="sandboxGuideUrl" target="_blank" rel="noopener noreferrer">
-            <t-icon name="help-circle" />
-            {{ $t('settings.sandbox.viewClusterGuide') }}
-          </a>
+          <t-button v-if="canCreateOnTab" variant="text" class="header-action" @click="openCreate">
+            <template #icon><t-icon name="add" /></template>
+            {{ $t('settings.sandbox.addConfig') }}
+          </t-button>
         </div>
       </div>
+      <p class="section-description">{{ $t('settings.sandbox.description') }}</p>
     </div>
 
     <!--
@@ -57,81 +61,89 @@
 
     <div class="sandbox-tabs-row">
       <t-tabs v-model="activeType" class="sandbox-type-tabs">
-        <t-tab-panel value="all" :label="`${$t('common.all')}(${records.length})`" />
-        <t-tab-panel v-for="type in backendTypes" :key="type" :value="type"
-          :label="`${backendLabel(type)}(${countByType(type)})`" />
+        <t-tab-panel value="all">
+          <template #label>
+            <span class="sandbox-tab-label"><t-icon name="view-list" size="16px" />
+              {{ $t('common.all') }}<span class="sandbox-tab-count">{{ records.length }}</span>
+            </span>
+          </template>
+        </t-tab-panel>
+        <t-tab-panel v-for="type in backendTypes" :key="type" :value="type">
+          <template #label>
+            <span class="sandbox-tab-label"><SandboxBackendBadge :type="type" size="xs" />
+              {{ backendLabel(type) }}<span class="sandbox-tab-count">{{ countByType(type) }}</span>
+            </span>
+          </template>
+        </t-tab-panel>
       </t-tabs>
+      <t-input v-model="searchQuery" clearable class="sandbox-search" :placeholder="$t('menu.search')"
+        :aria-label="$t('menu.search')">
+        <template #prefix-icon><t-icon name="search" size="16px" /></template>
+      </t-input>
     </div>
 
-    <t-loading :loading="loading" size="small" class="sandbox-list-loading">
-      <t-alert
-        v-if="!loading && dockerTabDisabled && filteredRecords.length > 0"
-        theme="warning"
-        class="sandbox-docker-banner"
-        :message="$t('settings.sandbox.dockerDisabledAlert')"
-      >
-        <template #description>
-          <p>{{ $t('settings.sandbox.dockerDisabledHint') }}</p>
-        </template>
-      </t-alert>
-      <div v-if="!loading && dockerTabDisabled && filteredRecords.length === 0" class="sandbox-docker-disabled">
-        <t-empty :description="$t('settings.sandbox.dockerDisabledAlert')" />
-        <p class="sandbox-empty-hint">{{ $t('settings.sandbox.dockerDisabledHint') }}</p>
-      </div>
-      <div v-else-if="!loading" class="sandbox-grid">
-        <div v-for="record in filteredRecords" :key="record.id" class="sandbox-card"
-          :class="[`sandbox-card--${record.sandbox_type}`, { 'sandbox-card--clickable': !isLegacyRecord(record) }]"
-          :role="isLegacyRecord(record) ? undefined : 'button'"
-          :tabindex="isLegacyRecord(record) ? undefined : 0"
-          @click="openCard(record)" @keydown.enter="openCard(record)">
-          <SandboxBackendBadge :type="record.sandbox_type" />
-          <div class="sandbox-card__body">
-            <div class="sandbox-card__header">
-              <h3 class="sandbox-card__title" :title="record.name">{{ record.name }}</h3>
-              <t-tag v-if="isLegacyRecord(record)" theme="warning" variant="light" size="small">
-                {{ $t('settings.sandbox.legacyConfig') }}
-              </t-tag>
-              <div class="sandbox-card__actions" @click.stop>
-                <t-dropdown
-                  :options="cardMenu(record)"
-                  placement="bottom-right"
-                  attach="body"
-                  trigger="click"
-                  @click="(data: any) => onMenuAction(data.value, record)"
-                >
-                  <t-button variant="text" shape="square" size="small" class="sandbox-card__more">
-                    <t-icon name="ellipsis" />
-                  </t-button>
-                </t-dropdown>
+    <div class="sandbox-list-scroll">
+      <t-loading :loading="loading" size="small" class="sandbox-list-loading">
+        <t-alert v-if="!loading && dockerTabDisabled && filteredRecords.length > 0" theme="warning"
+          class="sandbox-docker-banner" :message="$t('settings.sandbox.dockerDisabledAlert')">
+          <template #description><p>{{ $t('settings.sandbox.dockerDisabledHint') }}</p></template>
+        </t-alert>
+        <div v-if="!loading && dockerTabDisabled && filteredRecords.length === 0" class="sandbox-docker-disabled">
+          <t-empty :description="$t('settings.sandbox.dockerDisabledAlert')" />
+          <p class="sandbox-empty-hint">{{ $t('settings.sandbox.dockerDisabledHint') }}</p>
+        </div>
+        <div v-else-if="!loading && filteredRecords.length" class="sandbox-grid">
+          <div v-for="record in filteredRecords" :key="record.id" class="sandbox-card"
+            :class="[`sandbox-card--${record.sandbox_type}`, { 'sandbox-card--clickable': !isLegacyRecord(record) }]"
+            :role="isLegacyRecord(record) ? undefined : 'button'"
+            :tabindex="isLegacyRecord(record) ? undefined : 0"
+            @click="openCard(record)" @keydown.enter.self="openCard(record)" @keydown.space.self.prevent="openCard(record)">
+            <SandboxBackendBadge :type="record.sandbox_type" />
+            <div class="sandbox-card__body">
+              <div class="sandbox-card__header">
+                <h3 class="sandbox-card__title" :title="record.name">{{ record.name }}</h3>
+                <t-tag v-if="isLegacyRecord(record)" theme="warning" variant="light" size="small">
+                  {{ $t('settings.sandbox.legacyConfig') }}
+                </t-tag>
+                <div class="sandbox-card__actions" @click.stop>
+                  <t-dropdown
+                    :options="cardMenu(record)"
+                    placement="bottom-right"
+                    attach="body"
+                    trigger="click"
+                    @click="(data: any) => onMenuAction(data.value, record)"
+                  >
+                    <t-button variant="text" shape="square" size="small" class="sandbox-card__more"
+                      :aria-label="$t('modelCatalog.more')">
+                      <t-icon name="ellipsis" />
+                    </t-button>
+                  </t-dropdown>
+                </div>
               </div>
+              <div class="sandbox-card__subtitle">
+                <span class="sandbox-card__type">{{ backendLabel(record.sandbox_type) }}</span>
+                <template v-if="record.description">
+                  <span class="sandbox-card__sep">·</span>
+                  <span class="sandbox-card__desc" :title="record.description">{{ record.description }}</span>
+                </template>
+              </div>
+              <div v-if="targetSummary(record)" class="sandbox-card__url" :title="targetSummary(record)">
+                {{ targetSummary(record) }}
+              </div>
+              <ul v-if="cardWarnings[record.id]?.length" class="sandbox-card__warnings">
+                <li v-for="item in cardWarnings[record.id]" :key="item.key">
+                  <t-icon name="error-circle" size="12px" />
+                  <span>{{ item.text }}</span>
+                </li>
+              </ul>
             </div>
-            <div class="sandbox-card__subtitle">
-              <span class="sandbox-card__type">{{ backendLabel(record.sandbox_type) }}</span>
-              <template v-if="record.description">
-                <span class="sandbox-card__sep">·</span>
-                <span class="sandbox-card__desc" :title="record.description">{{ record.description }}</span>
-              </template>
-            </div>
-            <div v-if="targetSummary(record)" class="sandbox-card__url" :title="targetSummary(record)">
-              {{ targetSummary(record) }}
-            </div>
-            <ul v-if="cardWarnings[record.id]?.length" class="sandbox-card__warnings">
-              <li v-for="item in cardWarnings[record.id]" :key="item.key">
-                <t-icon name="error-circle" size="12px" />
-                <span>{{ item.text }}</span>
-              </li>
-            </ul>
           </div>
         </div>
-        <button v-if="canCreateOnTab" type="button" class="sandbox-card sandbox-card--add" @click="openCreate">
-          <span class="sandbox-card--add__icon" aria-hidden="true"><t-icon name="add" /></span>
-          <span class="sandbox-card--add__label">{{ $t('settings.sandbox.addConfig') }}</span>
-        </button>
-      </div>
-      <p v-if="!loading && !dockerTabDisabled && records.length === 0" class="sandbox-empty-hint">
-        {{ $t('settings.sandbox.noConfigs') }}
-      </p>
-    </t-loading>
+        <div v-else-if="!loading" class="sandbox-empty">
+          <t-empty :description="$t(records.length === 0 ? 'settings.sandbox.noConfigs' : 'common.noResult')" />
+        </div>
+      </t-loading>
+    </div>
 
     <SandboxConfigEditorDrawer v-model:visible="showEditor" :record="editingRecord"
       :preset-type="createPresetType"
@@ -218,6 +230,8 @@ import SettingDrawer from '@/components/settings/SettingDrawer.vue'
 import { useConfirmDelete } from '@/components/settings/useConfirmDelete'
 import { getSession } from '@/api/chat/index'
 import { useDeploymentCapabilitiesStore } from '@/stores/deploymentCapabilities'
+import { docsUrl } from '@/utils/docsUrl'
+import { matchesResourceQuery } from '@/utils/resourceListSearch'
 import {
   deleteSandboxConfig,
   getSandboxConfigInventory,
@@ -238,7 +252,7 @@ const dockerBackendEnabled = computed(() =>
   deploymentCapabilities.isSupported('settings.sandbox.docker'),
 )
 
-const sandboxGuideUrl = 'https://github.com/Tencent/WeKnora/blob/main/docs/sandbox-cluster.md'
+const sandboxGuideUrl = docsUrl('sandboxDeployment')
 
 const backendTypes = [...NAMED_SANDBOX_BACKEND_TYPES]
 
@@ -259,6 +273,7 @@ const policySaving = ref(false)
 const workspaceScriptsDisabled = ref(false)
 const records = ref<SandboxConfigRecord[]>([])
 const activeType = ref<string>('all')
+const searchQuery = ref('')
 
 const showEditor = ref(false)
 const editingRecord = ref<SandboxConfigRecord | null>(null)
@@ -280,7 +295,10 @@ const filteredRecords = computed(() => {
   const base = activeType.value === 'all'
     ? records.value
     : records.value.filter((r) => r.sandbox_type === activeType.value)
-  return base
+  return base.filter((record) => matchesResourceQuery({
+    name: record.name,
+    description: `${record.description || ''} ${backendLabel(record.sandbox_type)} ${targetSummary(record)}`,
+  }, searchQuery.value))
 })
 
 const countByType = (type: string) =>
@@ -569,318 +587,110 @@ async function forceRemove(record: SandboxConfigRecord) {
   await removeRecord(record, true)
 }
 
-onMounted(() => {
-  void deploymentCapabilities.ensureLoaded()
+onMounted(async () => {
+  await deploymentCapabilities.ensureLoaded()
   load()
 })
 </script>
 
 <style lang="less" scoped>
-.sandbox-settings {
-  width: 100%;
-}
+@import (reference) '@/components/css/settings-section.less';
+@import (reference) '@/components/css/provider-card.less';
 
-.section-header {
-  margin-bottom: 20px;
-
-  h2 {
-    margin: 0 0 8px;
-    font-size: 20px;
-    font-weight: 600;
-    color: var(--td-text-color-primary);
-  }
-}
-
-.section-description {
-  margin: 0;
-  color: var(--td-text-color-secondary);
-  font-size: 14px;
-  line-height: 1.6;
-}
-
-.section-header__top {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 20px;
-}
-
-.defaults-trigger {
-  --td-bg-color-container-hover: transparent;
-  flex-shrink: 0;
-  padding-left: 0;
-  padding-right: 0;
-  font-weight: 600;
-}
-
-.header-actions {
-  display: flex;
-  align-items: center;
-  gap: 18px;
-  flex-shrink: 0;
-}
-
-.header-action-link {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  color: var(--td-brand-color);
-  font-size: 14px;
-  font-weight: 600;
-  text-decoration: none;
-
-  &:hover {
-    color: var(--td-brand-color-hover);
-  }
-}
-
+.sandbox-settings { .settings-list-page(); container-type: inline-size; }
+.section-header { .settings-section-header(); flex-shrink: 0; margin-bottom: 20px; }
+.section-header__main { min-width: 0; }
+.section-header__top { margin-bottom: 8px; padding-right: 28px; }
 .section-header__titlewrap {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-
-  h2 {
-    margin-bottom: 0;
-  }
+  display: flex; align-items: center; gap: 6px;
+  h2 { margin-bottom: 0; }
 }
-
-.hint-trigger {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 2px;
-  border: none;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--td-text-color-placeholder);
-  cursor: help;
-  line-height: 1;
-
-  &:hover,
-  &:focus-visible {
-    color: var(--td-brand-color);
-  }
+.header-actions { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+.header-action { .settings-list-action(); }
+.hint-popover__link {
+  display: inline-flex; align-items: center; align-self: flex-start; gap: 5px; margin-top: 4px;
+  color: var(--td-brand-color); font-size: var(--app-text-sm); text-decoration: none;
+  &:hover { color: var(--td-brand-color-hover); text-decoration: underline; }
 }
-
-.hint-popover {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  max-width: 340px;
-}
-
-.hint-popover__title {
-  margin: 0;
-  color: var(--td-text-color-primary);
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.hint-popover__text {
-  margin: 0;
-  color: var(--td-text-color-secondary);
-  font-size: 12px;
-  line-height: 1.55;
-}
-
-.sandbox-list-loading {
-  min-height: 120px;
-}
-
+.hint-trigger { .settings-title-help(); }
+.hint-popover { display: flex; flex-direction: column; gap: 4px; max-width: 340px; }
+.hint-popover__title { margin: 0; color: var(--td-text-color-primary); font-size: var(--app-text-md); font-weight: 600; }
+.hint-popover__text { margin: 0; color: var(--td-text-color-secondary); font-size: var(--app-text-sm); line-height: 1.55; }
 .setting-row {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 24px;
-  padding: 0 0 16px;
-  margin-bottom: 8px;
+  display: flex; align-items: center; justify-content: space-between; gap: 24px;
+  flex-shrink: 0; padding: 14px 16px; margin-bottom: 16px;
+  border: 1px solid var(--td-component-stroke); border-radius: var(--app-radius-lg);
+  background: var(--td-bg-color-container);
+}
+.setting-info {
+  .setting-info(); max-width: none;
+  label { font-size: var(--app-text-md); }
+  .desc { font-size: var(--app-text-sm); }
+}
+.setting-control { display: flex; align-items: center; flex-shrink: 0; }
+.sandbox-tabs-row {
+  display: flex; align-items: center; gap: 20px; flex-shrink: 0;
   border-bottom: 1px solid var(--td-component-stroke);
 }
-
-.setting-info {
-  flex: 1;
-  min-width: 0;
-
-  label {
-    display: block;
-    margin-bottom: 4px;
-    color: var(--td-text-color-primary);
-    font-size: 14px;
-    font-weight: 500;
-  }
-
-  .desc {
-    margin: 0;
-    color: var(--td-text-color-secondary);
-    font-size: 13px;
-    line-height: 1.5;
-  }
-}
-
-.setting-control {
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-}
-
-.sandbox-tabs-row {
-  display: flex;
-  align-items: flex-start;
-  gap: 16px;
-  margin-bottom: 16px;
-}
-
 .sandbox-type-tabs {
-  flex: 1;
-  min-width: 0;
-  margin-bottom: 0;
-
-  :deep(.t-tabs__nav-item) {
-    font-size: 13px;
-  }
-
-  :deep(.t-tabs__nav-item-wrapper) {
-    padding: 0 12px;
-    margin: 0;
-  }
-
-  :deep(.t-tabs__operations) {
-    display: none;
-  }
-
-  :deep(.t-tabs__nav-scroll) {
-    overflow-x: auto;
-    scrollbar-width: none;
-
-    &::-webkit-scrollbar {
-      display: none;
+  flex: 1; min-width: 0; background: transparent;
+  :deep(.t-tabs__nav-item) { height: 44px; margin-right: 24px; font-size: var(--app-text-base); }
+  :deep(.t-tabs__nav-item-wrapper) { margin: 0; padding: 0 2px; }
+  :deep(.t-tabs__nav-item:not(.t-is-disabled):hover .t-tabs__nav-item-wrapper) { background: transparent; }
+  :deep(.t-tabs__nav-container.t-is-top::after),
+  :deep(.t-tabs__bar), :deep(.t-tabs__content), :deep(.t-tabs__operations) { display: none; }
+  :deep(.t-tabs__nav-scroll) { overflow-x: auto; scrollbar-width: none; }
+  :deep(.t-tabs__nav-item.t-is-active) {
+    color: var(--td-text-color-primary); text-shadow: none;
+    .t-icon { color: var(--td-brand-color); }
+    .sandbox-tab-count { color: var(--td-brand-color); background: var(--td-brand-color-light); }
+    &::after {
+      content: ''; position: absolute; bottom: 0; left: 0; right: 0; height: 2px;
+      background: var(--td-brand-color); border-radius: var(--app-radius-pill);
     }
   }
-
-  :deep(.t-tabs__content) {
-    display: none;
-  }
 }
-
+.sandbox-tab-label {
+  display: inline-flex; align-items: center; gap: 6px;
+  :deep(.sandbox-badge) { background: transparent; }
+}
+.sandbox-tab-count {
+  min-width: 20px; height: 20px; padding: 0 6px; box-sizing: border-box;
+  border-radius: var(--app-radius-pill); background: var(--td-bg-color-secondarycontainer);
+  color: var(--td-text-color-secondary); font-size: var(--app-text-xs); line-height: 20px;
+  text-align: center; font-variant-numeric: tabular-nums;
+}
+.sandbox-search {
+  flex: 0 0 240px;
+  width: 240px;
+  :deep(.t-input) { border-radius: var(--app-radius-sm); }
+}
+.sandbox-list-scroll { flex: 1; min-height: 0; overflow: auto; padding: 16px 0 28px; }
+.sandbox-list-loading { display: block; min-height: 160px; }
 .sandbox-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr));
   gap: 12px;
-
-  .sandbox-card--add {
-    width: 100%;
-    height: 100%;
-  }
 }
-
 .sandbox-card {
-  position: relative;
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
-  padding: 14px 14px 14px 12px;
-  border: 1px solid var(--td-component-stroke);
-  border-radius: 10px;
-  background: var(--td-bg-color-container);
-  transition: border-color 0.18s ease, box-shadow 0.18s ease;
-  min-width: 0;
-
-  &--clickable {
-    cursor: pointer;
-
-    &:hover {
-      border-color: var(--td-brand-color-3, var(--td-brand-color));
-      box-shadow: 0 4px 14px rgba(15, 23, 42, 0.06);
-    }
-
-    &:focus-visible {
-      outline: 2px solid var(--td-brand-color);
-      outline-offset: 2px;
-    }
-  }
-
-  &--add {
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-    min-height: 68px;
-    border-style: dashed;
-    background: transparent;
-    color: var(--td-text-color-placeholder);
-    cursor: pointer;
-    font: inherit;
-    text-align: center;
-
-    &:hover,
-    &:focus-visible {
-      color: var(--td-brand-color);
-      border-color: var(--td-brand-color);
-      box-shadow: none;
-    }
-
-    &:focus-visible {
-      outline: 2px solid var(--td-brand-color);
-      outline-offset: 2px;
-    }
-
-    &__icon {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      width: 32px;
-      height: 32px;
-      border-radius: 8px;
-      background: color-mix(in srgb, var(--td-brand-color) 10%, transparent);
-      color: var(--td-brand-color);
-      font-size: 18px;
-    }
-
-    &__label {
-      font-size: 13px;
-      font-weight: 500;
-      line-height: 1.4;
-    }
-  }
+  .provider-card();
+  &--clickable { .provider-card-interactive(); }
 }
-
+.sandbox-empty { padding: 40px 16px; }
 .sandbox-card__body {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
+  .provider-card-body();
 }
 
 .sandbox-card__header {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
+  .provider-card-header();
 }
 
 .sandbox-card__title {
-  flex: 1;
-  min-width: 0;
-  margin: 0;
-  font-size: 14px;
-  font-weight: 600;
-  line-height: 1.4;
-  color: var(--td-text-color-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  .provider-card-title();
 }
 
 .sandbox-card__subtitle {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 4px;
-  font-size: 12px;
-  line-height: 1.4;
-  color: var(--td-text-color-secondary);
-  min-width: 0;
+  .provider-card-subtitle();
 }
 
 .sandbox-card__type {
@@ -900,7 +710,7 @@ onMounted(() => {
 
 .sandbox-card__url {
   font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
-  font-size: 11px;
+  font-size: var(--app-text-xs);
   line-height: 1.4;
   color: var(--td-text-color-placeholder);
   white-space: nowrap;
@@ -921,8 +731,8 @@ onMounted(() => {
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    color: var(--td-warning-color-7, var(--td-warning-color));
-    font-size: 12px;
+    color: var(--td-warning-color-7);
+    font-size: var(--app-text-sm);
     line-height: 1.4;
   }
 }
@@ -932,17 +742,7 @@ onMounted(() => {
 }
 
 .sandbox-card__more {
-  flex-shrink: 0;
-  padding: 2px;
-  color: var(--td-text-color-placeholder);
-  opacity: 0;
-  transition: opacity 0.15s ease, color 0.15s ease, background-color 0.15s ease;
-
-  &:hover,
-  &:focus-visible {
-    color: var(--td-text-color-primary);
-    background: var(--td-bg-color-secondarycontainer);
-  }
+  .provider-card-more();
 }
 
 .sandbox-card:hover .sandbox-card__more,
@@ -951,23 +751,14 @@ onMounted(() => {
   opacity: 1;
 }
 
-.sandbox-docker-banner {
-  margin-bottom: 12px;
-}
-
-.sandbox-docker-disabled {
-  padding: 48px 16px 24px;
-  text-align: center;
-}
-
-.sandbox-empty-hint {
-  margin: 16px 0 0;
-  font-size: 13px;
-  color: var(--td-text-color-placeholder);
-}
-
-.sandbox-docker-disabled .sandbox-empty-hint {
-  margin-top: 8px;
+.sandbox-docker-banner { margin-bottom: 12px; }
+.sandbox-docker-disabled { padding: 48px 16px 24px; text-align: center; }
+.sandbox-empty-hint { margin: 8px 0 0; font-size: var(--app-text-md); color: var(--td-text-color-placeholder); }
+@container (max-width: 760px) {
+  .section-header__top { align-items: flex-start; flex-wrap: wrap; gap: 12px; }
+  .sandbox-tabs-row { flex-wrap: wrap; gap: 0; }
+  .sandbox-type-tabs { flex-basis: 100%; }
+  .sandbox-search { flex: 1 1 100%; width: 100%; margin: 8px 0; }
 }
 
 .inventory-banner {
@@ -988,7 +779,7 @@ onMounted(() => {
   margin: 0;
   padding: 6px 8px;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--app-radius-sm);
   background: transparent;
   color: inherit;
   font: inherit;
@@ -1019,13 +810,13 @@ onMounted(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--td-text-color-primary);
-  font-size: 13px;
+  font-size: var(--app-text-md);
   line-height: 1.4;
 }
 
 .inventory-row__meta {
   color: var(--td-text-color-secondary);
-  font-size: 12px;
+  font-size: var(--app-text-sm);
   line-height: 1.4;
 }
 
@@ -1038,7 +829,7 @@ onMounted(() => {
 .inventory-agents {
   margin: 0;
   color: var(--td-text-color-secondary);
-  font-size: 13px;
+  font-size: var(--app-text-md);
   line-height: 1.5;
 }
 </style>

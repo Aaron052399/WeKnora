@@ -1,7 +1,7 @@
 <!--
-  CreateUserDialog: SystemAdmin "Create user" in-place popup (Access row).
+  CreateUserDialog: SystemAdmin "Create user" in-place popup.
 
-  Anchors to the row action via the default slot, matching TenantMembers
+  Anchors to the page action via the default slot, matching TenantMembers
   invite and UserProfile password popups. Form (username + email +
   auto-generate toggle) and, when the server mints a one-time password, a
   reveal view that must be acknowledged before the popup can close. Esc is
@@ -14,8 +14,8 @@
   region can relay it. Shared popup chrome comes from systemAdminDialog.less.
 -->
 <template>
-  <t-popup :visible="visible" trigger="click" placement="left-top" :destroy-on-close="!locked"
-    overlay-class-name="system-admin-action-popup-overlay" @visible-change="onVisibleChange">
+  <t-popup :visible="visible && active" trigger="click" placement="left-top" :destroy-on-close="!locked"
+    overlay-class-name="wk-popover wk-popover--form system-admin-action-popup-overlay" @visible-change="onVisibleChange">
     <span class="system-admin-action-popup-anchor">
       <slot />
     </span>
@@ -125,10 +125,11 @@ import {
   type CreateUserReveal,
 } from './createUserDialogState'
 
-const props = defineProps<{ visible: boolean }>()
+const props = defineProps<{ visible: boolean; active: boolean }>()
 const emit = defineEmits<{
   'update:visible': [boolean]
   announced: [string]
+  created: []
 }>()
 
 const { t } = useI18n()
@@ -240,6 +241,7 @@ async function submit() {
       payload.password = form.newPassword
     }
     const response = await createSystemUser(payload)
+    emit('created')
     const view = resolveCreateUserView(
       response,
       { username: payload.username, email: payload.email },
@@ -297,7 +299,7 @@ function acknowledge() {
   gap: 0;
   padding: 2px 0 0;
   border: 1px solid var(--td-component-stroke);
-  border-radius: 8px;
+  border-radius: var(--app-radius-md);
   background: var(--td-bg-color-page);
   overflow: hidden;
 }
@@ -315,13 +317,13 @@ function acknowledge() {
 }
 
 .create-user-reveal-label {
-  font-size: 12px;
+  font-size: var(--app-text-sm);
   line-height: 16px;
   color: var(--td-text-color-secondary);
 }
 
 .create-user-reveal-value {
-  font-size: 14px;
+  font-size: var(--app-text-base);
   line-height: 20px;
   color: var(--td-text-color-primary);
   word-break: break-all;
@@ -329,8 +331,8 @@ function acknowledge() {
 
 .create-user-reveal-value--mono {
   margin: 0;
-  font-family: var(--td-font-family-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
-  font-size: 12px;
+  font-family: var(--td-font-family-mono);
+  font-size: var(--app-text-sm);
   line-height: 18px;
   white-space: pre-wrap;
   user-select: all;

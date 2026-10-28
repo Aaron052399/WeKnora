@@ -376,3 +376,91 @@ func TestChunkingConfigResolveParserEngineDefaults(t *testing.T) {
 		t.Fatalf("configured ResolveParserEngine(pptx) = %q, want mineru", got)
 	}
 }
+
+// KB JSON is what API responses (including org-share listings) carry, so the
+// legacy inline credentials must not appear there; their DB columns still do.
+func TestKnowledgeBase_MarshalJSONWithholdsInlineCredentials(t *testing.T) {
+	kb := &KnowledgeBase{
+		ID: "kb-1",
+		StorageConfig: StorageConfig{
+			Provider: "minio", BucketName: "bucket", SecretID: "root-id", SecretKey: "root-secret",
+		},
+		VLMConfig: VLMConfig{ModelName: "vlm", BaseURL: "https://vlm.example", APIKey: "vlm-key"},
+	}
+
+	data, err := json.Marshal(kb)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, secret := range []string{"root-id", "root-secret", "vlm-key"} {
+		if strings.Contains(string(data), secret) {
+			t.Fatalf("KB JSON leaks %q: %s", secret, data)
+		}
+	}
+	if !strings.Contains(string(data), `"bucket_name":"bucket"`) || !strings.Contains(string(data), `"capabilities"`) {
+		t.Fatalf("KB JSON lost non-secret fields: %s", data)
+	}
+	if kb.StorageConfig.SecretKey != "root-secret" || kb.VLMConfig.APIKey != "vlm-key" {
+		t.Fatal("MarshalJSON mutated the knowledge base")
+	}
+
+	storageColumn, err := kb.StorageConfig.Value()
+	if err != nil || !strings.Contains(string(storageColumn.([]byte)), "root-secret") {
+		t.Fatalf("storage column lost its secret: %v %s", err, storageColumn)
+	}
+	vlmColumn, err := kb.VLMConfig.Value()
+	if err != nil || !strings.Contains(string(vlmColumn.([]byte)), "vlm-key") {
+		t.Fatalf("VLM column lost its key: %v %s", err, vlmColumn)
+	}
+}
+
+// A knowledge base saved before the image-vector switch has no such key in
+// image_processing_config, and must read back as opted out even when every
+// other image setting is on.
+func TestKnowledgeBase_IsImageVectorEnabled(t *testing.T) {
+	var stored ImageProcessingConfig
+	if err := stored.Scan([]byte(`{"model_id":"vlm-1","image_attrs_enabled":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	vector := IndexingStrategy{VectorEnabled: true}
+	upgraded := &KnowledgeBase{IndexingStrategy: vector, ImageProcessingConfig: stored}
+	upgraded.EnsureDefaults()
+	if upgraded.IsImageVectorEnabled() {
+		t.Error("a knowledge base from before the switch must stay off")
+	}
+
+	var nilKB *KnowledgeBase
+	cases := []struct {
+		name string
+		kb   *KnowledgeBase
+		want bool
+	}{
+		{"nil", nilKB, false},
+		{"switch on", &KnowledgeBase{
+			IndexingStrategy:      vector,
+			ImageProcessingConfig: ImageProcessingConfig{ImageVectorEnabled: true},
+		}, true},
+		{"switch on, vector indexing off", &KnowledgeBase{
+			IndexingStrategy:      IndexingStrategy{KeywordEnabled: true},
+			ImageProcessingConfig: ImageProcessingConfig{ImageVectorEnabled: true},
+		}, false},
+	}
+	for _, tc := range cases {
+		if got := tc.kb.IsImageVectorEnabled(); got != tc.want {
+			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
+		}
+	}
+
+	// The switch survives a save.
+	raw, err := ImageProcessingConfig{ImageVectorEnabled: true}.Value()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back ImageProcessingConfig
+	if err := back.Scan(raw); err != nil {
+		t.Fatal(err)
+	}
+	if !back.ImageVectorEnabled || !strings.Contains(string(raw.([]byte)), `"image_vector_enabled":true`) {
+		t.Errorf("round trip lost the switch: %s", raw)
+	}
+}

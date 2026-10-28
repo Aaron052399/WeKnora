@@ -20,6 +20,11 @@ global:
   imagePullSecrets: []
   # - name: regcred
 
+  # -- Maximum upload size in MB, applied to the frontend (nginx
+  # client_max_body_size), the app (upload limit) and docreader (gRPC message
+  # limit). Same knob as MAX_FILE_SIZE_MB in docker-compose.yml.
+  maxFileSizeMB: 50
+
   # -- Default security context for all pods
   # Note: Official images (nginx, postgres, redis) run as root by default
   # Enable runAsNonRoot only if using non-root compatible images
@@ -56,6 +61,14 @@ app:
 
   # -- Number of replicas
   replicaCount: 1
+
+  # -- App update strategy. Use Recreate for single-replica, single-node-attach storage.
+  strategy:
+    type: RollingUpdate
+    # -- Only used with RollingUpdate; integers and percentages are supported.
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
 
   image:
     # -- Image repository
@@ -109,6 +122,8 @@ app:
 
   # -- Service configuration
   service:
+    # -- Service name override (empty keeps "app")
+    name: ""
     type: ClusterIP
     port: 8080
 
@@ -154,8 +169,8 @@ frontend:
   image:
     # -- Image repository
     repository: wechatopenai/weknora-ui
-    # -- Image tag
-    tag: latest
+    # -- Image tag (defaults to Chart.appVersion if empty)
+    tag: ""
     # -- Image pull policy
     pullPolicy: IfNotPresent
 
@@ -176,6 +191,8 @@ frontend:
 
   # -- Service configuration
   service:
+    # -- Service name override (empty keeps "frontend")
+    name: ""
     type: ClusterIP
     port: 80
 
@@ -201,8 +218,8 @@ docreader:
   image:
     # -- Image repository
     repository: wechatopenai/weknora-docreader
-    # -- Image tag
-    tag: latest
+    # -- Image tag (defaults to Chart.appVersion if empty)
+    tag: ""
     # -- Image pull policy
     pullPolicy: IfNotPresent
 
@@ -226,6 +243,8 @@ docreader:
 
   # -- Service configuration
   service:
+    # -- Service name override (empty keeps "docreader")
+    name: ""
     type: ClusterIP
     port: 50051
 
@@ -244,6 +263,10 @@ docreader:
 postgresql:
   # -- Enable PostgreSQL
   enabled: true
+
+  service:
+    # -- Service name override (empty keeps "postgres")
+    name: ""
 
   image:
     # -- Image repository (ParadeDB for vector search)
@@ -290,6 +313,10 @@ postgresql:
 redis:
   # -- Enable Redis
   enabled: true
+
+  service:
+    # -- Service name override (empty keeps "redis")
+    name: ""
 
   image:
     # -- Image repository
@@ -424,7 +451,7 @@ minio:
   # -- Enable MinIO
   enabled: false
   image:
-    repository: minio/minio
+    repository: pgsty/minio
     tag: latest
   # -- Root user
   rootUser: minioadmin
@@ -440,6 +467,10 @@ minio:
 neo4j:
   # -- Enable Neo4j for GraphRAG
   enabled: false
+
+  service:
+    # -- Service name override (empty keeps "neo4j")
+    name: ""
 
   image:
     # -- Image repository

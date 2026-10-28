@@ -31,7 +31,7 @@ type UserService interface {
 	GetUserByUsername(ctx context.Context, username string) (*types.User, error)
 	// GetUserByTenantID gets the first user (owner) of a tenant
 	GetUserByTenantID(ctx context.Context, tenantID uint64) (*types.User, error)
-	// UpdateUser updates user information
+	// UpdateUser updates user data without changing account status; use SetUserActive for that.
 	UpdateUser(ctx context.Context, user *types.User) error
 	// DeleteUser deletes a user
 	DeleteUser(ctx context.Context, id string) error
@@ -66,6 +66,13 @@ type UserService interface {
 	// non-home tenant. Falls back to user.TenantID when the claim is
 	// missing (old tokens issued before tenant-level RBAC).
 	ValidateToken(ctx context.Context, token string) (*types.User, uint64, error)
+	// GetAccessTokenByValue looks up the stored access-token row for a JWT
+	// string. The Token field is redacted. Used to bind a sandbox-terminal
+	// ticket to the minting session without putting the JWT in the ticket.
+	GetAccessTokenByValue(ctx context.Context, token string) (*types.AuthToken, error)
+	// GetAccessTokenByID looks up a stored access-token row by primary key.
+	// The Token field is redacted. Used by the sandbox-terminal recheck.
+	GetAccessTokenByID(ctx context.Context, id string) (*types.AuthToken, error)
 	// RefreshToken refreshes access token using refresh token
 	RefreshToken(ctx context.Context, refreshToken string) (accessToken, newRefreshToken string, err error)
 	// RevokeToken revokes a token
@@ -77,6 +84,15 @@ type UserService interface {
 	GetCurrentUser(ctx context.Context) (*types.User, error)
 	// SearchUsers searches users by username or email
 	SearchUsers(ctx context.Context, query string, limit int) ([]*types.User, error)
+	// SetUserActive enables or disables a user account (SystemAdmin action).
+	// Disabling also revokes all of that user's outstanding tokens. The
+	// repository enforces self-disable and last-system-admin guards.
+	SetUserActive(ctx context.Context, userID, actorID string, active bool) (*types.User, error)
+	// ListAllUsers lists every platform user (across tenants) newest-first.
+	// Returns the page plus a has_more flag so the system-admin user-list UI
+	// can paginate without a second count query. The handler enforces the
+	// SystemAdmin gate, so the service does not duplicate it here.
+	ListAllUsers(ctx context.Context, offset, limit int) ([]*types.User, bool, error)
 	// ListSystemAdmins lists users with IsSystemAdmin=true.
 	// Returns the page of admins plus the total count (for pagination UI);
 	// callers pass offset/limit to page through results. Used by the
@@ -113,8 +129,11 @@ type UserRepository interface {
 	GetUserByUsername(ctx context.Context, username string) (*types.User, error)
 	// GetUserByTenantID gets the first user (owner) of a tenant
 	GetUserByTenantID(ctx context.Context, tenantID uint64) (*types.User, error)
-	// UpdateUser updates a user
+	// UpdateUser updates user data without changing account status; use SetUserActive for that.
 	UpdateUser(ctx context.Context, user *types.User) error
+	// SetUserActive atomically changes status and revokes sessions on disable,
+	// preserving at least one active system administrator.
+	SetUserActive(ctx context.Context, userID, actorID string, active bool) (*types.User, error)
 	// DeleteUser deletes a user
 	DeleteUser(ctx context.Context, id string) error
 	// ListUsers lists users with pagination
@@ -137,6 +156,8 @@ type AuthTokenRepository interface {
 	CreateToken(ctx context.Context, token *types.AuthToken) error
 	// GetTokenByValue gets a token by its value
 	GetTokenByValue(ctx context.Context, tokenValue string) (*types.AuthToken, error)
+	// GetTokenByID gets a token by its primary key
+	GetTokenByID(ctx context.Context, id string) (*types.AuthToken, error)
 	// GetTokensByUserID gets all tokens for a user
 	GetTokensByUserID(ctx context.Context, userID string) ([]*types.AuthToken, error)
 	// UpdateToken updates a token

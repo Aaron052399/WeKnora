@@ -2,6 +2,8 @@ package chat
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/tracing/langfuse"
@@ -31,13 +33,7 @@ func (l *langfuseChat) Chat(ctx context.Context, messages []Message, opts *ChatO
 		Model:           l.inner.GetModelName(),
 		Input:           buildLangfuseMessages(messages),
 		ModelParameters: buildLangfuseModelParams(opts),
-		Metadata: map[string]interface{}{
-			"model_id":                  l.inner.GetModelID(),
-			"streaming":                 false,
-			"has_tools":                 opts != nil && len(opts.Tools) > 0,
-			"call_purpose":              purpose,
-			"prompt_prefix_fingerprint": prefixFingerprint,
-		},
+		Metadata:        buildLangfuseChatMetadata(l.inner.GetModelID(), purpose, prefixFingerprint, false, opts),
 	})
 
 	resp, err := l.inner.Chat(genCtx, messages, opts)
@@ -66,13 +62,7 @@ func (l *langfuseChat) ChatStream(ctx context.Context, messages []Message, opts 
 		Model:           l.inner.GetModelName(),
 		Input:           buildLangfuseMessages(messages),
 		ModelParameters: buildLangfuseModelParams(opts),
-		Metadata: map[string]interface{}{
-			"model_id":                  l.inner.GetModelID(),
-			"streaming":                 true,
-			"has_tools":                 opts != nil && len(opts.Tools) > 0,
-			"call_purpose":              purpose,
-			"prompt_prefix_fingerprint": prefixFingerprint,
-		},
+		Metadata:        buildLangfuseChatMetadata(l.inner.GetModelID(), purpose, prefixFingerprint, true, opts),
 	})
 
 	ch, err := l.inner.ChatStream(genCtx, messages, opts)
@@ -142,6 +132,48 @@ func snapshotLangfuseToolCalls(toolCalls []types.LLMToolCall) []types.LLMToolCal
 	return append([]types.LLMToolCall(nil), toolCalls...)
 }
 
+const (
+	langfuseDiscoverMCPTool = "discover_mcp_tools"
+	langfuseMCPCatalogRunes = 8000
+)
+
+func buildLangfuseChatMetadata(
+	modelID, purpose, prefixFingerprint string,
+	streaming bool,
+	opts *ChatOptions,
+) map[string]interface{} {
+	meta := map[string]interface{}{
+		"model_id":                  modelID,
+		"streaming":                 streaming,
+		"has_tools":                 opts != nil && len(opts.Tools) > 0,
+		"call_purpose":              purpose,
+		"prompt_prefix_fingerprint": prefixFingerprint,
+	}
+	if opts == nil || len(opts.Tools) == 0 {
+		return meta
+	}
+	names := make([]string, 0, len(opts.Tools))
+	for _, tool := range opts.Tools {
+		names = append(names, tool.Function.Name)
+		if tool.Function.Name == langfuseDiscoverMCPTool && tool.Function.Description != "" {
+			meta["mcp_catalog"] = truncateLangfuseText(tool.Function.Description, langfuseMCPCatalogRunes)
+		}
+	}
+	meta["tool_names"] = names
+	return meta
+}
+
+func truncateLangfuseText(s string, maxRunes int) string {
+	if maxRunes <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= maxRunes {
+		return s
+	}
+	return string(runes[:maxRunes]) + "…"
+}
+
 func buildLangfuseMessages(messages []Message) []map[string]interface{} {
 	out := make([]map[string]interface{}, 0, len(messages))
 	for _, m := range messages {
@@ -153,6 +185,13 @@ func buildLangfuseMessages(messages []Message) []map[string]interface{} {
 		}
 		if len(m.MultiContent) > 0 {
 			entry["content"] = m.MultiContent
+		}
+		if len(m.Images) > 0 {
+			images := make([]string, len(m.Images))
+			for i, img := range m.Images {
+				images[i] = describeLangfuseImage(img)
+			}
+			entry["images"] = images
 		}
 		if m.Name != "" {
 			entry["name"] = m.Name
@@ -169,6 +208,16 @@ func buildLangfuseMessages(messages []Message) []map[string]interface{} {
 		out = append(out, entry)
 	}
 	return out
+}
+
+// describeLangfuseImage keeps base64 payloads out of traces: a data URI is
+// recorded as its media type and size, a URL as itself.
+func describeLangfuseImage(img string) string {
+	if !strings.HasPrefix(img, "data:") {
+		return img
+	}
+	mediaType, _, _ := strings.Cut(strings.TrimPrefix(img, "data:"), ";")
+	return fmt.Sprintf("data:%s (%d KB)", mediaType, (len(img)+1023)/1024)
 }
 
 func buildLangfuseGenerationOutput(

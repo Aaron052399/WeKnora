@@ -15,7 +15,6 @@ import (
 	"sync"
 	"time"
 
-	apperrors "github.com/Tencent/WeKnora/internal/errors"
 	secutils "github.com/Tencent/WeKnora/internal/utils"
 )
 
@@ -103,19 +102,15 @@ func (s *TenantSkillService) InstallSkillFromSource(
 	// The config is authorized before the fetch, not by InstallSkill after it.
 	// The source is a caller-supplied host, so an unknown config ID must not
 	// be able to spend an outbound request and a body-sized download first.
-	cfgEntity, err := s.configs.GetByID(ctx, tenantID, configID)
-	if err != nil {
+	if err := s.requireSkillTarget(ctx, tenantID, configID); err != nil {
 		return "", err
-	}
-	if cfgEntity == nil {
-		return "", apperrors.NewNotFoundError("sandbox config not found")
 	}
 
 	bundle, archive, err := fetchNormalizedSkillBundle(ctx, source, s.sourceHTTP)
 	if err != nil {
 		return "", err
 	}
-	return s.installParsedSkill(ctx, tenantID, configID, bundle, archive)
+	return s.installParsedSkill(ctx, tenantID, configID, bundle, archive, skillArchiveUploaded)
 }
 
 func skillSourceHTTPClient(override *http.Client) *http.Client {
@@ -853,11 +848,6 @@ func getSkillURL(
 	return body, resp.Header.Get("Content-Type"), nil
 }
 
-func normalizeFetchedSkillArchive(body []byte, contentType, subdir string) ([]byte, error) {
-	_, archive, err := normalizeFetchedSkill(body, contentType, subdir)
-	return archive, err
-}
-
 func normalizeFetchedSkill(body []byte, contentType, subdir string) (*SkillBundle, []byte, error) {
 	if looksLikeSkillMarkdown(body) {
 		files := map[string][]byte{"SKILL.md": body}
@@ -914,7 +904,7 @@ func looksLikeJSON(contentType string, body []byte) bool {
 }
 
 func looksLikeSkillMarkdown(body []byte) bool {
-	trimmed := bytes.TrimSpace(body)
+	trimmed := bytes.TrimSpace(bytes.TrimPrefix(body, []byte("\ufeff")))
 	if !bytes.HasPrefix(trimmed, []byte("---")) {
 		return false
 	}

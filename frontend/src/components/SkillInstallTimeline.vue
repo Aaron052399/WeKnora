@@ -1,23 +1,71 @@
 <template>
   <section class="skill-timeline" :class="{ 'skill-timeline--compact': compact }" :aria-busy="loading">
-    <t-loading v-if="loading && messages.length === 0" size="small" />
-    <p v-else-if="messages.length === 0" class="skill-timeline__empty">
-      {{ live
-        ? $t('settings.sandbox.skillTranscriptWaiting')
-        : $t('settings.sandbox.skillTranscriptEmpty') }}
-    </p>
-    <template v-else>
-      <div v-for="(msg, index) in messages" :key="msg.id || index" class="skill-timeline__turn">
-        <pre v-if="msg.role === 'user'" class="skill-timeline__prompt">{{ msg.content }}</pre>
-        <AgentStreamDisplay
-          v-else
-          :session="msg"
-          :session-id="sessionId"
-          :user-query="''"
-          embedded-mode
-        />
+    <div class="skill-timeline__content">
+      <t-loading v-if="loading && messages.length === 0" size="small" />
+      <p v-else-if="messages.length === 0" class="skill-timeline__empty">
+        {{ live
+          ? $t('settings.sandbox.skillTranscriptWaiting')
+          : $t('settings.sandbox.skillTranscriptEmpty') }}
+      </p>
+      <template v-else>
+        <div v-for="(msg, index) in messages" :key="msg.id || index" class="skill-timeline__turn"
+          :class="{ 'skill-timeline__turn--command': index === messages.length - 1 && live && commandOutput && !commandOutput.done }">
+          <details v-if="msg.role === 'user'" class="skill-timeline__prompt">
+            <summary>
+              <t-icon name="chevron-right" size="14px" class="skill-timeline__prompt-arrow" />
+              <span class="skill-timeline__prompt-label">{{ $t('settings.sandbox.skillTranscriptPrompt') }}</span>
+              <span class="skill-timeline__prompt-preview">{{ promptPreview(msg.content) }}</span>
+            </summary>
+            <pre>{{ String(msg.content || '').trim() }}</pre>
+          </details>
+          <AgentStreamDisplay
+            v-else
+            :session="msg"
+            :session-id="sessionId"
+            :user-query="''"
+            embedded-mode
+          />
+        </div>
+      </template>
+      <SandboxCommandProgress
+        v-if="live && commandOutput && !commandOutput.done"
+        :progress="commandOutput"
+        class="skill-timeline__command"
+      />
+      <div v-for="item in guidance.messages" :key="item.id" class="skill-timeline__guidance-message">
+        <span>{{ $t(`settings.sandbox.skillGuidance.${item.status}`) }}</span>
+        <p>{{ item.content }}</p>
       </div>
-    </template>
+    </div>
+    <div v-if="live || canRetry" class="skill-timeline__guidance">
+      <div class="skill-timeline__guidance-box">
+        <t-textarea
+          v-model="guidanceText"
+          :placeholder="$t('settings.sandbox.skillGuidance.placeholder')"
+          :maxlength="10000"
+          :autosize="{ minRows: 2, maxRows: 6 }"
+          :disabled="sendingGuidance"
+        />
+        <div class="skill-timeline__guidance-actions">
+          <span v-if="live && !guidance.accepting">{{ $t('settings.sandbox.skillGuidance.unavailable') }}</span>
+          <span v-else-if="guidanceText.length > 9000" class="skill-timeline__guidance-count">
+            {{ guidanceText.length }}/10000
+          </span>
+          <t-button
+            size="small"
+            :variant="guidanceText.trim() ? 'base' : 'outline'"
+            :theme="guidanceText.trim() ? 'primary' : 'default'"
+            :loading="sendingGuidance"
+            :disabled="!guidanceText.trim() || (live && !guidance.accepting)"
+            @click="sendGuidance"
+          >
+            <template #icon><t-icon :name="live ? 'send' : 'refresh'" /></template>
+            {{ $t(live ? 'settings.sandbox.skillGuidance.send' : 'settings.sandbox.skillGuidance.retry') }}
+          </t-button>
+        </div>
+      </div>
+      <p v-if="guidanceError" role="alert" class="skill-timeline__guidance-error">{{ guidanceError }}</p>
+    </div>
   </section>
 </template>
 
@@ -26,9 +74,11 @@ import { onUnmounted, reactive, ref, watch } from 'vue'
 import { fetchEventSource } from '@microsoft/fetch-event-source'
 import { useChatStreamHandler } from '@/composables/useChatStreamHandler'
 import { getMessageList } from '@/api/chat'
-import { configSkillTranscriptUrl } from '@/api/system'
+import { configSkillTranscriptUrl, getConfigSkillGuidance, steerConfigSkill, reinstallConfigSkill, type SkillInstallGuidanceState } from '@/api/system'
 import { getApiBaseUrl } from '@/utils/api-base'
 import { generateRandomString } from '@/utils/index'
+import { makeSteerClientId } from '@/utils/steerId'
+import SandboxCommandProgress from './SandboxCommandProgress.vue'
 import AgentStreamDisplay from '@/views/chat/components/AgentStreamDisplay.vue'
 import i18n from '@/i18n'
 
@@ -43,9 +93,82 @@ const props = defineProps<{
   // not hit /transcript.
   live?: boolean
   compact?: boolean
+  canRetry?: boolean
 }>()
 
+const emit = defineEmits<{ restarted: [] }>()
+const guidance = ref<SkillInstallGuidanceState>({ accepting: false, messages: [] })
+const guidanceText = ref('')
+const guidanceError = ref('')
+const sendingGuidance = ref(false)
+let guidanceEpoch = 0
+let guidanceTimer: ReturnType<typeof setTimeout> | undefined
+// Keep the same ID after an uncertain response so Retry cannot enqueue twice.
+let pendingSend: { messageId: string; content: string; id: string } | undefined
+
+async function refreshGuidance(epoch: number) {
+  try {
+    const res = await getConfigSkillGuidance(props.configId, props.skillId)
+    if (epoch !== guidanceEpoch) return
+    guidance.value = res.data
+  } catch {
+    if (epoch === guidanceEpoch) guidance.value.accepting = false
+  }
+  if (epoch === guidanceEpoch && props.live) {
+    guidanceTimer = setTimeout(() => void refreshGuidance(epoch), 1500)
+  }
+}
+
+async function sendGuidance() {
+  const content = guidanceText.value.trim()
+  if (!content || sendingGuidance.value || (props.live ? !guidance.value.accepting : !props.canRetry)) return
+  const epoch = guidanceEpoch
+  const target = { configId: props.configId, skillId: props.skillId, messageId: props.messageId }
+  sendingGuidance.value = true
+  guidanceError.value = ''
+  try {
+    if (props.live) {
+      if (!pendingSend || pendingSend.messageId !== target.messageId || pendingSend.content !== content) {
+        pendingSend = { messageId: target.messageId, content, id: makeSteerClientId() }
+      }
+      await steerConfigSkill(target.configId, target.skillId, {
+        expected_message_id: target.messageId, steer_id: pendingSend.id, content,
+      })
+      if (epoch !== guidanceEpoch) return
+      // A failed refresh after a successful POST must not turn Retry into a duplicate send.
+      if (!guidance.value.messages.some(item => item.id === pendingSend!.id)) {
+        guidance.value.messages.push({ id: pendingSend.id, content, status: 'pending' })
+      }
+      pendingSend = undefined
+    } else {
+      await reinstallConfigSkill(target.configId, target.skillId, content)
+      if (epoch !== guidanceEpoch) return
+      emit('restarted')
+    }
+    guidanceText.value = ''
+  } catch (err: any) {
+    if (epoch === guidanceEpoch) {
+      guidanceError.value = err?.response?.data?.error?.message || err?.message || i18n.global.t('settings.sandbox.skillGuidance.failed')
+    }
+  } finally {
+    sendingGuidance.value = false
+  }
+}
+
+watch(
+  () => [props.configId, props.skillId, props.messageId, props.live] as const,
+  () => {
+    const epoch = ++guidanceEpoch
+    clearTimeout(guidanceTimer)
+    guidance.value = { accepting: false, messages: [] }
+    if (props.configId && props.skillId) void refreshGuidance(epoch)
+  },
+  { immediate: true },
+)
+onUnmounted(() => { guidanceEpoch++; clearTimeout(guidanceTimer) })
+
 const messages = reactive<any[]>([])
+const commandOutput = ref<{ command: string; started_at: string; output: string; done: boolean } | null>(null)
 const loading = ref(false)
 const isReplying = ref(false)
 const currentAssistantMessageId = ref('')
@@ -75,6 +198,11 @@ const { handleMsgList, processStreamChunk } = useChatStreamHandler({
 // install_prompt is the installer's opening line. It is not an assistant
 // event, so it becomes the user turn here rather than going through the chat
 // stream handler.
+function promptPreview(content: unknown): string {
+  const line = String(content || '').trim().split('\n')[0] || ''
+  return line.length > 80 ? `${line.slice(0, 80)}…` : line
+}
+
 function applyPrompt(content: string) {
   if (!content) return
   if (messages.some((msg) => msg.role === 'user')) return
@@ -146,6 +274,10 @@ async function follow(run: number): Promise<boolean> {
       } catch {
         return
       }
+      if (frame.response_type === 'install_output') {
+        commandOutput.value = frame.data || null
+        return
+      }
       if (frame.response_type === 'install_prompt') {
         applyPrompt(frame.content || '')
         return
@@ -171,6 +303,7 @@ async function open() {
   const run = ++openRun
   closed = false
   messages.splice(0, messages.length)
+  commandOutput.value = null
   const stale = () => run !== openRun || closed
   try {
     // A finished install already has durable rows. Replaying the event log
@@ -233,11 +366,81 @@ onUnmounted(stop)
 </script>
 
 <style scoped lang="less">
+.skill-timeline__content {
+  flex: 1;
+  min-width: 0;
+}
+
+.skill-timeline__guidance {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  flex-shrink: 0;
+  margin-top: 12px;
+  padding-top: 12px;
+  background: var(--td-bg-color-container);
+
+  // Cover the timeline's padding too, so scrolling text cannot peek around
+  // the sticky composer. Its z-index keeps this backdrop above the transcript.
+  &::before {
+    content: '';
+    position: absolute;
+    inset: 0 calc(-1 * var(--skill-guidance-gutter, 12px)) calc(-1 * var(--skill-guidance-bottom-gap, 12px));
+    z-index: -1;
+    background: inherit;
+    pointer-events: none;
+  }
+}
+.skill-timeline__guidance-message {
+  margin: 8px 0;
+  padding: 8px 10px;
+  background: var(--td-bg-color-secondarycontainer);
+  border-radius: var(--app-radius-sm);
+  span { font-size: var(--app-text-xs); color: var(--td-text-color-placeholder); }
+  p { margin: 4px 0 0; font-size: var(--app-text-sm); white-space: pre-wrap; overflow-wrap: anywhere; }
+}
+.skill-timeline__guidance-box {
+  border: 1px solid var(--td-component-stroke);
+  border-radius: var(--app-radius-md);
+  background: var(--td-bg-color-container);
+  transition: border-color var(--app-motion-fast) ease, box-shadow var(--app-motion-fast) ease;
+
+  &:focus-within {
+    border-color: var(--td-brand-color);
+    box-shadow: 0 0 0 2px var(--td-brand-color-focus);
+  }
+
+  :deep(.t-textarea__inner) {
+    padding: 10px 12px 4px;
+    border: 0;
+    box-shadow: none;
+    background: transparent;
+    resize: none;
+  }
+
+  :deep(.t-textarea__info_wrapper),
+  :deep(.t-textarea__limit) {
+    display: none;
+  }
+}
+.skill-timeline__guidance-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  padding: 4px 8px 8px 12px;
+  span { flex: 1; font-size: var(--app-text-xs); color: var(--td-text-color-placeholder); }
+}
+.skill-timeline__guidance-count { font-variant-numeric: tabular-nums; }
+.skill-timeline__guidance-error { margin: 6px 0 0; color: var(--td-error-color); font-size: var(--app-text-sm); }
+
 .skill-timeline {
+  display: flex;
+  flex-direction: column;
   padding: 12px;
-  background: var(--td-bg-color-secondarycontainer, #f7f7f7);
-  border: 1px solid var(--td-component-stroke, #e7e7e7);
-  border-radius: 8px;
+  background: var(--td-bg-color-secondarycontainer);
+  border: 1px solid var(--td-component-stroke);
+  border-radius: var(--app-radius-md);
 }
 
 .skill-timeline__turn + .skill-timeline__turn {
@@ -245,23 +448,69 @@ onUnmounted(stop)
 }
 
 .skill-timeline__prompt {
-  max-height: 140px;
-  margin: 0;
-  padding: 8px 10px;
-  overflow-y: auto;
-  color: var(--td-text-color-secondary, #666);
-  font-size: 12px;
-  line-height: 1.6;
-  background: var(--td-bg-color-container, #fff);
-  border-radius: 6px;
-  white-space: pre-wrap;
-  word-break: break-word;
+  border: 1px solid var(--td-component-stroke);
+  border-radius: var(--app-radius-sm);
+  background: var(--td-bg-color-container);
+
+  summary {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    padding: 6px 10px;
+    cursor: pointer;
+    list-style: none;
+    font-size: var(--app-text-sm);
+    line-height: 20px;
+    color: var(--td-text-color-secondary);
+    user-select: none;
+
+    &::-webkit-details-marker { display: none; }
+
+    &:hover { color: var(--td-text-color-primary); }
+  }
+
+  pre {
+    max-height: 240px;
+    margin: 0;
+    padding: 8px 12px 10px;
+    overflow-y: auto;
+    border-top: 1px solid var(--td-component-stroke);
+    color: var(--td-text-color-secondary);
+    font-size: var(--app-text-xs);
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  &[open] .skill-timeline__prompt-arrow { transform: rotate(90deg); }
+  &[open] .skill-timeline__prompt-preview { display: none; }
+}
+
+.skill-timeline__prompt-arrow {
+  flex-shrink: 0;
+  color: var(--td-text-color-placeholder);
+  transition: transform var(--app-motion-fast) ease;
+}
+
+.skill-timeline__prompt-label {
+  flex-shrink: 0;
+  font-weight: 500;
+}
+
+.skill-timeline__prompt-preview {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--td-text-color-placeholder);
 }
 
 .skill-timeline__empty {
   margin: 8px 0;
-  color: var(--td-text-color-placeholder, #999);
-  font-size: 13px;
+  color: var(--td-text-color-placeholder);
+  font-size: var(--app-text-md);
 }
 
 .skill-timeline--compact {
@@ -271,42 +520,46 @@ onUnmounted(stop)
   border-radius: 0;
 }
 
-.skill-timeline--compact .skill-timeline__prompt {
-  max-height: 72px;
-  padding: 6px 8px;
-  font-size: 11px;
-  line-height: 1.5;
+.skill-timeline--compact .skill-timeline__prompt pre {
+  max-height: 160px;
 }
 
 .skill-timeline--compact .skill-timeline__empty {
   margin: 4px 0;
-  font-size: 12px;
+  font-size: var(--app-text-sm);
 }
 
 .skill-timeline--compact :deep(.agent-stream-display.is-embedded) {
-  font-size: 12px;
+  font-size: var(--app-text-sm);
   --agent-step-text-size: 12px;
   --agent-step-summary-size: 12px;
 }
 
 .skill-timeline--compact :deep(.agent-stream-display.is-embedded .tree-root .action-name) {
-  font-size: 12px;
+  font-size: var(--app-text-sm);
 }
 
 // Chat answer Markdown is 16px. That is the right size in a conversation and
 // too loud in this 420px popup, where the prompt and step summary are 11–13px.
 .skill-timeline--compact :deep(.agent-stream-display .answer-content.markdown-content) {
-  font-size: 12px;
+  font-size: var(--app-text-sm);
   line-height: 1.55;
 }
 
 .skill-timeline--compact :deep(.agent-stream-display .answer-content.markdown-content h1) {
-  font-size: 13px;
+  font-size: var(--app-text-md);
   margin-bottom: 0.35em;
 }
 
 .skill-timeline--compact :deep(.agent-stream-display .answer-content.markdown-content h2),
 .skill-timeline--compact :deep(.agent-stream-display .answer-content.markdown-content h3) {
-  font-size: 12px;
+  font-size: var(--app-text-sm);
 }
+.skill-timeline__turn--command {
+  // AgentStreamDisplay also renders an empty inline image-viewer trigger.
+  // Stack its roots so that trigger cannot create a blank text line above the command.
+  display: flex;
+  flex-direction: column;
+}
+.skill-timeline__command { margin: 4px 0 8px 42px; }
 </style>

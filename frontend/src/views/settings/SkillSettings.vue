@@ -3,12 +3,20 @@
     <div class="section-header">
       <div class="section-header__title-row">
         <h2>{{ $t('settings.skills.title') }}</h2>
-        <t-tooltip :content="$t('settings.skills.helpTooltip')" placement="right"
+        <t-tooltip :content="skillText('helpTooltip')" placement="right"
           overlay-class-name="skill-settings__help-tooltip">
-          <t-icon name="help-circle" class="section-header__help" :aria-label="$t('settings.skills.helpTooltip')" />
+          <t-icon name="help-circle" class="section-header__help" :aria-label="skillText('helpTooltip')" />
         </t-tooltip>
       </div>
-      <p class="section-description">{{ $t('settings.skills.description') }}</p>
+      <p class="section-description">{{ skillText('description') }}</p>
+    </div>
+
+    <!-- Lite has no sandbox settings page, so its script kill switch is cleared here. -->
+    <div v-if="hostOnly && scriptsDisabled" class="skill-settings__scripts-off" role="status">
+      <p>{{ $t('settings.sandbox.scriptsDisabled') }}</p>
+      <t-button size="small" theme="primary" variant="outline" :loading="policySaving" @click="enableScripts">
+        {{ $t('settings.sandbox.enableScripts') }}
+      </t-button>
     </div>
 
     <div v-if="loading" class="loading-container">
@@ -16,8 +24,14 @@
     </div>
 
     <template v-else>
+      <Teleport to="#toolbox-toolbar" defer>
+        <t-input v-if="catalog.length > 0" v-model="query" class="list-search" :placeholder="$t('menu.search')"
+          :aria-label="$t('menu.search')" clearable>
+          <template #prefix-icon><t-icon name="search" size="16px" /></template>
+        </t-input>
+      </Teleport>
       <div v-if="catalog.length === 0" class="empty-state">
-        <t-empty :description="$t('settings.skills.emptyDesc')" />
+        <t-empty :description="skillText('emptyDesc')" />
         <p v-if="skillConfigs.length === 0" class="empty-hint">
           {{ $t('settings.skills.emptyNoSandboxHint') }}
         </p>
@@ -25,25 +39,32 @@
           <t-button theme="primary" @click="openAdd">
             {{ $t('settings.skills.addSkill') }}
           </t-button>
-          <t-button v-if="skillConfigs.length === 0" theme="default" variant="outline"
+          <t-button v-if="skillConfigs.length === 0 && !hostOnly" theme="default" variant="outline"
             @click="uiStore.openSettings('sandbox')">
             {{ $t('settings.skills.goSandboxSettings') }}
           </t-button>
         </div>
       </div>
 
+      <div v-else-if="filteredCatalog.length === 0" class="empty-state">
+        <t-empty :description="$t('common.noResult')" />
+        <div class="empty-actions">
+          <t-button variant="outline" @click="query = ''">{{ $t('common.clear') }}</t-button>
+          <t-button variant="text" @click="openAdd">{{ $t('settings.skills.addSkill') }}</t-button>
+        </div>
+      </div>
       <div v-else class="skill-list">
-        <article v-for="item in catalog" :key="item.id" class="skill-card" :class="{
+        <article v-for="item in filteredCatalog" :key="item.id" class="skill-card" :class="{
           'skill-card--focused': focusedCatalogId === item.id,
           'skill-card--installed': liveInstalls(item).length > 0,
           'skill-card--idle': liveInstalls(item).length === 0,
         }">
           <div class="skill-card__main">
-            <div class="skill-card__badge" aria-hidden="true">
-              <t-icon :name="SKILL_ICON" size="16px" />
-            </div>
             <div class="skill-card__body">
               <div class="skill-card__header">
+                <div class="skill-card__badge" :style="skillBadgeStyle(item.name)" aria-hidden="true">
+                  {{ skillInitial(item.name) }}
+                </div>
                 <div class="skill-card__heading">
                   <h3 class="skill-card__title" :title="item.name">{{ item.name }}</h3>
                   <span v-if="item.version" class="skill-card__type">{{ item.version }}</span>
@@ -65,16 +86,17 @@
               </p>
               <div v-for="view in [installsView(item)]" :key="'installs'" class="skill-card__installs">
                 <span v-if="view.installs.length === 0 && !view.canAdd" class="skill-card__installs-label">
-                  {{ $t('settings.skills.noInstalls') }}
+                  {{ skillText('noInstalls') }}
                 </span>
                 <button v-else-if="!view.needsPanel" type="button" class="skill-card__chip"
                   :class="chipClass(item, view)"
                   :disabled="Boolean(view.installs[0] && !recordFor(view.installs[0].sandbox_config_id))"
                   :title="installSummaryTooltip(item, view)" :aria-label="installSummary(item, view)"
                   @click="onInstallChipClick(item, view)">
-                  <span v-if="view.installs.some(isInstallBusy)" class="skill-card__entry-dot" aria-hidden="true" />
-                  <span class="skill-card__chip-text">{{ installSummary(item, view) }}</span>
-                  <t-icon name="chevron-right" size="14px" class="skill-card__chip-go" />
+                  <t-icon v-if="view.installs.length === 0" name="add" size="14px" class="skill-card__chip-lead" />
+                  <span v-else class="skill-card__chip-dot" aria-hidden="true" />
+                  <span class="skill-card__chip-text">{{ installChipText(view) }}</span>
+                  <t-icon v-if="view.installs.length > 0" name="chevron-right" size="14px" class="skill-card__chip-go" />
                 </button>
                 <t-popup v-else :visible="openPanelId === item.id" trigger="click" placement="bottom-left" attach="body"
                   destroy-on-close overlay-class-name="skill-install-panel-overlay"
@@ -83,39 +105,63 @@
                   <button type="button" class="skill-card__chip" :class="chipClass(item, view)"
                     :title="installSummaryTooltip(item, view)" :aria-label="installSummary(item, view)"
                     :aria-expanded="openPanelId === item.id">
-                    <span v-if="view.installs.some(isInstallBusy)" class="skill-card__entry-dot" aria-hidden="true" />
-                    <span class="skill-card__chip-text">{{ installSummary(item, view) }}</span>
-                    <t-icon name="chevron-down" size="14px" class="skill-card__chip-go" />
+                    <t-icon v-if="view.installs.length === 0" name="add" size="14px" class="skill-card__chip-lead" />
+                    <span v-else class="skill-card__chip-dot" aria-hidden="true" />
+                    <span class="skill-card__chip-text">{{ installChipText(view) }}</span>
+                    <span v-if="view.installs.length > CHIP_NAME_LIMIT" class="skill-card__chip-more">
+                      +{{ view.installs.length - CHIP_NAME_LIMIT }}
+                    </span>
+                    <t-icon name="chevron-down" size="14px" class="skill-card__chip-go"
+                      :class="{ 'is-open': openPanelId === item.id }" />
                   </button>
                   <template #content>
                     <div class="skill-install-panel">
                       <template v-if="view.installs.length > 0">
-                        <p class="skill-install-panel__group">{{ $t('settings.skills.installPanelGroup') }}</p>
+                        <p class="skill-install-panel__group">
+                          {{ $t('settings.skills.installPanelGroup') }}
+                          <span class="skill-install-panel__group-count">{{ view.installs.length }}</span>
+                        </p>
                         <button v-for="inst in view.installs" :key="inst.skill_id" type="button"
                           class="skill-install-panel__item" :class="installEntryClass(item, inst)"
                           :disabled="!recordFor(inst.sandbox_config_id)" :title="installTooltip(item, inst)"
                           @click="openManageFromPanel(item, inst)">
                           <SandboxBackendBadge v-if="inst.sandbox_type" :type="inst.sandbox_type" size="xs" />
                           <span class="skill-install-panel__name">{{ installName(inst) }}</span>
-                          <span v-if="isInstallBusy(inst)" class="skill-card__entry-dot" aria-hidden="true" />
-                          <t-icon v-else-if="installChipStatusIcon(item, inst)"
-                            :name="installChipStatusIcon(item, inst)" size="14px" class="skill-card__entry-status" />
+                          <span v-if="installChipStatus(item, inst)" class="skill-install-panel__status">
+                            <span v-if="isInstallBusy(inst)" class="skill-card__entry-dot" aria-hidden="true" />
+                            <t-icon v-else-if="installChipStatusIcon(item, inst)"
+                              :name="installChipStatusIcon(item, inst)" size="12px" class="skill-card__entry-status" />
+                            {{ installChipStatus(item, inst) }}
+                          </span>
+                          <t-icon name="chevron-right" size="14px" class="skill-install-panel__go" />
                         </button>
                       </template>
                       <template v-if="view.available.length > 0">
                         <div v-if="view.installs.length > 0" class="skill-install-panel__split" role="separator" />
-                        <p class="skill-install-panel__group">{{ $t('settings.skills.installPanelAvailable') }}</p>
+                        <p class="skill-install-panel__group">
+                          {{ $t('settings.skills.installPanelAvailable') }}
+                          <span class="skill-install-panel__group-count">{{ view.available.length }}</span>
+                        </p>
                         <button v-for="cfg in view.available" :key="cfg.id" type="button"
                           class="skill-install-panel__item skill-install-panel__item--available"
                           :title="sandboxMetaLine(cfg)" @click="openInstallTo(item, cfg)">
                           <SandboxBackendBadge :type="cfg.sandbox_type" size="xs" />
                           <span class="skill-install-panel__name">{{ cfg.name }}</span>
-                          <t-icon name="add" size="14px" class="skill-install-panel__add" />
+                          <span class="skill-install-panel__add">
+                            <t-icon name="add" size="12px" />
+                            {{ $t('settings.skills.installAction') }}
+                          </span>
                         </button>
                       </template>
                     </div>
                   </template>
                 </t-popup>
+                <button v-if="view.upgradable.length > 0" type="button"
+                  class="skill-card__chip skill-card__chip--upgrade" :title="upgradeTooltip(item, view)"
+                  :aria-label="upgradeLabel(view)" @click="openUpgrade(item)">
+                  <t-icon name="arrow-up" size="14px" class="skill-card__chip-go" />
+                  <span class="skill-card__chip-text">{{ upgradeLabel(view) }}</span>
+                </button>
               </div>
             </div>
           </div>
@@ -158,11 +204,11 @@
 
       <article v-if="addStep > 0 && registeredCatalog" class="skill-card parsed-skill">
         <div class="skill-card__main">
-          <div class="skill-card__badge" aria-hidden="true">
-            <t-icon :name="SKILL_ICON" size="16px" />
-          </div>
           <div class="skill-card__body">
             <div class="skill-card__header">
+              <div class="skill-card__badge" :style="skillBadgeStyle(registeredCatalog.name)" aria-hidden="true">
+                {{ skillInitial(registeredCatalog.name) }}
+              </div>
               <h3 class="skill-card__title" :title="registeredCatalog.name">{{ registeredCatalog.name }}</h3>
               <span v-if="registeredCatalog.version" class="skill-card__type">{{ registeredCatalog.version }}</span>
             </div>
@@ -216,7 +262,7 @@
       </template>
 
       <template v-else>
-        <section v-if="skillConfigs.length > 0" class="setting-drawer__section">
+        <section v-if="!hostOnly && skillConfigs.length > 0" class="setting-drawer__section">
           <h4 class="setting-drawer__section-title">{{ $t('settings.skills.pickSandboxes') }}</h4>
           <p class="installer-model-hint">{{ $t('settings.skills.pickSandboxesHint') }}</p>
           <div class="sandbox-pick-list">
@@ -228,7 +274,7 @@
                   <SandboxBackendBadge :type="row.cfg.sandbox_type" size="sm" />
                   <span class="sandbox-pick__text">
                     <span class="sandbox-pick__name">{{ row.cfg.name }}</span>
-                    <span class="sandbox-pick__meta">{{ sandboxMetaLine(row.cfg) }}</span>
+                    <span class="sandbox-pick__meta">{{ pickRowMeta(row) }}</span>
                   </span>
                 </span>
               </t-checkbox>
@@ -253,7 +299,7 @@
             </div>
           </div>
         </section>
-        <p v-else class="installer-model-hint">{{ $t('settings.skills.emptyNoSandboxHint') }}</p>
+        <p v-else-if="!hostOnly" class="installer-model-hint">{{ $t('settings.skills.emptyNoSandboxHint') }}</p>
 
         <section v-if="addTargetIds.length > 0" class="setting-drawer__section">
           <h4 class="setting-drawer__section-title">{{ $t('settings.sandbox.skillInstallerModel') }}</h4>
@@ -264,12 +310,17 @@
       </template>
     </SettingDrawer>
 
-    <SettingDrawer v-model:visible="showInstall" :title="$t('settings.skills.installToSandbox')"
+    <SettingDrawer v-model:visible="showInstall" :title="installDrawerTitle"
       :description="installDrawerDesc" :icon="SKILL_ICON" width="560px" :min-width="480" :max-width="760"
       storage-key="setting-drawer:width:skill-catalog-install" :confirm-loading="installing"
       :confirm-disabled="installConfirmDisabled" :confirm-text="installConfirmText" @confirm="onInstallDrawerConfirm">
-      <p class="installer-model-hint">{{ $t('settings.skills.installToSandboxDesc') }}</p>
-      <section v-if="installPickRows.length > 0" class="setting-drawer__section">
+      <template v-if="installCatalog" #headerIcon>
+        <span class="skill-drawer-avatar" :style="skillBadgeStyle(installCatalog.name)">
+          {{ skillInitial(installCatalog.name) }}
+        </span>
+      </template>
+      <p v-if="installMode === 'install'" class="installer-model-hint">{{ skillText('installToSandboxDesc') }}</p>
+      <section v-if="!hostOnly && installPickRows.length > 0" class="setting-drawer__section">
         <div class="sandbox-pick-list">
           <div v-for="row in installPickRows" :key="row.cfg.id" class="sandbox-pick-row"
             :class="{ 'is-busy': row.busy, 'is-ready': row.ready }">
@@ -279,7 +330,7 @@
                 <SandboxBackendBadge :type="row.cfg.sandbox_type" size="sm" />
                 <span class="sandbox-pick__text">
                   <span class="sandbox-pick__name">{{ row.cfg.name }}</span>
-                  <span class="sandbox-pick__meta">{{ sandboxMetaLine(row.cfg) }}</span>
+                  <span class="sandbox-pick__meta">{{ pickRowMeta(row) }}</span>
                 </span>
               </span>
             </t-checkbox>
@@ -304,7 +355,9 @@
           </div>
         </div>
       </section>
-      <p v-else class="installer-model-hint">{{ $t('settings.skills.noSandboxToInstall') }}</p>
+      <p v-else-if="!hostOnly" class="installer-model-hint">
+        {{ installMode === 'upgrade' ? $t('settings.skills.noSandboxToUpgrade') : $t('settings.skills.noSandboxToInstall') }}
+      </p>
       <section v-if="installTargetIds.length > 0" class="setting-drawer__section">
         <h4 class="setting-drawer__section-title">{{ $t('settings.sandbox.skillInstallerModel') }}</h4>
         <p class="installer-model-hint">{{ $t('settings.sandbox.skillInstallerModelHint') }}</p>
@@ -316,8 +369,12 @@
     <SettingDrawer v-model:visible="showManage" :title="manageTitle" :description="manageDesc" :icon="SKILL_ICON"
       width="680px" :min-width="560" :max-width="920" storage-key="setting-drawer:width:skill-catalog-manage"
       :hide-footer="true" :z-index="2600">
+      <template v-if="manageTitle" #headerIcon>
+        <span class="skill-drawer-avatar" :style="skillBadgeStyle(manageTitle)">{{ skillInitial(manageTitle) }}</span>
+      </template>
       <SandboxSkillsPanel v-if="showManage && manageRecord && manageSkillId" :record="manageRecord" mode="list" hide-add
-        :focus-skill-id="manageSkillId" @updated="onPanelUpdated" @skills-changed="loadCatalog" />
+        :focus-skill-id="manageSkillId" :catalog-item="catalogItemById(manageCatalogId)" @updated="onPanelUpdated"
+        @skills-changed="loadCatalog" />
     </SettingDrawer>
 
     <SkillFilesDrawer v-model:visible="filesDrawerVisible" :catalog-id="filesCatalogId"
@@ -337,8 +394,10 @@ import SettingDrawer from '@/components/settings/SettingDrawer.vue'
 import ModelSelector from '@/components/ModelSelector.vue'
 import { useConfirmDelete } from '@/components/settings/useConfirmDelete'
 import { useConfigSkillInstallProgress } from '@/composables/useConfigSkillInstallProgress'
+import { matchesResourceQuery } from '@/utils/resourceListSearch'
 import { SKILL_ICON } from '@/types/mention'
 import { useUIStore } from '@/stores/ui'
+import { useDeploymentCapabilitiesStore } from '@/stores/deploymentCapabilities'
 import { MAX_SKILL_BUNDLE_SIZE_BYTES, MAX_SKILL_BUNDLE_SIZE_MB } from '@/utils'
 import {
   deleteSkillCatalog,
@@ -350,28 +409,49 @@ import {
   type SkillCatalogItem,
   type SkillCatalogRegisterResult,
 } from '@/api/skill'
+import { useSkillInstallerModel } from '@/composables/useSkillInstallerModel'
+import { installOutdated, installUpgradable, servedPreviousText, upgradeVersions } from '@/utils/skillUpgrade'
 import {
-  getAgentById,
-  updateAgent,
-  type CustomAgent,
-} from '@/api/agent'
+  HOST_SKILL_TARGET_ID,
+  hostSkillTargetRecord,
+  hostSkillsOnly,
+  isHostSkillTarget,
+} from '@/utils/skillTarget'
 import {
   isNamedSandboxBackend,
   listSandboxConfigs,
+  setSandboxWorkspacePolicy,
   type SandboxConfigRecord,
 } from '@/api/system'
 
 const props = defineProps<{
   initialSandboxId?: string
 }>()
+const emit = defineEmits<{ count: [value: number] }>()
 
-const { t } = useI18n()
+const { t, te, locale } = useI18n()
 const uiStore = useUIStore()
+const deploymentCapabilities = useDeploymentCapabilitiesStore()
 const confirmDelete = useConfirmDelete()
+const hostOnly = computed(() => hostSkillsOnly(
+  deploymentCapabilities.isSupported('settings.sandbox.remote'),
+  deploymentCapabilities.isSupported('settings.sandbox.host'),
+))
+
+function skillText(key: string, params: Record<string, unknown> = {}) {
+  const hostKey = `settings.skills.host.${key}`
+  if (hostOnly.value && te(hostKey)) return t(hostKey, params)
+  return t(`settings.skills.${key}`, params)
+}
+const hostRecord = computed(() => hostSkillTargetRecord(t('settings.skills.hostTarget')))
 
 const loading = ref(false)
 const records = ref<SandboxConfigRecord[]>([])
+const scriptsDisabled = ref(false)
+const policySaving = ref(false)
 const catalog = ref<SkillCatalogItem[]>([])
+const query = ref('')
+const filteredCatalog = computed(() => catalog.value.filter((item) => matchesResourceQuery(item, query.value)))
 const focusedCatalogId = ref('')
 const deletingId = ref('')
 const showAdd = ref(false)
@@ -385,8 +465,10 @@ const addSessionIds = ref<string[]>([])
 const installTargetIds = ref<string[]>([])
 const installSessionIds = ref<string[]>([])
 const installCatalog = ref<SkillCatalogItem | null>(null)
+const installMode = ref<'install' | 'upgrade'>('install')
 const manageRecord = ref<SandboxConfigRecord | null>(null)
 const manageSkillId = ref('')
+const manageCatalogId = ref('')
 const manageTitle = ref('')
 const filesDrawerVisible = ref(false)
 const filesCatalogId = ref('')
@@ -398,12 +480,10 @@ const addingFromSource = ref(false)
 const installing = ref(false)
 const uploadPercent = ref(0)
 const fileInputRef = ref<HTMLInputElement | null>(null)
-const installerAgent = ref<CustomAgent | null>(null)
-const installerModelId = ref('')
-const savingInstallerModel = ref(false)
-
-const INSTALLER_AGENT_ID = 'builtin-skill-installer'
-const LAST_CHAT_MODEL_KEY = 'weknora_last_chat_model_id'
+const {
+  installerModelId, savingInstallerModel, loadInstallerModel, persistInstallerModel,
+  onInstallerModelChange,
+} = useSkillInstallerModel()
 
 const {
   percentOf: installEventPercent,
@@ -419,7 +499,9 @@ let pollTimer: number | null = null
 let focusTimer: number | null = null
 
 const skillConfigs = computed(() =>
-  records.value.filter((record) => isNamedSandboxBackend(record.sandbox_type)),
+  hostOnly.value
+    ? [hostRecord.value]
+    : records.value.filter((record) => isNamedSandboxBackend(record.sandbox_type)),
 )
 
 const addBusy = computed(() => uploading.value || addingFromSource.value)
@@ -433,7 +515,7 @@ const addSteps = computed(() => [
 const addStepDescription = computed(() =>
   addStep.value === 0
     ? t('settings.skills.addStepRegisterDesc')
-    : t('settings.skills.addStepInstallDesc'),
+    : skillText('addStepInstallDesc'),
 )
 
 const addPrimaryLoading = computed(() =>
@@ -451,13 +533,13 @@ const addPrimaryDisabled = computed(() => {
 
 const addPrimaryText = computed(() => {
   if (addStep.value === 0) return t('common.next')
-  if (addTargetIds.value.length > 0) return t('settings.skills.installToSandbox')
+  if (addTargetIds.value.length > 0) return pickConfirmText(addPickRows.value, addTargetIds.value)
   return t('settings.skills.addFinish')
 })
 
 const installConfirmText = computed(() =>
   installTargetIds.value.length > 0
-    ? t('settings.skills.installToSandbox')
+    ? pickConfirmText(installPickRows.value, installTargetIds.value)
     : t('settings.skills.addFinish'),
 )
 
@@ -466,23 +548,34 @@ const installConfirmDisabled = computed(() =>
 )
 
 const installPickRows = computed(() =>
-  sandboxPickRows(catalogItemById(installCatalog.value?.id), 'remaining', installSessionIds.value),
+  sandboxPickRows(
+    catalogItemById(installCatalog.value?.id),
+    installMode.value === 'upgrade' ? 'upgrade' : 'remaining',
+    installSessionIds.value,
+  ),
 )
 
 const addPickRows = computed(() =>
   sandboxPickRows(catalogItemById(registeredCatalog.value?.id), 'all', addSessionIds.value),
 )
 
+const installDrawerTitle = computed(() =>
+  installMode.value === 'upgrade'
+    ? t('settings.skills.upgradeTitle')
+    : skillText('installToSandbox'),
+)
+
 const installDrawerDesc = computed(() => {
   const item = installCatalog.value
-  if (!item) return t('settings.skills.installToSandboxDesc')
-  return t('settings.skills.installDrawerDesc', { name: item.name })
+  if (!item) return skillText('installToSandboxDesc')
+  if (installMode.value === 'upgrade') return skillText('upgradeDrawerDesc', { name: item.name })
+  return skillText('installDrawerDesc', { name: item.name })
 })
 
 const manageDesc = computed(() => {
   const record = manageRecord.value
   if (!record) return ''
-  return t('settings.skills.manageDrawerDesc', { name: record.name })
+  return skillText('manageDrawerDesc', { name: record.name })
 })
 
 function liveInstalls(item: SkillCatalogItem): SkillCatalogInstall[] {
@@ -503,6 +596,7 @@ function targetsFor(item: SkillCatalogItem): SandboxConfigRecord[] {
 }
 
 function recordFor(id: string): SandboxConfigRecord | undefined {
+  if (hostOnly.value && id === HOST_SKILL_TARGET_ID) return hostRecord.value
   return records.value.find((record) => record.id === id)
 }
 
@@ -536,6 +630,10 @@ type SandboxPickRow = {
   selectable: boolean
   busy: boolean
   ready: boolean
+  // A ready install still on an older archive than the catalog. Picking it
+  // installs the catalog over it, which is the upgrade.
+  upgradable: boolean
+  upgradeNote: string
 }
 
 function catalogItemById(id: string | undefined | null): SkillCatalogItem | null {
@@ -546,7 +644,7 @@ function catalogItemById(id: string | undefined | null): SkillCatalogItem | null
 
 function sandboxPickRows(
   item: SkillCatalogItem | null,
-  mode: 'remaining' | 'all',
+  mode: 'remaining' | 'upgrade' | 'all',
   sessionIds: string[],
 ): SandboxPickRow[] {
   const byId = new Map(
@@ -559,6 +657,8 @@ function sandboxPickRows(
       const inst = byId.get(cfg.id)
       if (session.has(cfg.id)) return true
       if (inst && isInstallBusy(inst)) return true
+      if (inst && item && installUpgradable(item, inst)) return true
+      if (mode === 'upgrade') return false
       if (!inst || inst.status === 'failed') return true
       return false
     })
@@ -566,14 +666,33 @@ function sandboxPickRows(
       const install = byId.get(cfg.id)
       const busy = Boolean(install && isInstallBusy(install))
       const ready = install?.status === 'ready'
+      const upgradable = Boolean(item && install && installUpgradable(item, install))
       return {
         cfg,
         install,
-        selectable: !busy && !ready,
+        selectable: !busy && (!ready || upgradable),
         busy,
         ready,
+        upgradable,
+        upgradeNote: item && install && upgradable ? upgradeVersionText(item, install) : '',
       }
     })
+}
+
+function pickRowMeta(row: SandboxPickRow): string {
+  const meta = sandboxMetaLine(row.cfg)
+  return row.upgradeNote ? `${row.upgradeNote} · ${meta}` : meta
+}
+
+function pickedOnlyUpgrades(rows: SandboxPickRow[], ids: string[]): boolean {
+  const byId = new Map(rows.map((row) => [row.cfg.id, row]))
+  return ids.length > 0 && ids.every((id) => byId.get(id)?.upgradable)
+}
+
+function pickConfirmText(rows: SandboxPickRow[], ids: string[]): string {
+  return pickedOnlyUpgrades(rows, ids)
+    ? skillText('upgrade')
+    : skillText('installToSandbox')
 }
 
 function sandboxPickPercent(row: SandboxPickRow): number | null {
@@ -641,15 +760,29 @@ function compactText(value: string): string {
   return value.replace(/\s+/g, ' ').trim()
 }
 
-function installOutdated(item: SkillCatalogItem, inst: SkillCatalogInstall): boolean {
-  return Boolean(
-    item.bundle_sha256
-    && inst.bundle_sha256
-    && item.bundle_sha256 !== inst.bundle_sha256,
-  )
+const SKILL_BADGE_HUES = ['#366ef4', '#0594fa', '#00a870', '#8e56dd', '#e37318', '#d6418f', '#5b5bd6', '#b07b3b']
+
+function skillInitial(name: string): string {
+  const ch = Array.from((name || '').replace(/^[^\p{L}\p{N}]+/u, ''))[0] || '?'
+  return ch.toUpperCase()
+}
+
+function skillBadgeStyle(name: string): Record<string, string> {
+  let hash = 0
+  for (const ch of name || '') hash = (hash * 31 + ch.codePointAt(0)!) >>> 0
+  return { '--skill-hue': SKILL_BADGE_HUES[hash % SKILL_BADGE_HUES.length] }
+}
+
+function upgradeVersionText(item: SkillCatalogItem, inst: SkillCatalogInstall): string {
+  const versions = upgradeVersions(item, inst)
+  return versions
+    ? t('settings.skills.upgradeFromTo', versions)
+    : t('settings.skills.upgradeAvailable')
 }
 
 function installStatusText(inst: SkillCatalogInstall): string {
+  const served = servedPreviousText(t, inst)
+  if (served) return served
   if (inst.status === 'installing') return t('settings.sandbox.skillStatusInstalling')
   if (inst.status === 'removing') return t('settings.sandbox.skillStatusRemoving')
   if (inst.status === 'failed') return t('settings.sandbox.skillStatusFailed')
@@ -667,8 +800,8 @@ function installChipStatus(item: SkillCatalogItem, inst: SkillCatalogInstall): s
 }
 
 function installChipStatusIcon(item: SkillCatalogItem, inst: SkillCatalogInstall): string {
-  if (inst.status === 'failed') return 'close-circle'
-  if (inst.status === 'ready' && inst.enabled && installOutdated(item, inst)) return 'error-circle'
+  if (inst.status === 'failed') return 'close-circle-filled'
+  if (inst.status === 'ready' && inst.enabled && installOutdated(item, inst)) return 'error-circle-filled'
   if (inst.status === 'ready' && inst.enabled) return 'check-circle-filled'
   return ''
 }
@@ -702,17 +835,37 @@ function installsView(item: SkillCatalogItem) {
   return {
     installs,
     available,
+    upgradable: installs.filter((inst) => installUpgradable(item, inst)),
     canAdd: available.length > 0,
     needsPanel: installs.length + available.length > 1,
   }
 }
 
+function upgradeLabel(view: ReturnType<typeof installsView>): string {
+  const count = view.upgradable.length
+  return count > 1 ? t('settings.skills.upgradeCount', { count }) : t('settings.skills.upgrade')
+}
+
+function upgradeTooltip(item: SkillCatalogItem, view: ReturnType<typeof installsView>): string {
+  return view.upgradable
+    .map((inst) => `${installName(inst)} · ${upgradeVersionText(item, inst)}`)
+    .join('\n')
+}
+
 function installSummary(item: SkillCatalogItem, view: ReturnType<typeof installsView>): string {
-  if (view.installs.length === 0) return t('settings.skills.installToSandbox')
+  if (view.installs.length === 0) return skillText('installToSandbox')
   if (view.installs.length === 1) {
-    return t('settings.skills.installedOnName', { name: installName(view.installs[0]) })
+    return skillText('installedOnName', { name: installName(view.installs[0]) })
   }
   return t('settings.skills.installedCount', { count: view.installs.length })
+}
+
+const CHIP_NAME_LIMIT = 2
+
+function installChipText(view: ReturnType<typeof installsView>): string {
+  if (view.installs.length === 0) return skillText('installToSandbox')
+  const sep = /^(zh|ja)/.test(String(locale.value)) ? '、' : ', '
+  return view.installs.slice(0, CHIP_NAME_LIMIT).map(installName).join(sep)
 }
 
 function chipClass(item: SkillCatalogItem, view: ReturnType<typeof installsView>): (string | undefined)[] {
@@ -732,7 +885,7 @@ function installSummaryTooltip(item: SkillCatalogItem, view: ReturnType<typeof i
         : `${cfg.name} · ${t('settings.skills.installPanelAvailable')}`,
     )
   }
-  if (lines.length === 0) return t('settings.skills.installToSandbox')
+  if (lines.length === 0) return skillText('installToSandbox')
   return lines.join('\n')
 }
 
@@ -759,6 +912,7 @@ function openManageFromPanel(item: SkillCatalogItem, inst: SkillCatalogInstall) 
 
 function openInstallTo(item: SkillCatalogItem, cfg: SandboxConfigRecord) {
   openPanelId.value = ''
+  installMode.value = 'install'
   installCatalog.value = item
   installSessionIds.value = []
   installTargetIds.value = [cfg.id]
@@ -780,13 +934,18 @@ function installEntryClass(item: SkillCatalogItem, inst: SkillCatalogInstall): s
   return 'skill-card__entry--ready'
 }
 
-function installName(inst: SkillCatalogInstall): string {
+function installTargetName(inst: { sandbox_config_id: string; sandbox_config_name?: string }): string {
+  if (isHostSkillTarget(inst.sandbox_config_id)) return t('settings.skills.hostTarget')
   return inst.sandbox_config_name || inst.sandbox_config_id
+}
+
+function installName(inst: SkillCatalogInstall): string {
+  return installTargetName(inst)
 }
 
 function installTooltip(item: SkillCatalogItem, inst: SkillCatalogInstall): string {
   const parts = [
-    inst.sandbox_config_name || inst.sandbox_config_id,
+    installTargetName(inst),
     inst.sandbox_type ? backendLabel(inst.sandbox_type) : '',
     installChipStatus(item, inst) || installStatusText(inst),
   ].filter(Boolean)
@@ -801,11 +960,11 @@ function openCatalogFiles(item: SkillCatalogItem) {
 
 function askDelete(item: SkillCatalogItem) {
   if (!canDelete(item)) {
-    MessagePlugin.warning(t('settings.skills.deleteCatalogBlocked'))
+    MessagePlugin.warning(skillText('deleteCatalogBlocked'))
     return
   }
   confirmDelete({
-    body: t('settings.skills.deleteCatalogConfirm', { name: item.name }),
+    body: skillText('deleteCatalogConfirm', { name: item.name }),
     onConfirm: () => removeCatalog(item),
   })
 }
@@ -859,10 +1018,24 @@ function addPreviousStep() {
 }
 
 function openInstall(item: SkillCatalogItem) {
+  installMode.value = 'install'
   installCatalog.value = item
   installSessionIds.value = []
   const remaining = targetsFor(item)
   installTargetIds.value = remaining.length === 1 ? [remaining[0].id] : []
+  void loadInstallerModel()
+  showInstall.value = true
+}
+
+// Upgrading is the catalog install onto sandboxes that already carry an older
+// archive; the server treats a same-name install as an in-place upgrade. Every
+// outdated sandbox starts checked, so one confirm upgrades them all.
+function openUpgrade(item: SkillCatalogItem) {
+  openPanelId.value = ''
+  installMode.value = 'upgrade'
+  installCatalog.value = item
+  installSessionIds.value = []
+  installTargetIds.value = installsView(item).upgradable.map((inst) => inst.sandbox_config_id)
   void loadInstallerModel()
   showInstall.value = true
 }
@@ -872,62 +1045,13 @@ function openManage(item: SkillCatalogItem, inst: SkillCatalogInstall) {
   if (!record) return
   manageRecord.value = record
   manageSkillId.value = inst.skill_id
+  manageCatalogId.value = item.id
   manageTitle.value = item.name
   showManage.value = true
 }
 
 function onPanelUpdated(record: SandboxConfigRecord) {
   records.value = records.value.map((item) => (item.id === record.id ? { ...item, ...record } : item))
-}
-
-function readLastChatModelID(): string {
-  try {
-    return localStorage.getItem(LAST_CHAT_MODEL_KEY) || ''
-  } catch {
-    return ''
-  }
-}
-
-async function loadInstallerModel() {
-  try {
-    const res = await getAgentById(INSTALLER_AGENT_ID)
-    installerAgent.value = res?.data || null
-    const configured = installerAgent.value?.config?.model_id?.trim() || ''
-    installerModelId.value = configured || readLastChatModelID()
-  } catch {
-    installerAgent.value = null
-    installerModelId.value = readLastChatModelID()
-  }
-}
-
-async function persistInstallerModel(modelId: string) {
-  const id = modelId.trim()
-  if (!id) {
-    throw new Error(t('settings.sandbox.skillInstallerModelRequired'))
-  }
-  const current = installerAgent.value
-  const config = { ...(current?.config || {}), model_id: id }
-  const res = await updateAgent(INSTALLER_AGENT_ID, {
-    name: current?.name || '',
-    description: current?.description || '',
-    avatar: current?.avatar || '',
-    config,
-  })
-  installerAgent.value = res?.data || { ...(current as CustomAgent), config }
-  installerModelId.value = id
-}
-
-async function onInstallerModelChange(modelId: string) {
-  if (!modelId || modelId === '__add_model__') return
-  installerModelId.value = modelId
-  savingInstallerModel.value = true
-  try {
-    await persistInstallerModel(modelId)
-  } catch (e: any) {
-    MessagePlugin.error(e?.message || t('settings.sandbox.skillInstallerModelSaveFailed'))
-  } finally {
-    savingInstallerModel.value = false
-  }
 }
 
 async function ensureInstallerModelIfNeeded(configIds: string[]) {
@@ -1039,6 +1163,7 @@ async function handleAddPrimary() {
     revealCatalog(catalogId)
     return
   }
+  const upgrading = pickedOnlyUpgrades(addPickRows.value, targets)
   installing.value = true
   try {
     await ensureInstallerModelIfNeeded(targets)
@@ -1047,7 +1172,7 @@ async function handleAddPrimary() {
     if (failed > 0) {
       MessagePlugin.warning(t('settings.skills.installPartial', { failed }))
     } else {
-      MessagePlugin.success(t('settings.skills.installAccepted'))
+      MessagePlugin.success(t(upgrading ? 'settings.skills.upgradeAccepted' : 'settings.skills.installAccepted'))
     }
     rememberSession(addSessionIds, targets)
     await loadCatalog()
@@ -1083,6 +1208,7 @@ async function confirmInstall() {
   const item = installCatalog.value
   const targets = [...installTargetIds.value]
   if (!item || targets.length === 0) return
+  const upgrading = pickedOnlyUpgrades(installPickRows.value, targets)
   installing.value = true
   try {
     await ensureInstallerModelIfNeeded(targets)
@@ -1091,7 +1217,7 @@ async function confirmInstall() {
     if (failed > 0) {
       MessagePlugin.warning(t('settings.skills.installPartial', { failed }))
     } else {
-      MessagePlugin.success(t('settings.skills.installAccepted'))
+      MessagePlugin.success(t(upgrading ? 'settings.skills.upgradeAccepted' : 'settings.skills.installAccepted'))
     }
     rememberSession(installSessionIds, targets)
     await loadCatalog()
@@ -1148,6 +1274,7 @@ async function loadCatalog(silent = false) {
   try {
     const res = await listSkillCatalog()
     catalog.value = res?.data || []
+    emit('count', catalog.value.length)
   } catch (e: any) {
     if (!silent) MessagePlugin.error(e?.message || t('settings.skills.loadFailed'))
   } finally {
@@ -1158,8 +1285,11 @@ async function loadCatalog(silent = false) {
 async function load() {
   loading.value = true
   try {
+    await deploymentCapabilities.ensureLoaded()
+    // Lite lists no configs but still reports the workspace script policy.
     const [configRes] = await Promise.all([listSandboxConfigs(), loadCatalog()])
-    records.value = configRes?.data || []
+    records.value = hostOnly.value ? [] : configRes?.data || []
+    scriptsDisabled.value = configRes?.workspace_scripts_disabled === true
   } catch (e: any) {
     MessagePlugin.error(e?.message || t('settings.skills.loadFailed'))
   } finally {
@@ -1167,10 +1297,24 @@ async function load() {
   }
 }
 
+async function enableScripts() {
+  policySaving.value = true
+  try {
+    const res = await setSandboxWorkspacePolicy(false)
+    scriptsDisabled.value = res?.workspace_scripts_disabled === true
+    MessagePlugin.success(t('settings.sandbox.scriptsEnabled'))
+  } catch (e: any) {
+    MessagePlugin.error(e?.message || t('settings.sandbox.policySaveFailed'))
+  } finally {
+    policySaving.value = false
+  }
+}
+
 watch(showManage, (open) => {
   if (!open) {
     void loadCatalog()
     manageSkillId.value = ''
+    manageCatalogId.value = ''
     manageRecord.value = null
   } else {
     openPanelId.value = ''
@@ -1218,6 +1362,8 @@ watch(busyPickTargets, (targets) => {
 }, { immediate: true })
 
 onMounted(load)
+
+defineExpose({ openAdd })
 onUnmounted(() => {
   stopPoll()
   stopInstallProgress()
@@ -1226,12 +1372,33 @@ onUnmounted(() => {
 </script>
 
 <style lang="less" scoped>
+@import (reference) '@/components/css/provider-card.less';
+
+@import (reference) '@/components/css/settings-section.less';
+
 .skill-settings {
   width: 100%;
 }
 
+.skill-settings__scripts-off {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+  padding: 10px 12px;
+  border: 1px solid var(--td-warning-color-3);
+  border-radius: var(--app-radius-md);
+  background: var(--td-warning-color-1);
+
+  p {
+    margin: 0;
+    color: var(--td-text-color-primary);
+  }
+}
+
 .section-header {
-  margin-bottom: 28px;
+  .settings-section-header();
 
   &__title-row {
     display: flex;
@@ -1240,29 +1407,15 @@ onUnmounted(() => {
     margin-bottom: 8px;
   }
 
-  h2 {
-    font-size: 20px;
-    font-weight: 600;
-    color: var(--td-text-color-primary);
-    margin: 0;
-  }
-
   &__help {
     color: var(--td-text-color-placeholder);
-    font-size: 16px;
+    font-size: var(--app-text-xl);
     cursor: help;
-    transition: color 0.15s ease;
+    transition: color var(--app-motion-fast) ease;
 
     &:hover {
       color: var(--td-text-color-secondary);
     }
-  }
-
-  .section-description {
-    font-size: 14px;
-    color: var(--td-text-color-secondary);
-    margin: 0;
-    line-height: 1.6;
   }
 }
 
@@ -1277,10 +1430,10 @@ onUnmounted(() => {
 
 :global(.skill-install-panel-overlay .t-popup__content) {
   padding: 0 !important;
-  border-radius: 6px !important;
+  border-radius: var(--app-radius-md) !important;
   border: 1px solid var(--td-component-stroke) !important;
   background: var(--td-bg-color-container) !important;
-  box-shadow: var(--td-shadow-2, 0 3px 14px 2px rgba(0, 0, 0, 0.05)) !important;
+  box-shadow: var(--td-shadow-2) !important;
 }
 
 .loading-container {
@@ -1293,7 +1446,7 @@ onUnmounted(() => {
   text-align: center;
 
   :deep(.t-empty__description) {
-    font-size: 14px;
+    font-size: var(--app-text-base);
     color: var(--td-text-color-placeholder);
     margin-bottom: 16px;
   }
@@ -1301,7 +1454,7 @@ onUnmounted(() => {
 
 .empty-hint {
   margin: 0 0 16px;
-  font-size: 13px;
+  font-size: var(--app-text-md);
   color: var(--td-text-color-placeholder);
 }
 
@@ -1313,8 +1466,8 @@ onUnmounted(() => {
 
 .skill-list {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-  gap: 10px;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr));
+  gap: 12px;
   align-items: stretch;
 }
 
@@ -1325,20 +1478,31 @@ onUnmounted(() => {
   padding: 0;
   overflow: hidden;
   border: 1px solid var(--td-component-stroke);
-  border-radius: 10px;
+  border-radius: var(--app-radius-md);
   background: var(--td-bg-color-container);
   transition: border-color 0.18s ease, box-shadow 0.18s ease;
   min-width: 0;
   height: 100%;
 
-  &--focused {
-    border-color: var(--td-brand-color);
-    box-shadow: 0 0 0 2px var(--td-brand-color-focus, rgba(0, 168, 112, 0.18));
+  &:hover:not(.skill-card--add, .skill-card--focused) {
+    border-color: color-mix(in srgb, var(--td-brand-color) 40%, var(--td-component-stroke));
+    box-shadow: 0 3px 12px color-mix(in srgb, var(--td-text-color-primary) 6%, transparent);
   }
 
-  &--installed .skill-card__badge {
-    background: color-mix(in srgb, var(--td-brand-color) 12%, transparent);
-    color: var(--td-brand-color);
+  &--focused {
+    border-color: var(--td-brand-color);
+    box-shadow: 0 0 0 2px var(--td-brand-color-focus);
+  }
+
+  &--idle .skill-card__badge {
+    background: var(--td-bg-color-secondarycontainer);
+    color: var(--td-text-color-placeholder);
+  }
+
+  &:hover .skill-card__actions,
+  &:focus-within .skill-card__actions,
+  &--focused .skill-card__actions {
+    opacity: 1;
   }
 
   &--add {
@@ -1347,7 +1511,8 @@ onUnmounted(() => {
     justify-content: center;
     gap: 6px;
     height: 100%;
-    padding: 16px 12px;
+    min-height: 88px;
+    padding: 12px;
     border-style: dashed;
     background: transparent;
     color: var(--td-text-color-placeholder);
@@ -1374,14 +1539,14 @@ onUnmounted(() => {
       justify-content: center;
       width: 32px;
       height: 32px;
-      border-radius: 8px;
+      border-radius: var(--app-radius-md);
       background: var(--td-bg-color-secondarycontainer);
       color: var(--td-text-color-secondary);
-      font-size: 18px;
+      font-size: var(--app-text-2xl);
     }
 
     &__label {
-      font-size: 13px;
+      font-size: var(--app-text-md);
       font-weight: 500;
       line-height: 1.4;
     }
@@ -1391,23 +1556,38 @@ onUnmounted(() => {
 .skill-card__main {
   display: flex;
   align-items: stretch;
-  gap: 10px;
-  padding: 10px 12px;
+  padding: 12px 14px 8px;
   min-width: 0;
   flex: 1;
 }
 
 .skill-card__badge {
-  flex-shrink: 0;
-  align-self: flex-start;
-  width: 28px;
-  height: 28px;
-  border-radius: 7px;
+  .provider-card-badge(28px, 7px);
+  --skill-hue: var(--td-brand-color);
+  margin-top: 0;
+  font-size: var(--app-text-base);
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0;
+  background: color-mix(in srgb, var(--skill-hue) 12%, transparent);
+  color: var(--skill-hue);
+  user-select: none;
+}
+
+.skill-drawer-avatar {
+  --skill-hue: var(--td-brand-color);
   display: flex;
   align-items: center;
   justify-content: center;
-  background: var(--td-bg-color-secondarycontainer);
-  color: var(--td-text-color-secondary);
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  background: color-mix(in srgb, var(--skill-hue) 12%, var(--td-bg-color-container));
+  color: var(--skill-hue);
+  font-size: var(--app-text-md);
+  font-weight: 600;
+  line-height: 1;
+  user-select: none;
 }
 
 .skill-card__body {
@@ -1438,9 +1618,9 @@ onUnmounted(() => {
   flex: 0 1 auto;
   min-width: 0;
   margin: 0;
-  font-size: 14px;
+  font-size: var(--app-text-base);
   font-weight: 600;
-  line-height: 1.35;
+  line-height: 20px;
   color: var(--td-text-color-primary);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1452,6 +1632,12 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 2px;
+  opacity: 0;
+  transition: opacity var(--app-motion-fast) ease;
+
+  @media (hover: none) {
+    opacity: 1;
+  }
 }
 
 .skill-card__icon-btn {
@@ -1464,9 +1650,9 @@ onUnmounted(() => {
   margin: 0;
   padding: 0;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--app-radius-sm);
   background: none;
-  color: var(--td-text-color-secondary);
+  color: var(--td-text-color-placeholder);
   cursor: pointer;
 
   :deep(svg) {
@@ -1492,10 +1678,14 @@ onUnmounted(() => {
 
 .skill-card__type {
   flex-shrink: 0;
-  font-size: 12px;
+  padding: 0 6px;
+  border-radius: var(--app-radius-sm);
+  background: var(--td-bg-color-secondarycontainer);
+  font-size: var(--app-text-xs);
   font-weight: 500;
-  line-height: 1.35;
+  line-height: 18px;
   color: var(--td-text-color-placeholder);
+  font-variant-numeric: tabular-nums;
 }
 
 .skill-card__desc {
@@ -1504,45 +1694,52 @@ onUnmounted(() => {
   -webkit-line-clamp: 2;
   line-clamp: 2;
   margin: 0;
+  min-height: calc(2 * 1.5em);
   overflow: hidden;
-  font-size: 12px;
-  line-height: 1.45;
+  font-size: var(--app-text-sm);
+  line-height: 1.5;
   color: var(--td-text-color-secondary);
-  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .skill-card__installs {
   display: flex;
   align-items: center;
+  gap: 6px;
   min-width: 0;
   margin-top: auto;
+  padding-top: 6px;
+  border-top: 1px solid var(--td-component-stroke);
 }
 
 .skill-card__installs-label {
-  font-size: 12px;
-  line-height: 20px;
+  font-size: var(--app-text-sm);
+  line-height: 18px;
   color: var(--td-text-color-placeholder);
 }
 
 .skill-card__chip {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
   min-width: 0;
   max-width: 100%;
-  margin: 0;
-  padding: 3px 8px 3px 10px;
+  height: 26px;
+  margin: 0 0 0 -6px;
+  padding: 0 6px;
   border: 0;
-  border-radius: 8px;
-  background: var(--td-bg-color-secondarycontainer);
+  border-radius: var(--app-radius-sm);
+  background: transparent;
   color: var(--td-text-color-secondary);
   cursor: pointer;
   font: inherit;
-  font-size: 12px;
-  line-height: 20px;
+  font-size: var(--app-text-sm);
+  line-height: 18px;
   text-align: left;
+  transition: background-color var(--app-motion-fast) ease, color var(--app-motion-fast) ease;
 
-  &:hover:not(:disabled) {
+  &:hover:not(:disabled),
+  &[aria-expanded='true'] {
     color: var(--td-text-color-primary);
     background: var(--td-bg-color-container-hover);
   }
@@ -1554,7 +1751,29 @@ onUnmounted(() => {
 
   &--idle {
     color: var(--td-brand-color);
+
+    &:hover:not(:disabled),
+    &[aria-expanded='true'] {
+      color: var(--td-brand-color);
+      background: color-mix(in srgb, var(--td-brand-color) 8%, transparent);
+    }
+
+    .skill-card__chip-go {
+      color: var(--td-brand-color);
+    }
+  }
+
+  &--upgrade {
+    flex-shrink: 0;
+    gap: 2px;
+    margin: 0 0 0 auto;
+    height: 22px;
+    padding: 0 8px 0 6px;
+    border-radius: 999px;
+    color: var(--td-brand-color);
     background: color-mix(in srgb, var(--td-brand-color) 10%, transparent);
+    font-size: var(--app-text-xs);
+    font-weight: 500;
 
     &:hover:not(:disabled) {
       color: var(--td-brand-color);
@@ -1566,32 +1785,21 @@ onUnmounted(() => {
     }
   }
 
-  &.skill-card__entry--off {
-    color: var(--td-text-color-placeholder);
+  &.skill-card__entry--off .skill-card__chip-dot {
+    background: var(--td-text-color-disabled);
   }
 
-  &--installed .skill-card__entry-status {
-    color: var(--td-success-color, var(--td-brand-color));
-  }
-
-  &.skill-card__entry--stale {
-    background: color-mix(in srgb, var(--td-warning-color) 10%, transparent);
-
-    .skill-card__entry-status {
-      color: var(--td-warning-color);
-    }
-  }
-
-  &.skill-card__entry--failed {
-    background: color-mix(in srgb, var(--td-error-color) 10%, transparent);
-
-    .skill-card__entry-status {
-      color: var(--td-error-color);
-    }
-  }
-
-  &.skill-card__entry--busy .skill-card__entry-dot {
+  &.skill-card__entry--stale .skill-card__chip-dot {
     background: var(--td-warning-color);
+  }
+
+  &.skill-card__entry--failed .skill-card__chip-dot {
+    background: var(--td-error-color);
+  }
+
+  &.skill-card__entry--busy .skill-card__chip-dot {
+    background: var(--td-warning-color);
+    animation: skill-chip-dot 1.2s ease-in-out infinite;
   }
 }
 
@@ -1602,13 +1810,19 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 
+.skill-card button:focus-visible,
+.skill-card--add:focus-visible {
+  outline: 2px solid var(--td-brand-color);
+  outline-offset: -2px;
+}
+
 .skill-card__chip-go,
 .skill-card__entry-status {
   flex-shrink: 0;
 }
 
 .skill-card__entry--ready .skill-card__entry-status {
-  color: var(--td-success-color, var(--td-brand-color));
+  color: var(--td-success-color);
 }
 
 .skill-card__chip-go {
@@ -1617,6 +1831,32 @@ onUnmounted(() => {
 
 .skill-card__chip:hover:not(:disabled) .skill-card__chip-go {
   color: currentColor;
+}
+
+.skill-card__chip-go {
+  transition: transform var(--app-motion-fast) ease;
+
+  &.is-open {
+    transform: rotate(180deg);
+  }
+}
+
+.skill-card__chip-lead {
+  flex-shrink: 0;
+}
+
+.skill-card__chip-dot {
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--td-success-color);
+}
+
+.skill-card__chip-more {
+  flex-shrink: 0;
+  color: var(--td-text-color-placeholder);
+  font-variant-numeric: tabular-nums;
 }
 
 .skill-card__entry-dot {
@@ -1630,19 +1870,29 @@ onUnmounted(() => {
 .skill-install-panel {
   display: flex;
   flex-direction: column;
-  width: 240px;
+  width: 280px;
   max-width: calc(100vw - 32px);
-  max-height: min(360px, 70vh);
+  max-height: min(380px, 70vh);
   overflow-y: auto;
-  padding: 4px 0;
+  padding: 6px;
+  box-sizing: border-box;
 }
 
 .skill-install-panel__group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   margin: 0;
-  padding: 6px 12px 4px;
-  font-size: 12px;
-  line-height: 20px;
+  padding: 4px 8px 4px;
+  font-size: var(--app-text-xs);
+  font-weight: 500;
+  line-height: 18px;
   color: var(--td-text-color-placeholder);
+}
+
+.skill-install-panel__group-count {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.8;
 }
 
 .skill-install-panel__item {
@@ -1650,20 +1900,22 @@ onUnmounted(() => {
   align-items: center;
   gap: 8px;
   width: 100%;
-  height: 32px;
-  margin: 0;
-  padding: 0 12px;
+  min-height: 34px;
+  margin: 0 0 1px;
+  padding: 0 8px;
   border: 0;
-  border-radius: 0;
+  border-radius: var(--app-radius-sm);
   background: none;
   color: var(--td-text-color-primary);
   cursor: pointer;
   font: inherit;
-  font-size: 13px;
+  font-size: var(--app-text-md);
   line-height: 22px;
   text-align: left;
+  transition: background-color var(--app-motion-fast) ease;
 
-  &:hover:not(:disabled) {
+  &:hover:not(:disabled),
+  &:focus-visible {
     background: var(--td-bg-color-container-hover);
   }
 
@@ -1672,21 +1924,27 @@ onUnmounted(() => {
     opacity: 0.5;
   }
 
-  &.skill-card__entry--stale .skill-card__entry-status {
-    color: var(--td-warning-color);
+  &.skill-card__entry--off .skill-install-panel__name {
+    color: var(--td-text-color-placeholder);
   }
 
-  &.skill-card__entry--failed .skill-card__entry-status {
+  &.skill-card__entry--stale .skill-install-panel__status {
+    color: var(--td-warning-color);
+    background: color-mix(in srgb, var(--td-warning-color) 10%, transparent);
+  }
+
+  &.skill-card__entry--failed .skill-install-panel__status {
     color: var(--td-error-color);
+    background: color-mix(in srgb, var(--td-error-color) 10%, transparent);
+  }
+
+  &.skill-card__entry--busy .skill-install-panel__status {
+    color: var(--td-warning-color);
   }
 
   &.skill-card__entry--busy .skill-card__entry-dot {
     background: var(--td-warning-color);
   }
-}
-
-.skill-install-panel__item--available {
-  color: var(--td-text-color-secondary);
 }
 
 .skill-install-panel__name {
@@ -1697,18 +1955,77 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 
-.skill-install-panel__add {
+.skill-install-panel__status {
   flex-shrink: 0;
-  color: var(--td-text-color-placeholder);
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  max-width: 120px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--td-bg-color-secondarycontainer);
+  color: var(--td-text-color-secondary);
+  font-size: var(--app-text-xs);
+  line-height: 18px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.skill-install-panel__item--available:hover .skill-install-panel__add {
+.skill-install-panel__go {
+  flex-shrink: 0;
+  margin-right: -2px;
+  color: var(--td-text-color-placeholder);
+  opacity: 0;
+  transition: opacity var(--app-motion-fast) ease;
+}
+
+.skill-install-panel__item:hover:not(:disabled) .skill-install-panel__go,
+.skill-install-panel__item:focus-visible .skill-install-panel__go {
+  opacity: 1;
+}
+
+.skill-install-panel__item--available {
+  color: var(--td-text-color-secondary);
+
+  :deep(.sandbox-badge) {
+    filter: grayscale(1);
+    opacity: 0.7;
+    transition: filter var(--app-motion-fast) ease, opacity var(--app-motion-fast) ease;
+  }
+
+  &:hover,
+  &:focus-visible {
+    color: var(--td-text-color-primary);
+
+    :deep(.sandbox-badge) {
+      filter: none;
+      opacity: 1;
+    }
+  }
+}
+
+.skill-install-panel__add {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-size: var(--app-text-xs);
+  font-weight: 500;
+  line-height: 18px;
   color: var(--td-brand-color);
+  opacity: 0;
+  transition: opacity var(--app-motion-fast) ease;
+}
+
+.skill-install-panel__item--available:hover .skill-install-panel__add,
+.skill-install-panel__item--available:focus-visible .skill-install-panel__add {
+  opacity: 1;
 }
 
 .skill-install-panel__split {
   height: 1px;
-  margin: 4px 0;
+  margin: 5px 2px;
   background: var(--td-component-stroke);
 }
 
@@ -1726,7 +2043,7 @@ onUnmounted(() => {
 
 .installer-model-hint {
   margin: 0;
-  font-size: 12px;
+  font-size: var(--app-text-sm);
   line-height: 1.5;
   color: var(--td-text-color-secondary);
 }
@@ -1748,7 +2065,7 @@ onUnmounted(() => {
   gap: 8px;
   min-width: 0;
   color: var(--td-text-color-placeholder);
-  transition: color 0.15s ease;
+  transition: color var(--app-motion-fast) ease;
 
   &:not(:last-child) {
     flex: 1;
@@ -1777,7 +2094,7 @@ onUnmounted(() => {
     &:focus-visible {
       outline: 2px solid var(--td-brand-color);
       outline-offset: 2px;
-      border-radius: 4px;
+      border-radius: var(--app-radius-xs);
     }
   }
 }
@@ -1791,7 +2108,7 @@ onUnmounted(() => {
   flex-shrink: 0;
   border: 1px solid currentColor;
   border-radius: 50%;
-  font-size: 11px;
+  font-size: var(--app-text-xs);
   font-weight: 600;
   line-height: 1;
 
@@ -1810,7 +2127,7 @@ onUnmounted(() => {
 
 .skill-add-step__title {
   overflow: hidden;
-  font-size: 13px;
+  font-size: var(--app-text-md);
   font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1844,7 +2161,7 @@ onUnmounted(() => {
     align-items: center;
     padding: 10px 12px;
     border: 1px solid var(--td-component-stroke);
-    border-radius: 10px;
+    border-radius: var(--app-radius-lg);
     background: var(--td-bg-color-container);
     cursor: pointer;
     box-sizing: border-box;
@@ -1891,7 +2208,7 @@ onUnmounted(() => {
   box-sizing: border-box;
   padding: 10px 12px;
   border: 1px solid var(--td-component-stroke);
-  border-radius: 10px;
+  border-radius: var(--app-radius-lg);
   background: var(--td-bg-color-container);
 
   .sandbox-pick__main {
@@ -1924,7 +2241,7 @@ onUnmounted(() => {
 }
 
 .sandbox-pick__name {
-  font-size: 13px;
+  font-size: var(--app-text-md);
   font-weight: 500;
   color: var(--td-text-color-primary);
   line-height: 1.3;
@@ -1934,7 +2251,7 @@ onUnmounted(() => {
 }
 
 .sandbox-pick__meta {
-  font-size: 12px;
+  font-size: var(--app-text-sm);
   color: var(--td-text-color-secondary);
   line-height: 1.3;
   overflow: hidden;
@@ -1946,7 +2263,7 @@ onUnmounted(() => {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-size: 12px;
+  font-size: var(--app-text-sm);
   font-weight: 500;
   line-height: 1;
   color: var(--td-brand-color);
@@ -1966,9 +2283,9 @@ onUnmounted(() => {
 
 .file-upload-area {
   border: 1px dashed var(--td-component-stroke);
-  border-radius: 10px;
+  border-radius: var(--app-radius-lg);
   cursor: pointer;
-  transition: border-color 0.15s ease, background 0.15s ease;
+  transition: border-color var(--app-motion-fast) ease, background var(--app-motion-fast) ease;
 
   &:hover:not(.is-disabled) {
     border-color: var(--td-brand-color);
@@ -2011,18 +2328,18 @@ onUnmounted(() => {
 }
 
 .upload-primary-text {
-  font-size: 15px;
+  font-size: var(--app-text-lg);
   font-weight: 500;
   color: var(--td-text-color-primary);
 }
 
 .upload-secondary-text {
-  font-size: 13px;
+  font-size: var(--app-text-md);
   color: var(--td-text-color-secondary);
 }
 
 .upload-file-name {
-  font-size: 14px;
+  font-size: var(--app-text-base);
   font-weight: 500;
   color: var(--td-brand-color);
 }

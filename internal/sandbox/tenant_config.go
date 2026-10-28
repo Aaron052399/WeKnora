@@ -60,7 +60,14 @@ func ResolveEffectiveConfig(
 		effective.Type = resolved
 	}
 	overrideSeconds(&effective.DefaultTimeout, tenantCfg.DefaultTimeoutSec)
+	// Terminal idle is workspace policy, not a deployment default: an omitted
+	// value must fall back to the built-in 15 minutes, never to whatever the
+	// process Config happened to carry.
+	effective.TerminalIdleDisconnect = 0
+	overrideSeconds(&effective.TerminalIdleDisconnect, tenantCfg.TerminalIdleDisconnectSec)
+	effective.TerminalIdleDisconnect = EffectiveTerminalIdleDisconnect(effective.TerminalIdleDisconnect)
 	effective.AllowPrivateEndpoints = tenantCfg.AllowPrivateEndpoints
+	effective.DesktopEnabled = tenantCfg.DesktopEnabled
 	effective.Network = resolveNetworkPolicy(tenantCfg.Network)
 	if tenantCfg.EnvVars != nil {
 		effective.EnvVars = cloneMetadata(tenantCfg.EnvVars)
@@ -128,22 +135,25 @@ func ResolveEffectiveConfig(
 	case SandboxTypeDocker:
 		applyDockerRuntimeDefaults(&effective)
 	}
-	// A skill snapshot is a template ID (Cube/E2B) or an image tag (Docker),
-	// so overriding that field here is the entire session-side change.
-	// Everything downstream keeps reading CubeTemplate / E2BTemplate /
-	// DockerImage and needs no knowledge of skills.
+	// A skill snapshot is a template ID (Cube/E2B) or an image tag (Docker).
+	// Downstream still reads CubeTemplate / E2BTemplate / DockerImage.
+	// TemplateFromSnapshot tells the E2B adapter this ID is a snapshot, so it
+	// can omit the env and function-config fields Aliyun refuses to override.
+	effective.TemplateFromSnapshot = false
 	switch effective.Type {
 	case SandboxTypeCube:
 		if snapshot := skillImageTemplateOverride(
 			tenantCfg.SkillImage, "cube", effective.CubeAPIKey, effective.CubeAPIURL,
 		); snapshot != "" {
 			effective.CubeTemplate = snapshot
+			effective.TemplateFromSnapshot = true
 		}
 	case SandboxTypeE2B:
 		if snapshot := skillImageTemplateOverride(
 			tenantCfg.SkillImage, "e2b", effective.E2BAPIKey, effective.E2BAPIURL,
 		); snapshot != "" {
 			effective.E2BTemplate = snapshot
+			effective.TemplateFromSnapshot = true
 		}
 	case SandboxTypeDocker:
 		// Deliberately computed from the STORED docker block, not from
@@ -235,6 +245,8 @@ func ParseSandboxType(raw string) (SandboxType, error) {
 		return SandboxTypeE2B, nil
 	case SandboxTypeDocker:
 		return SandboxTypeDocker, nil
+	case SandboxTypeHost:
+		return SandboxTypeHost, nil
 	case SandboxTypeDisabled:
 		return SandboxTypeDisabled, nil
 	default:

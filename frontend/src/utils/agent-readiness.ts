@@ -1,5 +1,6 @@
 import type { CustomAgentConfig } from '@/api/agent'
 import type { ModelConfig } from '@/api/model'
+import { allowedToolsInclude } from './legacy-tool-names'
 
 export type AgentNotReadyReasonKey = 'summary_model' | 'rerank_model' | 'allowed_tools'
 
@@ -25,21 +26,23 @@ export function agentHasConfiguredChatModel(
 /**
  * Keep this aligned with backend agentRequiresRerankModel.
  *
- * Rerank is needed only when knowledge_search can actually run. Explicitly
+ * Rerank is needed only when search_knowledge can actually run. Explicitly
  * disabling the knowledge-base scope makes KB tools ineffective, even if an
- * older agent configuration still contains knowledge_search in allowed_tools.
+ * older agent configuration still contains the tool in allowed_tools.
+ *
+ * Stored configs may still carry the retired `knowledge_search` name (and
+ * `grep_chunks`, which was folded into search_knowledge); those count too.
  */
 export function agentRequiresRerankModel(
   config: Pick<CustomAgentConfig, 'kb_selection_mode' | 'allowed_tools'> | undefined,
 ): boolean {
   if (!config || config.kb_selection_mode === 'none') return false
 
-  const allowedTools = config.allowed_tools || []
-  // The backend falls back to DefaultAllowedTools when the list is empty,
-  // and that default includes knowledge_search.
-  if (allowedTools.length === 0) return true
+  // An unset list selects the backend's DefaultAllowedTools, which include
+  // search_knowledge. An empty list registers no built-in tool.
+  if (config.allowed_tools == null) return true
 
-  return allowedTools.includes('knowledge_search')
+  return allowedToolsInclude(config.allowed_tools, 'search_knowledge')
 }
 
 export function getAgentNotReadyReasonKeys(

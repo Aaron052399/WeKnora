@@ -83,7 +83,8 @@
             v-if="props.boundStatus === 'unavailable'"
             class="option-hint change-warning"
           >
-            {{ $t('kbSettings.vectorStore.unavailableHint') }}
+            <t-icon name="error-circle" class="option-hint-icon" />
+            <span>{{ $t('kbSettings.vectorStore.unavailableHint') }}</span>
           </p>
         </div>
       </div>
@@ -186,14 +187,14 @@ onMounted(async () => {
   margin-bottom: 20px;
 
   h2 {
-    font-size: 20px;
+    font-size: var(--app-text-3xl);
     font-weight: 600;
     color: var(--td-text-color-primary);
     margin: 0 0 6px 0;
   }
 
   .section-description {
-    font-size: 14px;
+    font-size: var(--app-text-base);
     color: var(--td-text-color-secondary);
     margin: 0;
     line-height: 1.5;
@@ -205,7 +206,7 @@ onMounted(async () => {
   align-items: center;
   gap: 8px;
   padding: 16px 0;
-  font-size: 13px;
+  font-size: var(--app-text-md);
   color: var(--td-text-color-secondary);
 }
 
@@ -232,7 +233,7 @@ onMounted(async () => {
   padding-right: 24px;
 
   label {
-    font-size: 15px;
+    font-size: var(--app-text-lg);
     font-weight: 500;
     color: var(--td-text-color-primary);
     display: block;
@@ -240,7 +241,7 @@ onMounted(async () => {
   }
 
   .desc {
-    font-size: 13px;
+    font-size: var(--app-text-md);
     color: var(--td-text-color-secondary);
     margin: 0;
     line-height: 1.5;
@@ -263,19 +264,28 @@ onMounted(async () => {
 }
 
 .option-hint {
-  font-size: 12px;
+  font-size: var(--app-text-sm);
   color: var(--td-text-color-placeholder);
   margin: 0;
   line-height: 1.4;
 
   &.change-warning {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
     color: var(--td-warning-color);
+  }
+
+  .option-hint-icon {
+    flex-shrink: 0;
+    margin-top: 1px;
+    font-size: var(--app-text-base);
   }
 }
 
 .go-settings {
-  font-size: 13px;
-  color: var(--td-brand-color, #0052d9);
+  font-size: var(--app-text-md);
+  color: var(--td-brand-color);
   margin-top: 8px;
   text-decoration: none;
 
