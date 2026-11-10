@@ -530,6 +530,21 @@ func TestBuildSessionCreateRequestMarksSkillSnapshot(t *testing.T) {
 	require.NotEmpty(t, request.EnvVars["WEKNORA_SKILL_OUTPUT_DIR"])
 }
 
+// Cube's idle timeout must destroy the sandbox, not pause it: a paused MVM
+// keeps its slot on the node, so abandoned sessions starve the quota. The two
+// fields move together because the adapter rejects autoResume without pause.
+func TestBuildSessionCreateRequestCubeKillsOnIdleTimeout(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Type = SandboxTypeCube
+	cfg.CubeTemplate = "tpl-1"
+
+	request, err := buildSessionCreateRequest(SandboxTypeCube, cfg)
+
+	require.NoError(t, err)
+	require.Equal(t, RemoteOnTimeoutKill, request.Timeout.Action)
+	require.False(t, request.Timeout.AutoResume)
+}
+
 func newSessionManagerExecTestHarness(t *testing.T) (*SessionBoundManager, *fakeRemoteClient) {
 	t.Helper()
 

@@ -2488,8 +2488,8 @@ func buildSessionCreateRequest(provider RemoteProvider, cfg *Config) (RemoteCrea
 			Timeout: RemoteTimeoutPolicy{
 				Mode:       RemoteTimeoutExplicit,
 				Value:      ttl,
-				Action:     RemoteOnTimeoutPause,
-				AutoResume: true,
+				Action:     RemoteOnTimeoutKill,
+				AutoResume: false,
 			},
 		}, nil
 
