@@ -6,15 +6,15 @@ ARG APK_MIRROR_ARG
 # This base image has no CA certificates. Install them from the original HTTP
 # Debian source before swapping in a mirror: mirrors.tencent.com redirects
 # apt to HTTPS, and that handshake fails without a trust store.
-RUN if [ -n "$APK_MIRROR_ARG" ]; then \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    if [ -n "$APK_MIRROR_ARG" ]; then \
         apt-get update && \
         apt-get install -y --no-install-recommends ca-certificates && \
-        rm -rf /var/lib/apt/lists/* && \
         sed -i "s@deb.debian.org@${APK_MIRROR_ARG}@g" /etc/apt/sources.list.d/debian.sources; \
     fi && \
     apt-get update && \
-    apt-get install -y --no-install-recommends git python3 ca-certificates curl build-essential cmake pkg-config && \
-    rm -rf /var/lib/apt/lists/*
+    apt-get install -y --no-install-recommends git python3 ca-certificates curl build-essential cmake pkg-config
 ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo
 ENV PATH=/usr/local/cargo/bin:$PATH
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
@@ -24,12 +24,16 @@ ENV CARGO_REGISTRIES_CRATES_IO_INDEX=${CARGO_INDEX_ARG}
 # rustup 工具链下载同样走 rsproxy（build_browserskill.sh 内有自己的 rustup-init 调用）
 ENV RUSTUP_DIST_SERVER=https://rsproxy.cn RUSTUP_UPDATE_ROOT=https://rsproxy.cn/rustup
 # browserskill 内 pnpm 装依赖同样切国内源（pnpm 认 npm_config_registry）
-ARG NPM_REGISTRY=https://registry.npmmirror.com
+ARG NPM_REGISTRY=https://registry.npmjs.org
 ENV npm_config_registry=${NPM_REGISTRY}
 COPY scripts/build_browserskill.sh scripts/browserskill-release.json ./scripts/
 ARG TARGETOS
 ARG TARGETARCH
-RUN bash scripts/build_browserskill.sh /opt/weknora/browserskill "${TARGETOS}/${TARGETARCH}"
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store,sharing=locked \
+    --mount=type=cache,target=/root/.npm/_npx,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    bash scripts/build_browserskill.sh /opt/weknora/browserskill "${TARGETOS}/${TARGETARCH}"
 
 # Build stage
 FROM golang:1.26-bookworm AS builder
@@ -48,7 +52,9 @@ ENV GOPROXY=${GOPROXY_ARG}
 ENV GOSUMDB=${GOSUMDB_ARG}
 
 # Install dependencies
-RUN if [ -n "$APK_MIRROR_ARG" ]; then \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    if [ -n "$APK_MIRROR_ARG" ]; then \
         sed -i "s@deb.debian.org@${APK_MIRROR_ARG}@g" /etc/apt/sources.list.d/debian.sources; \
     fi && \
     apt-get update && \
@@ -125,15 +131,18 @@ COPY --from=browserskill /opt/weknora/browserskill /opt/weknora/browserskill
 RUN useradd -m -s /bin/bash appuser
 
 # Install ca-certificates (use mirror if specified to avoid network issues)
-RUN if [ -n "$APK_MIRROR_ARG" ]; then \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    if [ -n "$APK_MIRROR_ARG" ]; then \
         sed -i "s@deb.debian.org@${APK_MIRROR_ARG}@g" /etc/apt/sources.list.d/debian.sources; \
     fi && \
     apt-get update && \
-    apt-get install -y --no-install-recommends ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
+    apt-get install -y --no-install-recommends ca-certificates
 
 # Then switch to mirror if specified and install other packages
-RUN if [ -n "$APK_MIRROR_ARG" ]; then \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    if [ -n "$APK_MIRROR_ARG" ]; then \
         sed -i "s@deb.debian.org@${APK_MIRROR_ARG}@g" /etc/apt/sources.list.d/debian.sources; \
     fi && \
     apt-get update && \
@@ -149,9 +158,7 @@ RUN if [ -n "$APK_MIRROR_ARG" ]; then \
     curl -LsSf https://astral.sh/uv/install.sh | CARGO_HOME=/home/appuser/.cargo UV_INSTALL_DIR=/home/appuser/.local/bin sh && \
     chown -R appuser:appuser /home/appuser && \
     ln -sf /home/appuser/.local/bin/uvx /usr/local/bin/uvx && \
-    chmod +x /usr/local/bin/uvx && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+    chmod +x /usr/local/bin/uvx
 
 # Create data directories and set permissions
 RUN mkdir -p /data/files && \
